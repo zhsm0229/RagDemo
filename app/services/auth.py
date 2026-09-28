@@ -3,6 +3,8 @@
 锁定策略（standards §5.4）：连续失败 5 次触发持久锁（users.failed_attempts /
 locked_until，进程重启不丢），锁 15 分钟，锁定窗口内正确密码同样拒绝，锁定写
 审计；限流为进程内滑动窗口（IP+用户名双键），进程重启只丢窗口不丢锁定状态。
+未知用户名路径同样执行一次 bcrypt 校验（AUTH-08，作用于模块级 _DUMMY_HASH）：
+拉平与真实用户路径的响应耗时，防用户名枚举时序探测。
 处置判定收敛为纯函数 evaluate_login 便于 TDD；时间一律经可注入 Clock。
 """
 
@@ -34,6 +36,10 @@ ACTION_LOCK: str = "lock"  # 达上限：写 locked_until 持久锁
 
 _MSG_BAD_CREDENTIALS = "用户名或密码错误"
 _MSG_LOCKED = "账号已锁定，请 15 分钟后重试或联系管理员解锁"
+
+# AUTH-08 时序拉平基准：未知用户名路径也跑一次同成本 bcrypt 校验（bcrypt 12 轮），
+# 使"用户不存在"与"密码错误"的响应耗时同量级，无法从耗时差枚举用户名。
+_DUMMY_HASH: str = hash_password("dummy-password-for-timing")
 
 
 def evaluate_login(attempts: int, max_attempts: int = MAX_LOGIN_ATTEMPTS) -> str:
@@ -103,7 +109,8 @@ def login(
 
     成功清零计数并签发 access_token_expire_minutes 有效期令牌（本函数 commit）；
     失败路径先落计数/锁定与审计再抛 ApiError，保证状态与留痕一致。未知用户名
-    与密码错误同码同文案（不提示账号是否存在；计数只对真实存在的账号累计）。
+    与密码错误同码同文案且同验密耗时（AUTH-08：前者作用于 _DUMMY_HASH）；
+    计数只对真实存在的账号累计。
     """
     effective_clock = clock if clock is not None else get_clock()
     now = effective_clock.now()
@@ -114,6 +121,7 @@ def login(
         raise ApiError(ERR_PARAM_INVALID, "密码长度不能超过 72 字节", 422)
     user = session.scalars(select(User).where(User.username == username)).first()
     if user is None:
+        verify_password(password, _DUMMY_HASH)  # AUTH-08：结果必为假，只为拉平验密耗时
         raise ApiError(ERR_INVALID_CREDENTIALS, _MSG_BAD_CREDENTIALS, 401)
     if user.locked_until is not None and user.locked_until > now:
         raise ApiError(ERR_ACCOUNT_LOCKED, _MSG_LOCKED, 401)

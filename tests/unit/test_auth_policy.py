@@ -1,18 +1,26 @@
-"""鉴权策略纯函数单测：锁定判定 evaluate_login 与滑动窗口限流器（TDD 入口，无 DB/app）。
+"""鉴权策略单测：锁定判定 evaluate_login、滑动窗口限流器、登录失败路径时序一致性（无 pg）。
 
 evaluate_login 的全值域穷举保证服务层失败路径的处置（提示剩余次数 / 触发持久锁）
 可精确推导；限流器用注入 FakeClock 冻结时间验证窗口滑动，不同键互不影响。
+未知用户名路径（AUTH-08）用 SQLite 内存库只建 users 表验证 dummy-hash 时序拉平。
 """
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
 from app.core.clock import FakeClock
+from app.core.errors import ERR_INVALID_CREDENTIALS, ApiError
+from app.db.models import User
+from app.services import auth
 from app.services.auth import (
+    _DUMMY_HASH,
     ACTION_ALLOW,
     ACTION_LOCK,
     ACTION_REJECT,
     SlidingWindowLimiter,
     evaluate_login,
+    login,
 )
 
 
@@ -49,3 +57,30 @@ def test_sliding_window_limiter_window_and_keys() -> None:
     assert limiter.hit("ip|alice") is True
     limiter.reset()
     assert limiter.hit("ip|alice") is True  # reset 后从零计数
+
+
+def test_login_unknown_user_verifies_dummy_hash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AUTH-08 时序防探测：未知用户名路径必经一次 bcrypt 校验（作用于 dummy hash），
+    且失败语义不变（2001/401、同文案）——用户是否存在无法从响应耗时探测。"""
+    engine = create_engine("sqlite://")
+    User.__table__.create(engine)  # 只建 users 表：单测无需 pgvector 等 pg 专有类型
+    calls: list[tuple[str, str]] = []
+    real_verify = auth.verify_password
+
+    def spy(pw: str, hashed: str) -> bool:
+        calls.append((pw, hashed))
+        return real_verify(pw, hashed)
+
+    monkeypatch.setattr(auth, "verify_password", spy)
+    limiter = SlidingWindowLimiter(window_seconds=60, max_events=10, clock=FakeClock())
+    try:
+        with Session(engine) as db, pytest.raises(ApiError) as ei:
+            login(db, "no_such_user", "任意密码", ip="203.0.113.9", limiter=limiter)
+    finally:
+        engine.dispose()
+
+    assert len(calls) == 1  # 失败路径恰好一次校验：与真实用户验密耗时同量级
+    assert calls[0] == ("任意密码", _DUMMY_HASH)  # 作用于 dummy hash：库中并无该用户行
+    assert real_verify("任意密码", _DUMMY_HASH) is False  # dummy hash 不匹配任何口令
+    assert (ei.value.code, ei.value.http_status) == (ERR_INVALID_CREDENTIALS, 401)
+    assert ei.value.message == "用户名或密码错误"  # 与已知用户密码错误同码同文案
