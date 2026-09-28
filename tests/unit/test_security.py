@@ -125,9 +125,7 @@ class TestToken:
         assert decode_token(_token(fake_clock), WRONG_SECRET) is None
 
     @pytest.mark.parametrize("missing", ["exp", "sub", "role", "dept", "jti"])
-    def test_missing_claim_token_decodes_to_none(
-        self, fake_clock: FakeClock, missing: str
-    ) -> None:
+    def test_missing_claim_token_decodes_to_none(self, fake_clock: FakeClock, missing: str) -> None:
         claims = _full_claims()
         del claims[missing]  # 签名仍合法：签名对象是完整字节串，缺 claim 不影响签名校验
         assert decode_token(_signed(claims), SECRET) is None
