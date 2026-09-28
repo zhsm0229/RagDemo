@@ -61,6 +61,39 @@ class TestPasswordHashing:
         assert verify_password(wrong, hash_password(password)) is False
 
 
+class TestPassword72ByteLimit:
+    """bcrypt 算法上限 72 字节：现状固化（hash 抛 ValueError / verify 返回 False），API 层负责校验。"""
+
+    def test_exactly_72_bytes_hashes_and_verifies(self) -> None:
+        pw = "a" * 72
+        assert verify_password(pw, hash_password(pw)) is True
+
+    def test_73_bytes_hash_raises_value_error(self) -> None:
+        with pytest.raises(ValueError):
+            hash_password("a" * 73)
+
+    def test_73_bytes_verify_returns_false_not_raise(self) -> None:
+        hashed = hash_password("a" * 72)
+        assert verify_password("a" * 73, hashed) is False
+
+
+def _signed(claims: dict[str, object]) -> str:
+    """用测试秘钥签发任意 claims（签名合法），用于构造缺 claim/坏 claim 的令牌。"""
+    return jwt.encode(claims, SECRET, algorithm="HS256")
+
+
+def _full_claims() -> dict[str, object]:
+    iat = int(FakeClock().now().timestamp())
+    return {
+        "sub": str(USER_ID),
+        "role": ROLE,
+        "dept": str(DEPT_ID),
+        "exp": iat + 30 * 60,
+        "iat": iat,
+        "jti": "f" * 32,
+    }
+
+
 class TestToken:
     def test_create_then_decode_roundtrip(self, fake_clock: FakeClock) -> None:
         payload = decode_token(_token(fake_clock), SECRET)
@@ -90,6 +123,24 @@ class TestToken:
 
     def test_wrong_secret_decodes_to_none(self, fake_clock: FakeClock) -> None:
         assert decode_token(_token(fake_clock), WRONG_SECRET) is None
+
+    @pytest.mark.parametrize("missing", ["exp", "sub", "role", "dept", "jti"])
+    def test_missing_claim_token_decodes_to_none(
+        self, fake_clock: FakeClock, missing: str
+    ) -> None:
+        claims = _full_claims()
+        del claims[missing]  # 签名仍合法：签名对象是完整字节串，缺 claim 不影响签名校验
+        assert decode_token(_signed(claims), SECRET) is None
+
+    @pytest.mark.parametrize(
+        ("claim", "bad_value"),
+        [("sub", "abc"), ("dept", "xyz"), ("exp", "not-a-number")],
+    )
+    def test_malformed_claim_token_decodes_to_none(
+        self, fake_clock: FakeClock, claim: str, bad_value: str
+    ) -> None:
+        claims = _full_claims() | {claim: bad_value}  # 签名合法但 claim 非数值
+        assert decode_token(_signed(claims), SECRET) is None
 
 
 class TestCreateTokenClaims:

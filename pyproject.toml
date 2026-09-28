@@ -13,7 +13,7 @@ dependencies = [
     "sqlalchemy",
     "psycopg[binary]",
     "alembic",
-    "passlib[bcrypt]",
+    "bcrypt>=5.0",
     "pyjwt",
     "python-multipart",
     "python-docx",
