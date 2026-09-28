@@ -15,13 +15,18 @@ on:
     branches: [main]
   pull_request:
 
+# 最小权限（§6 安全规范）：GITHUB_TOKEN 全局只读 contents:read；gitleaks-action
+# 仅需读仓库与扫描，不开 issue-comment 等额外权限，后续确需再按 job 单独放开。
+permissions:
+  contents: read
+
 jobs:
   # ---------- ① lint：ruff（后端静态检查，本地等价 `make lint`） ----------
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0（SHA pin，防 tag 漂移）
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0（SHA pin）
         with:
           python-version: "3.12"
       - name: Install ruff
@@ -36,8 +41,8 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0（SHA pin，防 tag 漂移）
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0（SHA pin）
         with:
           python-version: "3.12"
       - name: Install project + mypy
@@ -71,8 +76,8 @@ jobs:
       # CI 占位 JWT_SECRET（仅测试用，≥32 字符；env 优先级高于 .env 文件值）
       JWT_SECRET: ci-placeholder-secret-0123456789abcdef0123456789abcdef
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0（SHA pin，防 tag 漂移）
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0（SHA pin）
         with:
           python-version: "3.12"
           cache: pip
@@ -87,7 +92,7 @@ jobs:
           pytest --cov=app/rag --cov=app/services --cov-fail-under=70
           --cov-report=term-missing --cov-report=xml
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2（SHA pin）
         if: always()
         with:
           name: coverage-report
@@ -100,10 +105,10 @@ jobs:
   security:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0（SHA pin，防 tag 漂移）
         with:
           fetch-depth: 0 # gitleaks 全历史扫描
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0（SHA pin）
         with:
           python-version: "3.12"
           cache: pip
@@ -112,7 +117,7 @@ jobs:
       - name: pip-audit
         run: pip-audit --skip-editable # 审计全部已装依赖，跳过本仓库 editable 包自身
       - name: gitleaks
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9（v2 分支头 commit，SHA pin）
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -120,6 +125,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0（SHA pin，防 tag 漂移）
       - name: Docker build
         run: docker build -f Dockerfile -t "ragdemo:${GITHUB_REF_NAME}-${GITHUB_SHA::7}" .

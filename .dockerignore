@@ -1,0 +1,8 @@
+# 最小构建上下文排除（Task 16）：镜像只装 pyproject/app/alembic，其余一律不进
+# 构建上下文——防密钥（.env）与本地垃圾进层，也加速 build。
+.venv/
+.git/
+.mimosa/
+**/__pycache__/
+data/
+.env
