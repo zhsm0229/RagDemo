@@ -22,7 +22,9 @@ def pytest_terminal_summary(terminalreporter: Any) -> None:  # pytest 未导出 
         missing: list[str] = module.missing_samples()
     except (OSError, ValueError, AssertionError, ImportError) as exc:
         # 汇总钩子不因清单损坏中断测试报告，但缺失信息必须显式可见（禁静默）
-        terminalreporter.section("黄金样本缺失清单读取失败（请检查 golden/manifest.json）", red=True)
+        terminalreporter.section(
+            "黄金样本缺失清单读取失败（请检查 golden/manifest.json）", red=True
+        )
         terminalreporter.write_line(f"{type(exc).__name__}: {exc}")
         return
     if not missing:

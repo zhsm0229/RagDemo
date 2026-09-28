@@ -157,9 +157,7 @@ def list_documents(
     if keyword:
         like = f"%{keyword}%"
         filters.append(or_(Document.title.ilike(like), Document.original_filename.ilike(like)))
-    stmt = select(Document, Department.code).join(
-        Department, Document.dept_id == Department.id
-    )
+    stmt = select(Document, Department.code).join(Department, Document.dept_id == Department.id)
     if filters:
         stmt = stmt.where(*filters)
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))

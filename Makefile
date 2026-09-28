@@ -9,6 +9,7 @@ install:
 
 lint:
 	$(PY) -m ruff check app tests
+	$(PY) -m ruff format --check app tests
 
 fmt:
 	$(PY) -m ruff check --fix app tests

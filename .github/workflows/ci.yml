@@ -33,6 +33,8 @@ jobs:
         run: pip install ruff==0.16.9 # 与本地 .venv 同版本，避免规则漂移
       - name: Ruff check
         run: ruff check app tests
+      - name: Ruff format check (standards §20.2)
+        run: ruff format --check app tests
 
   # ---------- ② type：mypy 宽松模式，限 rag/services/core ----------
   # 起步期 continue-on-error：mypy 首跑大概率报存量类型问题，§20.2 未强制 type

@@ -219,7 +219,9 @@ def test_upload_missing_metadata_field_level_422(client, session, sandbox_storag
     resp = client.post(
         "/api/documents",
         data={"dept": "service", "effectiveDate": "2026-09-01", "complianceConfirmed": "true"},
-        files={"file": ("m.docx", _docx_bytes([("第一章 总则", [_filler("总则", 18)])]), DOCX_MIME)},
+        files={
+            "file": ("m.docx", _docx_bytes([("第一章 总则", [_filler("总则", 18)])]), DOCX_MIME)
+        },
     )
     assert resp.status_code == 422
     body = resp.json()
@@ -295,9 +297,9 @@ def test_list_filters_and_pagination(client, session, sandbox_storage, test_mode
     admin_login(client, session)
     id_a = post_document(client, title="客服_考勤制度_20260901").json()["data"]["id"]
     id_b = post_document(client, title="人力_薪酬制度_20260901", dept="hr").json()["data"]["id"]
-    id_c = post_document(
-        client, title="客服_空白件_20260901", content=_empty_docx()
-    ).json()["data"]["id"]
+    id_c = post_document(client, title="客服_空白件_20260901", content=_empty_docx()).json()[
+        "data"
+    ]["id"]
 
     default_list = client.get("/api/documents").json()["data"]
     assert (default_list["total"], default_list["page"], default_list["pageSize"]) == (3, 1, 20)
@@ -345,9 +347,9 @@ def test_list_page_bounds_422(client, session, sandbox_storage, test_mode):
 def test_retry_reruns_failed_document_and_guards(client, session, sandbox_storage, test_mode):
     """失败件重试：编排确实重跑（审计再落 failed）；ready 件拒绝重试 422；未知 id 404。"""
     admin_login(client, session)
-    failed = post_document(
-        client, title="客服_扫描件_20260901", content=_empty_docx()
-    ).json()["data"]
+    failed = post_document(client, title="客服_扫描件_20260901", content=_empty_docx()).json()[
+        "data"
+    ]
     assert failed["status"] == "failed"
 
     resp = client.post(f"/api/documents/{failed['id']}/retry")
@@ -440,7 +442,13 @@ def test_upload_invalid_effective_date_422(client, session, sandbox_storage, tes
             "effectiveDate": "不是日期",
             "complianceConfirmed": "true",
         },
-        files={"file": ("bad_date.docx", _docx_bytes([("第一章 总则", [_filler("总则", 18)])]), DOCX_MIME)},
+        files={
+            "file": (
+                "bad_date.docx",
+                _docx_bytes([("第一章 总则", [_filler("总则", 18)])]),
+                DOCX_MIME,
+            )
+        },
     )
     assert resp.status_code == 422
     assert "effectiveDate" in {entry["field"] for entry in resp.json()["data"]}

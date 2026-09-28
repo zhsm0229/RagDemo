@@ -25,9 +25,13 @@ def build_clean_docx() -> bytes:
     document.add_paragraph("第二条 本制度由人力资源部负责解释与修订，自发布之日起施行。")
     document.add_heading("第二章 考勤管理", level=1)
     document.add_paragraph("第三条 标准工作时间为每周一至周五，上午九时至下午六时，午休一小时。")
-    document.add_paragraph("第四条 迟到或早退超过三十分钟按半天事假计，一个月内累计三次按旷工一日处理。")
+    document.add_paragraph(
+        "第四条 迟到或早退超过三十分钟按半天事假计，一个月内累计三次按旷工一日处理。"
+    )
     document.add_heading("第三章 差旅与报销", level=1)
-    document.add_paragraph("第五条 员工出差须事先提交申请并经部门负责人批准，差旅费用凭正规发票据实报销。")
+    document.add_paragraph(
+        "第五条 员工出差须事先提交申请并经部门负责人批准，差旅费用凭正规发票据实报销。"
+    )
     table = document.add_table(rows=3, cols=2)
     table.cell(0, 0).text = "项目"
     table.cell(0, 1).text = "说明"
@@ -35,7 +39,9 @@ def build_clean_docx() -> bytes:
     table.cell(1, 1).text = "凭票据实报销"
     table.cell(2, 0).text = "住宿费用"
     table.cell(2, 1).text = "每晚上限四百元"
-    document.add_paragraph("第六条 报销单据须在差旅结束后十个工作日内提交财务部审核，逾期不予受理。")
+    document.add_paragraph(
+        "第六条 报销单据须在差旅结束后十个工作日内提交财务部审核，逾期不予受理。"
+    )
     document.add_heading("第四章 保密与责任", level=1)
     document.add_paragraph("第七条 员工在职期间知悉的商业秘密与客户信息，离职后仍应承担保密义务。")
     document.add_paragraph("第八条 违反本制度给公司造成损失的，公司有权依据情节追究相应责任。")
@@ -69,7 +75,9 @@ def build_clean_pdf() -> bytes:
             "Employee Handbook Annual Report. Chapter 1 covers the scope and general principles."
         ),
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-        _stream_obj("Chapter 2 covers attendance rules. Contact the HR office for expense details."),
+        _stream_obj(
+            "Chapter 2 covers attendance rules. Contact the HR office for expense details."
+        ),
     ]
     out = bytearray(b"%PDF-1.4\n")
     offsets: list[int] = []
@@ -95,8 +103,12 @@ def build_garbled_docx() -> bytes:
     document.add_paragraph(
         "系统导出日志片段：\x7f\x80\ufffd\x91\x92后续说明文字保持完整可读，用于稀释乱码字符占比。"
     )
-    document.add_paragraph("历史数据迁移记录：\x93\x94\x95\x9a\x9f\x82本段其余部分为正常业务描述文本。")
-    document.add_paragraph("遗留系统残留替换符：\ufffd\ufffd\x84\x86\x87\x88\x8b\x9e段末保持正常中文叙述收尾。")
+    document.add_paragraph(
+        "历史数据迁移记录：\x93\x94\x95\x9a\x9f\x82本段其余部分为正常业务描述文本。"
+    )
+    document.add_paragraph(
+        "遗留系统残留替换符：\ufffd\ufffd\x84\x86\x87\x88\x8b\x9e段末保持正常中文叙述收尾。"
+    )
     buffer = io.BytesIO()
     document.save(buffer)
     return buffer.getvalue()
@@ -126,4 +138,6 @@ if __name__ == "__main__":
     (golden / "hr_制度_v1.docx").write_bytes(build_clean_docx())
     (golden / "admin_handbook_v1.pdf").write_bytes(build_clean_pdf())
     (golden / "hr_乱码_v1.docx").write_bytes(build_garbled_docx())
-    print(f"written: {golden}\n{_report()}\npages: {PdfReader(io.BytesIO(build_clean_pdf())).pages}")
+    print(
+        f"written: {golden}\n{_report()}\npages: {PdfReader(io.BytesIO(build_clean_pdf())).pages}"
+    )

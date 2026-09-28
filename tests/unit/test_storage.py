@@ -24,9 +24,7 @@ def storage(tmp_path: Path) -> LocalFileStorage:
 
 
 class TestSave:
-    def test_rel_path_is_two_level_uuid_dir_with_pdf_ext(
-        self, storage: LocalFileStorage
-    ) -> None:
+    def test_rel_path_is_two_level_uuid_dir_with_pdf_ext(self, storage: LocalFileStorage) -> None:
         stored = storage.save(CONTENT, ext=".pdf")
         first, second, name = Path(stored.rel_path).parts
         assert stored.rel_path.endswith(".pdf")
@@ -39,9 +37,7 @@ class TestSave:
         assert stored.sha256 == EXPECTED_SHA256
         assert stored.size == len(CONTENT)
 
-    def test_file_written_to_disk_and_readable_back(
-        self, storage: LocalFileStorage
-    ) -> None:
+    def test_file_written_to_disk_and_readable_back(self, storage: LocalFileStorage) -> None:
         stored = storage.save(CONTENT, ext=".pdf")
         assert (storage.root_dir / stored.rel_path).read_bytes() == CONTENT
 
@@ -55,9 +51,7 @@ class TestSave:
         assert (storage.root_dir / second.rel_path).read_bytes() == CONTENT
 
     @pytest.mark.parametrize("ext", ["pdf", ".pdf"])
-    def test_ext_without_dot_is_normalized(
-        self, storage: LocalFileStorage, ext: str
-    ) -> None:
+    def test_ext_without_dot_is_normalized(self, storage: LocalFileStorage, ext: str) -> None:
         stored = storage.save(CONTENT, ext=ext)
         assert stored.rel_path.endswith(".pdf")
 
