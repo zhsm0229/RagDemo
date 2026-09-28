@@ -27,6 +27,9 @@ ERR_UNAUTHENTICATED: int = 2003  # 未登录 / 令牌无效或过期 / 账号已
 ERR_FORBIDDEN: int = 2004  # 已登录但无权限（含首登未改密即访问业务接口）
 ERR_RATE_LIMITED: int = 2005  # 登录请求过于频繁（进程内滑动窗口限流）
 
+# 3xxx 业务类
+ERR_DUPLICATE_DOC: int = 3001  # 上传文件与库内已有文档完全重复（F-1001 精确查重，409）
+
 # 5xxx 系统类
 ERR_INTERNAL: int = 5000  # 兜底系统错误（响应体只给通用提示，堆栈进日志 §16.4）
 
