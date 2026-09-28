@@ -2,6 +2,7 @@
 
 断言表来源 task-5-brief：rel_path 以 .pdf 结尾且含 UUID（两级目录 ab/cd/）、
 sha256 与手算一致、文件真实落盘可读回、同内容两次保存路径不同不覆盖、ext 无点自动补。
+task-6 rider：ext 白名单 `.字母数字{1,10}`，含 `/`、`..`、空串等非法值抛 ValueError。
 """
 
 import hashlib
@@ -59,6 +60,14 @@ class TestSave:
     ) -> None:
         stored = storage.save(CONTENT, ext=ext)
         assert stored.rel_path.endswith(".pdf")
+
+    @pytest.mark.parametrize("ext", ["/pdf", "..", ""])
+    def test_ext_outside_whitelist_raises_value_error(
+        self, storage: LocalFileStorage, ext: str
+    ) -> None:
+        with pytest.raises(ValueError, match="invalid extension"):
+            storage.save(CONTENT, ext=ext)
+        assert not any(storage.root_dir.rglob("*"))  # 拒绝发生在落盘之前
 
 
 def test_local_storage_satisfies_file_storage_protocol(tmp_path: Path) -> None:

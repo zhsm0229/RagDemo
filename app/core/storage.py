@@ -2,9 +2,11 @@
 
 落盘约定：uuid4 十六进制命名，前 4 位拆成两级目录 `ab/cd/`；内容指纹 sha256；
 `open(..., "xb")` 独占创建，保证同名内容多次保存各得新路径、绝不覆盖旧文件。
+ext 白名单 `.字母数字{1,10}`（缺点自动补后再校验），不匹配抛 ValueError，防路径逃逸。
 """
 
 import hashlib
+import re
 import uuid
 from pathlib import Path
 from typing import NamedTuple, Protocol
@@ -31,6 +33,9 @@ class LocalFileStorage:
     def save(self, content: bytes, ext: str) -> StoredFile:
         if not ext.startswith("."):
             ext = f".{ext}"
+        # 白名单防御：ext 会拼进 rel_path，仅允许 `.字母数字{1,10}`，其余拒绝
+        if re.fullmatch(r"\.[A-Za-z0-9]{1,10}", ext) is None:
+            raise ValueError("invalid extension")
         stem = uuid.uuid4().hex
         rel_path = f"{stem[:2]}/{stem[2:4]}/{stem}{ext}"
         dst = self.root_dir / rel_path
