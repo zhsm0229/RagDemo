@@ -188,6 +188,28 @@ def test_upload_oversize_rejected_422(client, session, sandbox_storage, test_mod
     assert session.scalar(select(func.count()).select_from(Document)) == 0
 
 
+def test_upload_oversize_early_rejected_before_read(
+    client, session, sandbox_storage, test_mode, monkeypatch
+):
+    """上传早拒（T14 审查）：read() 之前按 seek/tell 体积拒收，422/1003 中文提示，不入库。
+
+    构造真实 51MB 会拖慢测试：monkeypatch 把上限常量调小后以小文件命中同一路径；
+    真实 50MB 边界断言保留在 tests/unit/test_precheck.py。
+    """
+    from app.api import documents as documents_api
+
+    monkeypatch.setattr(documents_api, "_MAX_UPLOAD_BYTES", 64)
+    admin_login(client, session)
+    resp = post_document(
+        client, filename="big.pdf", content=b"%PDF-1.4 " + b"0" * 128, mime="application/pdf"
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["code"] == ERR_PARAM_INVALID
+    assert body["message"] == "文件超过 50MB 上限"
+    assert session.scalar(select(func.count()).select_from(Document)) == 0
+
+
 # ---------- DOC-05：缺元数据字段级 422 / 未勾合规 422 ----------
 
 

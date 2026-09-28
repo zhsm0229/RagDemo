@@ -30,7 +30,21 @@ from app.services.ingest import IngestDeps, process_document
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 _ALLOWED_STATUS: tuple[str, ...] = ("pending", "parsing", "ready", "failed")  # 与 DDL CHECK 同源
+_MAX_UPLOAD_BYTES: int = 50 * 1024 * 1024  # 与 check_sync 的 50MB 上限同源（API 侧早拒用）
 _MSG_NOT_FOUND = "文档不存在"
+
+
+def _early_reject_oversize(file: UploadFile) -> None:
+    """读全文之前用 seek/tell 量体积早拒超大文件（>50MB → 422/1003）。
+
+    为什么不在同步段 check_sync 里拒：那要先 read() 整个文件进内存。seek 只动
+    文件指针，51MB 的请求体在字节进业务层之前即被退回（T14 审查 Important）。
+    """
+    file.file.seek(0, 2)  # SEEK_END
+    size = file.file.tell()
+    file.file.seek(0)
+    if size > _MAX_UPLOAD_BYTES:
+        raise ApiError(ERR_PARAM_INVALID, "文件超过 50MB 上限", 422)
 
 
 def _resolve_dept(db: Session, code: str) -> int:
@@ -98,6 +112,7 @@ def upload_document(
     """上传（DOC-02/03/04/05 卡口在同步段）：合规未勾 422；成功 202 {id,status}。"""
     if not complianceConfirmed:
         raise ApiError(ERR_PARAM_INVALID, "请先勾选内容合规确认后再上传", 422)
+    _early_reject_oversize(file)
     meta = {
         "dept_id": _resolve_dept(db, dept),
         "title": title,
