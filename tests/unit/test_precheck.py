@@ -2,7 +2,7 @@ r"""预检纯函数测试：同步闸门 + 敏感信息/乱码/近似查重算�
 
 断言表来源 task-8-brief（test-cases DOC-03/04/06/08/09、SEC-06/07）：白名单扩展名
 + MIME + 魔数（%PDF / PK\x03\x04）+ 50MB 上限 + SHA-256 稳定；乱码占比（控制字符
-+ U+FFFD，阈值 0.05）；身份证 18 位含加权校验码、手机号 1[3-9] 定长 11 位、银行卡
++ U+FFFD，\n\r\t 版面字符豁免，阈值 0.05）；身份证 18 位含加权校验码、手机号 1[3-9] 定长 11 位、银行卡
 13-19 位 Luhn——校验码/校验和均为手算硬断言（注释给出计算过程）；10 万字符超长
 输入 1 秒内返回（ReDoS 防护，time.monotonic 计时）；simhash64 近似文本
 hamming <= 3、无关文本 > 3。
@@ -115,7 +115,7 @@ def test_check_async_matches_sync() -> None:
 
 
 # ---------------------------------------------------------------------------
-# garbled_ratio：控制字符 + U+FFFD 占比，阈值 GARBLE_THRESHOLD=0.05
+# garbled_ratio：控制字符 + U+FFFD 占比（\n\r\t 版面字符豁免），阈值 GARBLE_THRESHOLD=0.05
 # ---------------------------------------------------------------------------
 
 
@@ -136,6 +136,26 @@ def test_garbled_ratio(text: str, expected: float) -> None:
     assert ratio == pytest.approx(expected)
     if expected > GARBLE_THRESHOLD:
         assert ratio > GARBLE_THRESHOLD
+
+
+def test_garbled_ratio_short_line_doc_below_threshold() -> None:
+    """\\n 豁免（Task 8 交接闭环）：50 行×14 字的短行密集文档，49 个换行不计乱码。
+
+    旧行为（\\n 计入分子）下 49/749 ≈ 6.5% 会误超 5% 阈值；豁免后为 0.0。
+    """
+    lines = [f"第{i:02d}条 制度条款内容{i:02d}。" for i in range(50)]
+    assert all(len(line) < 20 for line in lines)
+    text = "\n".join(lines)
+    assert len(text) == 749  # 50×14 正文 + 49 个 \n
+    assert garbled_ratio(text) == 0.0
+    assert garbled_ratio(text) < GARBLE_THRESHOLD
+
+
+def test_garbled_ratio_real_garble_still_over_threshold_with_newlines() -> None:
+    """真乱码不因换行豁免而漏报：C1 控制区 + U+FFFD 密集混排，占比远超阈值。"""
+    text = "\x7f\x80\ufffd\n" * 20  # 每行 3 个乱码字符 + 1 个换行
+    assert garbled_ratio(text) == pytest.approx(60 / 80)
+    assert garbled_ratio(text) > GARBLE_THRESHOLD
 
 
 def test_threshold_constants_match_brief() -> None:

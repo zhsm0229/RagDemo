@@ -5,7 +5,8 @@ check_sync 做白名单闸门：扩展名（.pdf/.docx）→ MIME → 大小（<
 失败返回稳定 reason 码。敏感扫描全部用预编译线性正则（定长或 [0-9]{13,19} 有界
 量词，无嵌套量词、回溯有界，SEC-07），命中后再过纯函数校验：身份证 18 位加权
 校验码（id_card_valid）、银行卡 Luhn（luhn_valid）。乱码占比 = 控制字符
-（U+0000–001F、U+007F–009F，即 Unicode Cc）与 U+FFFD 的字符占比。simhash64 为
+（U+0000–001F、U+007F–009F，即 Unicode Cc；换行/回车/制表是版面结构字符，豁免）与
+U+FFFD 的字符占比。simhash64 为
 64 位 Simhash（字符 2-gram + blake2b 8 字节指纹，进程间确定），hamming 为汉明
 距离；GARBLE_THRESHOLD / SIMHASH_NEAR 为下游判定阈值常量。
 """
@@ -28,8 +29,10 @@ SIMHASH_NEAR: int = 3
 _ID_CARD_RE = re.compile(r"(?<![0-9Xx])[0-9]{17}[0-9Xx](?![0-9Xx])")
 _MOBILE_RE = re.compile(r"(?<![0-9])1[3-9][0-9]{9}(?![0-9])")
 _BANK_CARD_RE = re.compile(r"(?<![0-9])[0-9]{13,19}(?![0-9])")
-# 控制字符 = Unicode Cc：U+0000–001F 与 U+007F–009F，外加替换符 U+FFFD
-_GARBLE_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\ufffd]")
+# 控制字符 = Unicode Cc：U+0000–001F 与 U+007F–009F，外加替换符 U+FFFD；
+# \n\r\t（U+0009/000A/000D）是版面结构字符而非乱码，从分子豁免（短行密集文档
+# 每行一个换行即可把占比推过阈值，属误报——Task 8 交接事项闭环）
+_GARBLE_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ufffd]")
 
 _ID_WEIGHTS: tuple[int, ...] = (7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2)
 _ID_CHECK_MAP: str = "10X98765432"  # Σ mod 11 = 0..10 → 校验码
@@ -102,7 +105,7 @@ async def check_async(filename: str, mime: str, content: bytes) -> SyncResult:
 
 
 def garbled_ratio(text: str) -> float:
-    """乱码占比 = (控制字符 + U+FFFD) 字符数 / 总字符数；空文本返回 0.0。"""
+    """乱码占比 = (控制字符 + U+FFFD) 字符数 / 总字符数；\\n\\r\\t 版面字符豁免；空文本 0.0。"""
     if not text:
         return 0.0
     return len(_GARBLE_RE.findall(text)) / len(text)
