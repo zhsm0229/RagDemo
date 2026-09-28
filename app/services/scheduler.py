@@ -9,9 +9,10 @@ r"""定时任务（W1 Task 15）：到期文档下线清扫 + messages 月分区
 - 分区补建 DDL 与 alembic/versions/0001_init.py 的建分区语句同源（同名约定
   messages_YYYY_MM、上开下闭月界），幂等：已存在的分区读 pg_inherits 跳过；DEFAULT
   兜底分区由迁移建成后永不重建。
-- PG 工具语句（CREATE TABLE ... FOR VALUES）不接受绑定参数（psycopg 服务端绑定实测
-  IndeterminateDatatype），故月界只能内联：值为注入时钟 date 算术的 isoformat 产物、
-  分区名经正则校验，均非请求输入，与迁移内字面 DDL 同一信任域（红线 §2 的让步点）。
+- PG 工具语句（CREATE TABLE ... FOR VALUES）不接受服务端绑定参数（psycopg 实测
+  IndeterminateDatatype），故 DDL 不走 bind param：由 psycopg.sql 组合——分区名经
+  sql.Identifier、月界经 sql.Literal 在客户端安全转义（见 ensure_month_partitions），
+  红线 §4.3「禁止 f-string 拼 SQL」字面达成；值为注入时钟 date 算术产物，非请求输入。
 - 调度任务一律用独立 SessionLocal 会话（调度线程无请求会话可依附）；
   settings.test_mode=True 时 build_scheduler 只装配不自启（测试进程不起后台线程）。
 """
@@ -21,6 +22,7 @@ from datetime import date
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from psycopg import sql
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -49,8 +51,8 @@ def ensure_month_partitions(session: Session, n: int = 3) -> int:
 
     「当前月」取注入时钟（get_clock()，测试可换 FakeClock 钉住月份）；已存在的分区
     （含迁移建的示例月分区）跳过；DEFAULT 兜底分区不属于月分区序列、永不重建。
-    DDL 在传入会话的事务内执行并由本函数提交；月界/分区名见模块 docstring 的
-    参数绑定让步说明。
+    DDL 在传入会话的事务内执行并由本函数提交；建表语句由 psycopg.sql 组合
+    （Identifier/Literal 客户端转义，见模块 docstring），不经 f-string 拼接。
     """
     today = get_clock().now().date()
     existing = set(
@@ -68,13 +70,18 @@ def ensure_month_partitions(session: Session, n: int = 3) -> int:
         name = f"messages_{month_start.year:04d}_{month_start.month:02d}"
         if not _PARTITION_NAME.fullmatch(name) or name in existing:
             continue  # 名字即防线：非约定格式不执行；已存在的月分区跳过（幂等）
-        session.execute(
-            text(
-                f"CREATE TABLE IF NOT EXISTS {name} PARTITION OF {_PARENT_TABLE} "
-                f"FOR VALUES FROM ('{month_start.isoformat()}') "
-                f"TO ('{month_end.isoformat()}')"
-            )
+        # DDL 用 psycopg.sql 组合（Identifier/Literal 客户端转义，§4.3）：
+        # PG 工具语句不接受服务端绑定参数，月界以 Literal 转义字面进语句。
+        ddl = sql.SQL(
+            "CREATE TABLE IF NOT EXISTS {} PARTITION OF {} FOR VALUES FROM ({}) TO ({})"
+        ).format(
+            sql.Identifier(name),
+            sql.Identifier(_PARENT_TABLE),
+            sql.Literal(month_start),
+            sql.Literal(month_end),
         )
+        connection = session.connection()
+        connection.exec_driver_sql(ddl.as_string(connection.connection.dbapi_connection))
         created += 1
     session.commit()
     return created
