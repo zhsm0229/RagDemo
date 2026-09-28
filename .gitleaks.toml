@@ -1,0 +1,13 @@
+# gitleaks 配置（CI security 阶段，standards §20.2）。
+# 在官方默认规则之上仅排除 vendored 原型分发件：docs/specs/ui-mockups/html/lib/
+# 下 5 个 js/css 为带 sha256 记录的官方 Vue/Element Plus 压缩分发文件，
+# 压缩产物中的十六进制长串会被默认规则误判为密钥，Mimosa 扫描已裁决为误报；
+# 其余路径（含 .env、迁移、文档）全量扫描不豁免。
+[extend]
+useDefault = true
+
+[allowlist]
+  description = "Vendored official frontend dist files (Vue/Element Plus, sha256-verified)"
+  paths = [
+    '''docs/specs/ui-mockups/html/lib/''',
+  ]

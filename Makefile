@@ -23,7 +23,7 @@ test-unit:
 test-api:
 	$(PY) -m pytest tests/api
 
-ci:
+ci: lint
 	$(PY) -m pytest --cov=app/rag --cov=app/services --cov-fail-under=70
 
 up:
