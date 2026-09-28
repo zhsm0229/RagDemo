@@ -202,5 +202,5 @@ def retry_document(
 @router.post("/{doc_id}/confirm")
 def confirm_document(doc_id: int, user: AdminUser, db: DbSession) -> dict:
     """待确认激活：管理员确认敏感/近似命中文档 → is_active=True（service 负责审计与提交）。"""
-    doc = ingest_service.confirm_document(db, doc_id)
+    doc = ingest_service.confirm_document(db, doc_id, actor_user_id=user.id)
     return {"code": 0, "message": "ok", "data": {"id": doc.id, "isActive": doc.is_active}}

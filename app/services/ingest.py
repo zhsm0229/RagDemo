@@ -101,15 +101,19 @@ def process_document(session: Session, deps: IngestDeps, doc_id: int) -> None:
     _commit_ready(session, deps, doc, outcome)
 
 
-def confirm_document(session: Session, doc_id: int) -> Document:
-    """待确认激活：管理员确认敏感/近似文档 → is_active=True，审计并提交。"""
+def confirm_document(session: Session, doc_id: int, actor_user_id: int) -> Document:
+    """待确认激活：管理员确认敏感/近似文档 → is_active=True，审计并提交。
+
+    actor_user_id 必填（不回退 uploaded_by）：审计操作者必须是真实点击确认的管理员
+    （T13 W2 移交项）——上传者与确认者常为两人，默认 uploaded_by 会伪造留痕。
+    """
     doc = session.get(Document, doc_id)
     if doc is None:
         raise ApiError(ERR_PARAM_INVALID, _MSG_NOT_FOUND, 404)
     doc.is_active = True
     _audit(
         session,
-        doc.uploaded_by,
+        actor_user_id,
         "document.confirm",
         doc.id,
         {"before": {"isActive": False}, "after": {"isActive": True}},

@@ -255,8 +255,9 @@ def test_garbled_text_failed_with_encoding_reason(session: Session, tmp_path) ->
 
 def test_confirm_missing_document_404(session: Session) -> None:
     """confirm 指向不存在的文档：抛 404 ApiError。"""
+    admin_id = session.scalars(select(User.id).where(User.username == "admin")).one()
     with pytest.raises(ApiError) as ei:
-        confirm_document(session, 987654321)
+        confirm_document(session, 987654321, actor_user_id=admin_id)
     assert ei.value.http_status == 404
 
 
@@ -500,7 +501,16 @@ def test_sensitive_hit_pends_until_confirm(session: Session, tmp_path) -> None:
         == []
     )
 
-    confirmed = confirm_document(session, doc.id)
+    # 确认者是另一名管理员（≠上传者）：审计 actor 必须记真实操作者（T13 W2 移交项）
+    confirmer = User(
+        username="confirmer",
+        password_hash="-",  # 服务层直调不做鉴权，哈希占位即可
+        dept_id=dept,
+        role="admin",
+    )
+    session.add(confirmer)
+    session.flush()
+    confirmed = confirm_document(session, doc.id, actor_user_id=confirmer.id)
     assert confirmed.is_active is True
     assert session.scalars(
         select(Document.id).where(
@@ -508,6 +518,9 @@ def test_sensitive_hit_pends_until_confirm(session: Session, tmp_path) -> None:
         )
     ).all() == [doc.id]
     assert "document.confirm" in [audit.action for audit in _audits(session, doc.id)]
+    confirm_audit = [a for a in _audits(session, doc.id) if a.action == "document.confirm"][-1]
+    assert confirmer.id != doc.uploaded_by  # 两人不同，断言才有区分力
+    assert confirm_audit.actor_user_id == confirmer.id  # 是确认者本人，而非 uploaded_by
 
 
 def test_near_dup_simhash_pends_for_confirmation(session: Session, tmp_path) -> None:

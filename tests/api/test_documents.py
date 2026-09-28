@@ -370,7 +370,11 @@ def test_retry_reruns_failed_document_and_guards(client, session, sandbox_storag
 
 
 def test_confirm_activates_pending_document(client, session, sandbox_storage, test_mode):
-    """敏感命中待确认（isActive=False）→ confirm 激活；未知 id 404。"""
+    """敏感命中待确认（isActive=False）→ confirm 激活；未知 id 404。
+
+    确认者是另一名管理员（≠上传者 docadmin）：审计 actor_user_id 必须记真实操作者
+    而非 uploaded_by（T13 W2 移交项）。
+    """
     admin_login(client, session)
     content = _docx_bytes(
         [
@@ -386,11 +390,19 @@ def test_confirm_activates_pending_document(client, session, sandbox_storage, te
     item = client.get("/api/documents").json()["data"]["items"][0]
     assert item["isActive"] is False  # 敏感命中 → 待确认
 
+    make_user(session, "docadmin2", "right-two", role="admin")
+    assert login(client, "docadmin2", "right-two").status_code == 200  # 切换为确认者登录态
     resp = client.post(f"/api/documents/{data['id']}/confirm")
     assert resp.status_code == 200
     assert resp.json()["data"] == {"id": data["id"], "isActive": True}
     assert client.get("/api/documents").json()["data"]["items"][0]["isActive"] is True
     assert client.post("/api/documents/987654321/confirm").status_code == 404
+
+    uploader_id = session.scalars(select(User.id).where(User.username == "docadmin")).one()
+    confirmer_id = session.scalars(select(User.id).where(User.username == "docadmin2")).one()
+    assert uploader_id != confirmer_id  # 两人不同，断言才有区分力
+    confirm_audit = [a for a in _doc_audits(session, data["id"]) if a.action == "document.confirm"]
+    assert confirm_audit[-1].actor_user_id == confirmer_id  # 是确认者本人，而非 uploaded_by
 
 
 # ---------- 非 test_mode：BackgroundTasks 接线（不真跑管线，桩掉后台入口） ----------
