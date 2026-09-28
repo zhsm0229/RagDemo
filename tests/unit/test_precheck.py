@@ -174,7 +174,7 @@ def test_id_card_valid(number: str, expected: bool) -> None:
 # luhn_valid：从右起奇位直接累加、偶位翻倍（>9 减 9），总和 mod 10 == 0
 # "4242424242424242"：奇位（自右，含校验位）和 = 2×8 = 16；偶位翻倍后 4×2=8×8 = 64；
 #                     合计 16 + 64 = 80，80 mod 10 = 0 → 合法
-# "79927398713"：奇位和 3+7+9+7+9+7 = 42；偶位翻倍 2+7+6+4+9+9 = 37；合计 70 → 合法
+# "79927398713"：奇位和 3+7+9+7+9+7 = 42；偶位翻倍 2+7+6+4+9 = 28；合计 42 + 28 = 70 → 合法
 # "4242424242424241"：合计 79 → 非法；"79927398714"：合计 71 → 非法
 # ---------------------------------------------------------------------------
 
@@ -208,7 +208,7 @@ def test_luhn_valid(number: str, expected: bool) -> None:
         pytest.param(f"联系电话{_MOBILE}", ["mobile"], id="scan-pos-mobile-hit"),
         pytest.param(f"卡号{_CARD}请核对", ["bank_card"], id="scan-pos-bank-card-hit"),
         pytest.param("无敏感信息的普通正文。", [], id="scan-neg-plain-text"),
-        # 25 位连续数字：手机号/银行卡子串均被数字边界否定（防内嵌误报，线性回溯有界）
+        # 27 位连续数字：手机号/银行卡子串均被数字边界否定（防内嵌误报，线性回溯有界）
         pytest.param("1381234567842424242424242", [], id="scan-neg-digit-run-too-long-no-inner-match"),
         pytest.param(
             f"{_ID}，{_MOBILE}，{_CARD}",
