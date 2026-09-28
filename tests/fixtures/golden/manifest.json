@@ -2,7 +2,7 @@
   {
     "file": "golden/hr_制度_v1.docx",
     "kind": "clean",
-    "expect": {"engine": "python-docx", "min_chars": 300, "min_blocks": 1, "garbled_ok": false, "fail_reason": null}
+    "expect": {"engine": "docx", "min_chars": 300, "min_blocks": 1, "garbled_ok": false, "fail_reason": null}
   },
   {
     "file": "golden/admin_handbook_v1.pdf",
@@ -12,7 +12,7 @@
   {
     "file": "golden/hr_乱码_v1.docx",
     "kind": "garbled",
-    "expect": {"engine": "python-docx", "min_chars": 0, "min_blocks": 0, "garbled_ok": true, "fail_reason": "编码异常"}
+    "expect": {"engine": "docx", "min_chars": 0, "min_blocks": 0, "garbled_ok": true, "fail_reason": "编码异常"}
   },
   {
     "file": "golden/hr_制度_双栏_v1.pdf",
@@ -24,7 +24,7 @@
     "file": "golden/hr_制度_表格_v1.docx",
     "kind": "table",
     "pending": true,
-    "expect": {"engine": "python-docx", "min_chars": 300, "min_blocks": 1, "garbled_ok": false, "fail_reason": null}
+    "expect": {"engine": "docx", "min_chars": 300, "min_blocks": 1, "garbled_ok": false, "fail_reason": null}
   },
   {
     "file": "golden/hr_制度_扫描件_v1.pdf",

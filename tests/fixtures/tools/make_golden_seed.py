@@ -3,7 +3,8 @@ r"""程序化生成黄金种子样本（golden/manifest.json 中真跑的三条�
 规整类正文在 make_sample_docx/make_sample_pdf 的构造方式上加长——原样例全文仅 61/65 字符，
 低于质量红线 max(100, 原始×10%) 的 100 字下限（standards §10.3），无法作为全链绿例。
 乱码占位用 XML 合法的 C1 控制区（U+007F–U+009F，避开 U+0085 换行空白）与 U+FFFD 混排，
-占比约 16% 远超 5% 阈值（F-1005），且行内容互不相同不被清洗规则整行删除。
+实测清洗后乱码占比 18.6%（生成后以 _report() 复核）远超 5% 阈值（F-1005），
+且行内容互不相同不被清洗规则整行删除。
 用法：
     python tests/fixtures/tools/make_golden_seed.py   # 写出 tests/fixtures/golden/ 三个种子
 单测（test_golden.py）import build_*() 与入库种子比对解析结果（防漂移）。
@@ -97,7 +98,7 @@ def build_clean_pdf() -> bytes:
 
 
 def build_garbled_docx() -> bytes:
-    """乱码占位 docx 种子（hr_乱码_v1.docx）：C1 控制区 + U+FFFD 混排，乱码占比约 16% 超阈值。"""
+    """乱码占位 docx 种子（hr_乱码_v1.docx）：C1 控制区 + U+FFFD 混排，清洗后乱码占比 18.6% 超阈值。"""
     document = Document()
     document.add_heading("乱码回归样本", level=1)
     document.add_paragraph(

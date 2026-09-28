@@ -15,12 +15,12 @@
 
 ## 五类样本含义
 
-| kind | 含义 | 期望解析路径 |
+| kind | 含义 | 期望解析引擎（`expect.engine`，同 `documents.parse_engine`） |
 | --- | --- | --- |
-| `clean` | 规整单栏文档（标题层级清晰、无复杂版式） | docx→python-docx；pdf→pypdf（配 MinerU 后→mineru） |
-| `dual_col` | 双栏/多栏排版 pdf（阅读顺序易错） | mineru（版面分析） |
-| `table` | 表格密集文档（表格占比高） | docx→python-docx；pdf→mineru |
-| `scanned` | 扫描件/图片型 pdf（需 OCR） | mineru（OCR） |
+| `clean` | 规整单栏文档（标题层级清晰、无复杂版式） | docx→`docx`；pdf→`pypdf`（配 MinerU 后→`mineru`） |
+| `dual_col` | 双栏/多栏排版 pdf（阅读顺序易错） | `mineru`（版面分析） |
+| `table` | 表格密集文档（表格占比高） | docx→`docx`；pdf→`mineru` |
+| `scanned` | 扫描件/图片型 pdf（需 OCR） | `mineru`（OCR） |
 | `garbled` | 乱码样本（编码损坏），预期全链在乱码检测处**失败**，原因"编码异常" | 任意 |
 
 ## 文件命名规范
@@ -46,15 +46,16 @@
 
 ```json
 {"file": "golden/hr_制度_v1.docx", "kind": "clean",
- "expect": {"engine": "python-docx", "min_chars": 300, "min_blocks": 1,
+ "expect": {"engine": "docx", "min_chars": 300, "min_blocks": 1,
             "garbled_ok": false, "fail_reason": null}}
 ```
 
 - `file`：相对 `tests/fixtures/` 的路径，必须以 `golden/` 开头，后缀 `.docx`/`.pdf`。
 - `kind`：五类之一（见上表）。
-- `expect.engine`：`python-docx` / `mineru` / `pypdf`。按解析器选择树：docx 一律
-  `python-docx`；pdf 在回归骨架中钉死为进程内路径 `pypdf`（不随部署环境
-  `MINERU_BASE_URL` 漂移），`mineru` 类样本待 W2 接入后启用。
+- `expect.engine`：`docx` / `mineru` / `pypdf`——与 `documents.parse_engine` 同一
+  词汇（入库即此值）。按解析器选择树：docx 一律 `docx`；pdf 在回归骨架中钉死为
+  进程内路径 `pypdf`（不随部署环境 `MINERU_BASE_URL` 漂移），`mineru` 类样本待
+  W2 接入后启用。
 - `expect.min_chars`：清洗后字符数下限。投放后先跑一次看实际值，留 20% 余量填写
   （例如实测 380 则填 300），防止文档微调导致回归翻红。
 - `expect.min_blocks`：分块数下限，正常填 1。
@@ -68,7 +69,24 @@
 - 真跑种子（程序化生成，`tests/fixtures/tools/make_golden_seed.py`，可直接重生成）：
   - `golden/hr_制度_v1.docx` — clean，清洗后 381 字符；
   - `golden/admin_handbook_v1.pdf` — clean，清洗后 161 字符；
-  - `golden/hr_乱码_v1.docx` — garbled 占位，乱码占比 20.6%，预期失败原因"编码异常"。
+  - `golden/hr_乱码_v1.docx` — garbled 占位，清洗后乱码占比 18.6%，预期失败原因"编码异常"。
 - 待投放（pending，等对接人提供真实样例）：`dual_col`（双栏 pdf）、`table`（表格
   密集 docx）、`scanned`（扫描件 pdf）。真实样例到位后可替换程序化种子（同步更新
-  expect 与本 README 的状态清单）。
+  expect、`_GOLDEN_SEEDS` 与本 README 的状态清单）。
+
+## 投放真实样例后需同步的测试点
+
+清单断言已写成对投放状态不敏感的不变式（`tests/integration/test_golden.py`）：
+投放样例、去 pending、新增条目**不需要改测试**。但以下硬编码点在动清单结构时必须同步：
+
+1. `_GOLDEN_SEEDS`（test_golden.py）：程序化种子三件套的 (file, kind, engine) 三元组。
+   替换/移除程序化种子时同步此表——不变式要求这三条始终"在册且生效"（非 pending、
+   文件在盘、kind/engine 不漂移）。
+2. 五类 kind 覆盖不变式（`test_manifest_schema`）：manifest 必须五类条目齐全；新增
+   kind 需同步 `KINDS` 常量与本 README 的类别表。
+3. `expect.engine` 词汇校验（`ENGINES` 常量）：只收 `docx` / `mineru` / `pypdf`
+   （与 `documents.parse_engine` 同词汇）；新解析器实现需同步 `_engine_name` 映射。
+4. pending 全部投放后缺失清单自然为空（`missing_samples()` 不再打印汇总区清单，
+   测试仍绿）；只要还有 pending 条目，清单断言要求它们逐条出现在缺失清单中。
+5. 本 README"当前清单状态"一节：投放/替换种子后更新字符数与乱码占比实测值
+   （以 `python tests/fixtures/tools/make_golden_seed.py` 的自检输出为准）。
