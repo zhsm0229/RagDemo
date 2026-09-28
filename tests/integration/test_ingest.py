@@ -8,6 +8,7 @@ pdf 用本文件的最小构造器（长 ASCII 文本，同因）；含身份证
 向量写入走 ORM：psycopg3 将 list[float] 适配后可直插 vector 列（已对 pg-test 实证）。
 """
 
+import hashlib
 import importlib.util
 import io
 import threading
@@ -299,6 +300,72 @@ def test_exact_duplicate_rejected_409_pointing_to_existing(session: Session, tmp
         .where(Document.content_hash == existing.content_hash)
     )
     assert after == before == 1
+
+
+def _rival_document(dept_id: int, uploader_id: int, sha256: str, size: int) -> Document:
+    """并发对手行：同 hash 异标题（唯一冲突点是 uq_doc_content_hash），parsing 未生效。"""
+    return Document(
+        title="客服_并发对手_20260901",
+        dept_id=dept_id,
+        original_filename="rival.docx",
+        file_path="rivals/rival.docx",
+        mime=DOCX_MIME,
+        size_bytes=size,
+        content_hash=sha256,
+        version=1,
+        effective_date=date(2026, 9, 1),
+        owner_name="制度责任人",
+        status="parsing",
+        is_active=False,
+        uploaded_by=uploader_id,
+    )
+
+
+def test_concurrent_duplicate_commit_maps_to_409(pg, tmp_path, monkeypatch) -> None:
+    """DOC-06 并发半边：同步查重通过后、提交前对手抢注同 hash → 提交段唯一索引冲突转 409。"""
+    storage = LocalFileStorage(tmp_path)
+    content = _docx_bytes([("第一章 总则", [_filler("总则", 18)])])
+    sha256 = hashlib.sha256(content).hexdigest()
+    rival_ids: list[int] = []
+    racer = Session(pg)  # 上传方独立会话：提交期冲突的降级状态不污染 fixture 会话
+    real_flush = Session.flush  # 打补丁前留存真方法：实例属性遮蔽后须显式调用真 flush
+
+    def commit_after_rival() -> None:
+        """模拟 commit 期冲突：对手连接抢先提交同 hash 行，上传方延迟至此才真实落库。"""
+        with Session(pg) as rival, rival.begin():
+            row = _rival_document(dept, admin.id, sha256, len(content))
+            rival.add(row)
+            rival.flush()
+            rival_ids.append(row.id)
+        real_flush(racer)  # 对手已提交：此处 INSERT 真实撞 uq_doc_content_hash 唯一索引
+
+    try:
+        admin = racer.scalars(select(User).where(User.username == "admin")).one()
+        dept = admin.dept_id
+        monkeypatch.setattr(racer, "flush", lambda *args, **kwargs: None)
+        monkeypatch.setattr(racer, "commit", commit_after_rival)
+        with pytest.raises(ApiError) as ei:
+            create_document(
+                racer,
+                storage,
+                admin,
+                _meta(dept, "客服_并发抢注_20260901"),
+                content,
+                "race.docx",
+                DOCX_MIME,
+            )
+        survivors = racer.scalars(  # 读回：库内该 hash 仅剩对手一行，上传方行未落库
+            select(Document).where(Document.content_hash == sha256)
+        ).all()
+        assert [(row.id, row.status) for row in survivors] == [(rival_ids[0], "parsing")]
+        assert ei.value.code == ERR_DUPLICATE_DOC
+        assert ei.value.http_status == 409
+        assert "重复" in ei.value.message
+    finally:
+        racer.rollback()  # 上传方事务全程未提交：显式丢弃并归还连接
+        racer.close()
+        with pg.begin() as conn:  # 对手行是真实提交：显式清场，防污染后续用例
+            conn.execute(text("DELETE FROM documents WHERE id = ANY(:ids)"), {"ids": rival_ids})
 
 
 def test_sync_gate_rejects_unsupported_extension(session: Session, tmp_path) -> None:

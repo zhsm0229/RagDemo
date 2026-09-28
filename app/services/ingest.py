@@ -11,6 +11,7 @@ analysis（解析/红线/清洗/乱码/敏感/simhash/分块/embed，见 ingest_
 from pathlib import PureWindowsPath
 
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.clock import Clock
@@ -53,7 +54,11 @@ def create_document(
     filename: str,
     mime: str,
 ) -> Document:
-    """同步段：元数据必填 → 白名单 → 查重 → 落盘 → 登记 parsing → 审计并提交。"""
+    """同步段：元数据必填 → 白名单 → 查重 → 落盘 → 登记 parsing → 审计并提交。
+
+    查重双保险：_reject_duplicate 挡同步可见的重复；提交段 IntegrityError 捕
+    uq_doc_content_hash 的并发抢注（DOC-06），同样映射 409。
+    """
     missing = [key for key in _META_REQUIRED if not meta.get(key)]
     if missing:
         raise ApiError(ERR_PARAM_INVALID, f"元数据缺失：{'、'.join(missing)}", 422)
@@ -82,7 +87,14 @@ def create_document(
     session.flush()  # 先取 id 供审计外键
     detail = {"after": {"title": doc.title, "filename": filename, "sha256": gate.sha256}}
     _audit(session, uploader.id, "document.upload", doc.id, detail)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        # 并发半边（DOC-06）：同步查重通过后、提交前对手抢注同 content_hash，提交段
+        # 撞 uq_doc_content_hash 唯一索引——转 409 业务码（常见路径由 _reject_duplicate
+        # 把守）。只捕 IntegrityError 一族：其余异常（UpstreamError 等）绝不吞。
+        session.rollback()  # 丢弃半程写入（文档行+审计）：冲突即失败，不留痕迹
+        raise ApiError(ERR_DUPLICATE_DOC, "文件与已有文档重复，请勿重复上传", 409) from exc
     return doc
 
 
