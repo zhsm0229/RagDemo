@@ -5,14 +5,17 @@ from sqlalchemy import engine_from_config, pool
 from alembic import context
 from app.core.config import get_settings
 from app.db import models  # noqa: F401  注册全部表到 Base.metadata
-from app.db.base import Base
+from app.db.base import Base, autogenerate_include_object
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
 
-# 连接串唯一来源：app.core.config.Settings（.env / DATABASE_URL 环境变量）
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
+# 连接串：调用方已显式设置（如 tests/conftest.py 指向 pg-test）则不覆盖；
+# 否则（ini 模板占位符或未设置）回退到 app.core.config.Settings（.env / DATABASE_URL）
+_url = config.get_main_option("sqlalchemy.url")
+if not _url or _url.startswith("driver://"):
+    config.set_main_option("sqlalchemy.url", get_settings().database_url)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
@@ -22,6 +25,10 @@ if config.config_file_name is not None:
 # add your model's MetaData object here
 # for 'autogenerate' support
 target_metadata = Base.metadata
+
+# autogenerate 过滤策略：messages 分区子表由迁移/ensure_month_partitions 管理，
+# 不进 metadata，比较时必须忽略（否则误报 DROP TABLE）
+_AUTOGEN_OPTS = {"include_object": autogenerate_include_object}
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:
@@ -47,6 +54,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        **_AUTOGEN_OPTS,
     )
 
     with context.begin_transaction():
@@ -67,7 +75,7 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(connection=connection, target_metadata=target_metadata, **_AUTOGEN_OPTS)
 
         with context.begin_transaction():
             context.run_migrations()

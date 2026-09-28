@@ -18,4 +18,7 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    # 缓存契约：lru_cache 首次调用即钉死当时的 env/.env 读数。测试中修改
+    # DATABASE_URL 等环境变量后，必须先 get_settings.cache_clear() 再断言/使用，
+    # 否则会拿到旧缓存（见 tests/conftest.py pg fixture 的显式清除与还原）。
     return Settings()

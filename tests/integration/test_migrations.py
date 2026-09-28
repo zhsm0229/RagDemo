@@ -379,3 +379,23 @@ def test_audit_logs_composite_pk_and_indexes(session):
     assert pk_def is not None and "id" in pk_def and "created_at" in pk_def
     assert _indexdef(session, "idx_audit_time") is not None
     assert _indexdef(session, "idx_audit_actor") is not None
+
+
+def test_autogenerate_diff_is_empty(pg):
+    """alembic autogenerate 零差异守卫：Base.metadata 与迁移产物必须逐一同名同构。
+
+    防 Important#1 类回归：模型漏声明约束时，首次 autogenerate 会生成
+    DROP CONSTRAINT / DROP TABLE（messages_* 分区子表由 include_object 过滤，
+    与 alembic/env.py 共用 app.db.base.autogenerate_include_object 策略）。
+    """
+    from alembic.autogenerate import compare_metadata
+    from alembic.runtime.migration import MigrationContext
+
+    from app.db.base import Base, autogenerate_include_object
+
+    with pg.connect() as connection:
+        context = MigrationContext.configure(
+            connection, opts={"include_object": autogenerate_include_object}
+        )
+        diff = compare_metadata(context, Base.metadata)
+    assert diff == [], f"autogenerate 检出模型与迁移产物漂移: {diff}"

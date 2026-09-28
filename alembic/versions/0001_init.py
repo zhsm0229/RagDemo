@@ -250,5 +250,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """逆序回滚全部对象。
+
+    注意 DROP EXTENSION vector 的前提：本项目使用专用库（rag / rag_test），
+    vector 扩展由本迁移首步创建，故可安全回滚卸载；若未来指向共享库（扩展由
+    DBA 或其他应用创建），须摘除该语句并另行评审。
+    """
     for ddl in _DOWNGRADE_DDL:
         op.execute(sa.text(ddl))

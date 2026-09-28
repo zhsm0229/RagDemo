@@ -1,8 +1,11 @@
 """全局 pytest fixtures：`pg`（session 级，对 5434 的 pg-test 执行 alembic upgrade head
 并灌种子数据）与 `session`（每测试独立事务，测试结束回滚，保证用例互不污染）。
 
-约定：测试库连接串硬编码指向 docker-compose 的 pg-test（localhost:5434, rag_test）；
-conftest 通过 DATABASE_URL 环境变量驱动 alembic env.py 与 app.db.base 的 Settings。
+约定：测试库连接串硬编码指向 docker-compose 的 pg-test（localhost:5434, rag_test）。
+连接串投递不走 env+缓存时序：pg fixture 显式 set_main_option 给 alembic，
+并 cache_clear 后断言 get_settings().database_url == TEST_DB_URL——get_settings()
+是 lru_cache，任何更早的调用都会把 dev 库 URL 钉进缓存，必须显式清除（见
+app/core/config.py 的缓存契约注释）。
 """
 
 import os
@@ -21,12 +24,23 @@ TEST_DB_URL = "postgresql+psycopg://rag:rag@localhost:5434/rag_test"
 
 @pytest.fixture(scope="session")
 def pg():
-    """session 级：把 DATABASE_URL 指到 pg-test，跑 alembic upgrade head + 种子，交付测试用引擎。"""
+    """session 级：对 pg-test 跑 alembic upgrade head + 种子，交付测试用引擎。
+
+    步骤：清 Settings 缓存并设 DATABASE_URL（供 app 层运行时代码解析）→
+    显式把 TEST_DB_URL 写进 alembic 配置（不依赖 env 时序）→ upgrade →
+    断言 get_settings() 解析为测试库 → 灌种子。teardown 还原缓存与环境变量。
+    """
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
     os.environ["DATABASE_URL"] = TEST_DB_URL
 
     alembic_cfg = Config(str(ROOT / "alembic.ini"))
     alembic_cfg.set_main_option("script_location", str(ROOT / "alembic"))
+    alembic_cfg.set_main_option("sqlalchemy.url", TEST_DB_URL)
     command.upgrade(alembic_cfg, "head")
+
+    assert get_settings().database_url == TEST_DB_URL  # 防缓存时序把测试钉到 dev 库
 
     from app.db.seed import seed
 
@@ -35,6 +49,8 @@ def pg():
         seed(s, echo=False)  # 三部门 + admin；echo=False 避免测试日志泄随机口令
     yield test_engine
     test_engine.dispose()
+    os.environ.pop("DATABASE_URL", None)
+    get_settings.cache_clear()  # 还原：后续测试按 .env 重新解析（dev 库）
 
 
 @pytest.fixture()

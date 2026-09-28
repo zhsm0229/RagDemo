@@ -15,5 +15,24 @@ class Base(DeclarativeBase):
     """全项目 ORM 基类；target_metadata 供 Alembic autogenerate 参考。"""
 
 
+def autogenerate_include_object(
+    obj: object, name: str | None, type_: str, reflected: bool, compare_to: object
+) -> bool:
+    """autogenerate 的 include_object 过滤：忽略 messages 分区子表。
+
+    messages_default / messages_YYYY_MM 由迁移与 ensure_month_partitions() 管理、
+    不进 metadata；不过滤会被 autogenerate 误判为多余表而生成 DROP TABLE。
+    其余对象一律放行。env.py 与 tests/integration 的零差异断言共用本策略。
+    """
+    is_unmanaged_partition = (
+        type_ == "table"
+        and reflected
+        and compare_to is None
+        and bool(name)
+        and name.startswith("messages_")
+    )
+    return not is_unmanaged_partition
+
+
 engine = create_engine(get_settings().database_url, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)

@@ -1,10 +1,12 @@
 """ORM 模型：与 specs/db-design.md v1.0 的 DDL 逐列映射（枚举一律 TEXT+CHECK）。
 
 建表唯一入口是 Alembic 迁移（alembic/versions/0001_init.py，DDL 逐字照抄 spec）；
-本文件中的 Constraint / Index 声明用于文档化与未来 autogenerate 对齐，不参与建表。
+本文件中的 FK / UNIQUE / CHECK / Index 声明与迁移产物逐一同名（具名 FK 与 PG 默认
+fkey 名均按库内实际约束名），保证 target_metadata autogenerate 零差异；声明不参与建表。
 vector 列用 UserDefinedType 声明（不引入 pgvector-python 依赖，embedding 的
 Python 侧读写适配留给检索任务）；messages 为声明式分区父表，ORM 直接对父表读写，
-行路由由 PostgreSQL 完成。
+行路由由 PostgreSQL 完成；messages_default / messages_YYYY_MM 等分区子表不进
+metadata（见 autogenerate 的 include_object 过滤）。
 """
 
 from datetime import date, datetime
@@ -48,9 +50,10 @@ def _ts() -> DateTime:
 
 class Department(Base):
     __tablename__ = "departments"
+    __table_args__ = (UniqueConstraint("code", name="departments_code_key"),)
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    code: Mapped[str] = mapped_column(Text, unique=True)  # 部门编码：service/hr/all
+    code: Mapped[str] = mapped_column(Text)  # 部门编码：service/hr/all
     name: Mapped[str] = mapped_column(Text)  # 中文名：客服/人力/全员
     is_active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(_ts(), server_default=text("now()"))
@@ -60,15 +63,17 @@ class Department(Base):
 class User(Base):
     __tablename__ = "users"
     __table_args__ = (
+        UniqueConstraint("username", name="users_username_key"),
+        ForeignKeyConstraint(["dept_id"], ["departments.id"], name="users_dept_id_fkey"),
         CheckConstraint("role IN ('admin','member')", name="users_role_check"),
         Index("idx_users_dept", "dept_id", postgresql_where=text("is_active")),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    username: Mapped[str] = mapped_column(Text, unique=True)  # 3-32 位字母数字
+    username: Mapped[str] = mapped_column(Text)  # 3-32 位字母数字
     password_hash: Mapped[str] = mapped_column(Text)  # bcrypt
     dept_id: Mapped[int] = mapped_column(BigInteger)
-    role: Mapped[str] = mapped_column(Text, server_default=text("'member'"), name="role")
+    role: Mapped[str] = mapped_column(Text, server_default=text("'member'"))
     is_active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     must_change_password: Mapped[bool] = mapped_column(  # 首登强制改密
         Boolean, server_default=text("true")
@@ -83,6 +88,8 @@ class User(Base):
 class Document(Base):
     __tablename__ = "documents"
     __table_args__ = (
+        ForeignKeyConstraint(["dept_id"], ["departments.id"], name="documents_dept_id_fkey"),
+        ForeignKeyConstraint(["uploaded_by"], ["users.id"], name="documents_uploaded_by_fkey"),
         CheckConstraint(
             "status IN ('pending','parsing','ready','failed')",
             name="documents_status_check",
@@ -126,6 +133,11 @@ class Document(Base):
 class Chunk(Base):
     __tablename__ = "chunks"
     __table_args__ = (
+        ForeignKeyConstraint(["document_id"], ["documents.id"], name="chunks_document_id_fkey"),
+        ForeignKeyConstraint(["dept_id"], ["departments.id"], name="chunks_dept_id_fkey"),
+        ForeignKeyConstraint(
+            ["dup_of"], ["chunks.id"], ondelete="SET NULL", name="chunks_dup_of_fkey"
+        ),
         Index(
             "idx_chunks_embedding",
             "embedding",
@@ -159,6 +171,8 @@ class Chunk(Base):
 class QaPair(Base):
     __tablename__ = "qa_pairs"
     __table_args__ = (
+        ForeignKeyConstraint(["dept_id"], ["departments.id"], name="qa_pairs_dept_id_fkey"),
+        ForeignKeyConstraint(["created_by"], ["users.id"], name="qa_pairs_created_by_fkey"),
         CheckConstraint("length(question) BETWEEN 1 AND 2000", name="qa_pairs_question_check"),
         CheckConstraint("length(answer) BETWEEN 1 AND 10000", name="qa_pairs_answer_check"),
         CheckConstraint("status IN ('enabled','disabled')", name="qa_pairs_status_check"),
@@ -188,6 +202,8 @@ class QaPair(Base):
 class Conversation(Base):
     __tablename__ = "conversations"
     __table_args__ = (
+        ForeignKeyConstraint(["user_id"], ["users.id"], name="conversations_user_id_fkey"),
+        ForeignKeyConstraint(["dept_id"], ["departments.id"], name="conversations_dept_id_fkey"),
         Index(
             "idx_conv_user", "user_id", text("updated_at DESC"), postgresql_where=text("is_active")
         ),
@@ -266,6 +282,7 @@ class Message(Base):
 class EvalQuestion(Base):
     __tablename__ = "eval_questions"
     __table_args__ = (
+        ForeignKeyConstraint(["dept_id"], ["departments.id"], name="eval_questions_dept_id_fkey"),
         CheckConstraint(
             "qtype IN ('factual','multi_hop','cross_reject')", name="eval_questions_qtype_check"
         ),
@@ -285,6 +302,7 @@ class EvalQuestion(Base):
 class EvalRun(Base):
     __tablename__ = "eval_runs"
     __table_args__ = (
+        ForeignKeyConstraint(["triggered_by"], ["users.id"], name="eval_runs_triggered_by_fkey"),
         CheckConstraint("status IN ('running','done','failed')", name="eval_runs_status_check"),
     )
 
@@ -305,6 +323,7 @@ class AuditLog(Base):
 
     __tablename__ = "audit_logs"
     __table_args__ = (
+        ForeignKeyConstraint(["actor_user_id"], ["users.id"], name="audit_logs_actor_user_id_fkey"),
         Index("idx_audit_time", text("created_at DESC")),
         Index("idx_audit_actor", "actor_user_id", text("created_at DESC")),
     )
