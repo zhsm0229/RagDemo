@@ -78,7 +78,11 @@ def luhn_valid(number: str) -> bool:
 
 
 def check_sync(filename: str, mime: str, content: bytes) -> SyncResult:
-    """同步预检闸门：扩展名 → MIME → 大小 → 魔数，按序短路，失败给稳定 reason 码。"""
+    """同步预检闸门：扩展名 → MIME → 大小 → 魔数，按序短路，失败给稳定 reason 码。
+
+    魔数≠内容安全：魔数只挡改名的裸文件，内容级风险（PDF 内嵌 JS/OpenAction、
+    docx XXE/解压炸弹）由解析器（rag/parser.py）与 W2 生成链路处置。
+    """
     sha256 = hashlib.sha256(content).hexdigest()
     ext = PureWindowsPath(filename).suffix.lower()
     if ext not in ALLOWED_EXTS:
