@@ -1,11 +1,9 @@
 r"""解析器：Parser 接口 + DocxParser（python-docx）+ PdfFallbackParser（pypdf 降级）+
 MinerUParser（HTTP 客户端）+ get_parser 调度器（standards §10.2 解析器选择树）。
 
-安全边界（standards §6.1/§6.3，T8 深检移交）：docx 按 zip 白名单只接受
-[Content_Types].xml、word/、docProps/、_rels/ 前缀条目，其余条目跳过；解压前按
-声明尺寸校验总字节 ≤500MB、条目数 ≤10 万（防解压炸弹），自读 XML 再按实际读取
-量限量（防谎报声明头）并拒绝含 DOCTYPE/ENTITY 声明的内容（§6.1）；docx 包体
-XML 的常规解析交由 python-docx 成熟库。解析输出字符数设上限（§6.3）。
+安全边界（standards §6.1/§6.3）：docx zip 条目白名单（其余跳过）；包总量声明
+≤500MB、条目 ≤10 万；单条目 MAX_ENTRY_XML_BYTES 实读上限 + 流式重叠窗口扫描
+（防内存放大 OOM）；自读内容拒绝 DOCTYPE/ENTITY（§6.1）；页数/输出字符数上限。
 
 职责边界：解析器不做扩展名/MIME/魔数白名单——那是同步预检
 （rag/precheck.check_sync）的闸门；解析器只管"给字节出文本"。
@@ -29,14 +27,27 @@ from app.core.errors import ERR_PARSE_FAILED, ERR_UNSUPPORTED_FORMAT, ApiError
 from app.core.llm import UpstreamError
 from app.rag.chunker import Block, ParsedDoc
 
-MAX_UNCOMPRESSED_BYTES: int = 500 * 1024 * 1024  # §6.3：docx 解压产物总字节上限（防解压炸弹）
+MAX_UNCOMPRESSED_BYTES: int = 500 * 1024 * 1024  # §6.3：包声明解压总量上限（防解压炸弹）
 MAX_ENTRIES: int = 100_000  # §6.3：docx 压缩包条目数上限
+MAX_ENTRY_XML_BYTES: int = 64 * 1024 * 1024  # 单个自读条目的声明/实读上限（防内存放大 OOM）
+MAX_PAGES: int = 2000  # §6.3：pdf 页数上限
 MAX_OUTPUT_CHARS: int = 2_000_000  # §6.3：解析输出字符数上限
 PDF_PAGE_SEPARATOR: str = "\f"  # 全链路分页约定：rag/precheck.page_hint 按其计页
 
+_XML_SCAN_CHUNK: int = 1 << 20  # 流式扫描块大小
+_SCAN_OVERLAP: int = 8  # 重叠窗口 = 最长模式 len(b"<!doctype") - 1，防模式跨块漏检
 _CONTENT_TYPES: str = "[Content_Types].xml"
 _ALLOWED_PREFIXES: tuple[str, ...] = ("word/", "docProps/", "_rels/")
-_XML_SUFFIXES: tuple[str, ...] = (".xml", ".rels")
+# 非法包体底层异常族：加密条目(RuntimeError)、压缩方法不支持(NotImplementedError)、
+# lxml 语法错误(⊂SyntaxError)、缺部件(KeyError/ValueError)、残缺包属性访问(AttributeError)
+_DOCX_PARSE_ERRORS: tuple[type[Exception], ...] = (
+    KeyError,
+    ValueError,
+    RuntimeError,
+    NotImplementedError,
+    SyntaxError,
+    AttributeError,
+)
 
 
 @runtime_checkable
@@ -81,8 +92,7 @@ def _check_output(total_chars: int, cap: int) -> None:
 class DocxParser:
     """python-docx 进程内解析：标题层级 + 正文 + 表格，产出 heading_path 全路径的标题节。
 
-    条目白名单外条目跳过不读；包体非法/超限/含危险声明一律 ApiError 中文原因。
-    """
+    白名单外条目跳过不读；包体非法/超限/加密/含危险声明一律 ApiError 中文原因。"""
 
     engine: str = "docx"
     degraded: bool = False
@@ -91,29 +101,32 @@ class DocxParser:
         self,
         max_uncompressed_bytes: int = MAX_UNCOMPRESSED_BYTES,
         max_entries: int = MAX_ENTRIES,
+        max_entry_xml_bytes: int = MAX_ENTRY_XML_BYTES,
         max_output_chars: int = MAX_OUTPUT_CHARS,
     ) -> None:
         self.max_uncompressed_bytes: int = max_uncompressed_bytes
         self.max_entries: int = max_entries
+        self.max_entry_xml_bytes: int = max_entry_xml_bytes
         self.max_output_chars: int = max_output_chars
 
     def parse(self, filename: str, content: bytes) -> ParsedDoc:
         """包体校验（§6.1/§6.3）→ python-docx 解析 → 标题节序列；标题取元数据，缺省用文件名。"""
-        self._validate_package(content)
         try:
-            document = Document(io.BytesIO(content))
-        except (KeyError, ValueError) as exc:  # python-docx 对非法 OPC 包抛 KeyError/ValueError
-            raise ApiError(ERR_PARSE_FAILED, "docx 解析失败：包体结构非法", 422) from exc
-        blocks = self._collect(document)
-        _check_output(sum(len(block.text) for block in blocks), self.max_output_chars)
-        return ParsedDoc(title=document.core_properties.title or _stem(filename), blocks=blocks)
-
-    def _validate_package(self, content: bytes) -> None:
-        """闸门按序短路：zip 可开 → 条目数 → 声明解压总量 → OPC 标记 → 白名单内 XML 无 DOCTYPE/ENTITY。"""
-        try:
-            archive = zipfile.ZipFile(io.BytesIO(content))
+            self._validate_package(content)
         except zipfile.BadZipFile as exc:
             raise ApiError(ERR_PARSE_FAILED, "文件不是有效的 docx 压缩包", 422) from exc
+        try:
+            document = Document(io.BytesIO(content))
+            blocks = self._collect(document)
+            title = document.core_properties.title or _stem(filename)
+        except _DOCX_PARSE_ERRORS as exc:  # 含加密条目/压缩方法不支持/lxml 语法错误
+            raise ApiError(ERR_PARSE_FAILED, "docx 解析失败：包体结构非法或已加密", 422) from exc
+        _check_output(sum(len(block.text) for block in blocks), self.max_output_chars)
+        return ParsedDoc(title=title, blocks=blocks)
+
+    def _validate_package(self, content: bytes) -> None:
+        """闸门按序短路：条目数 → 声明解压总量 → OPC 标记 → 逐白名单条目（声明上限 + 流式扫描）。"""
+        archive = zipfile.ZipFile(io.BytesIO(content))
         with archive:
             infos = archive.infolist()
             if len(infos) > self.max_entries:
@@ -124,20 +137,34 @@ class DocxParser:
                 raise ApiError(
                     ERR_PARSE_FAILED, "缺少 [Content_Types].xml，不是有效的 docx 文档", 422
                 )
-            for info in infos:
-                self._scan_xml(archive, info.filename)
+            try:
+                for info in infos:
+                    if _allowed_entry(info.filename):
+                        self._scan_entry(archive, info.filename, info.file_size)
+            except (
+                _DOCX_PARSE_ERRORS
+            ) as exc:  # 条目加密(RuntimeError)/压缩方法不支持(NotImplementedError)
+                raise ApiError(
+                    ERR_PARSE_FAILED, "docx 解析失败：条目不可读或压缩方法不支持", 422
+                ) from exc
 
-    def _scan_xml(self, archive: zipfile.ZipFile, name: str) -> None:
-        """自读 XML 的 §6.1 守规：白名单外条目跳过；.xml/.rels 实读限量并拒绝 DOCTYPE/ENTITY。"""
-        if not _allowed_entry(name) or not name.endswith(_XML_SUFFIXES):
-            return  # 白名单外条目一律跳过，不读不解析
+    def _scan_entry(self, archive: zipfile.ZipFile, name: str, declared: int) -> None:
+        """自读条目守规（§6.1）：声明超限即拒；流式分块扫描 DOCTYPE/ENTITY（重叠窗口防跨界漏检）。"""
+        if declared > self.max_entry_xml_bytes:
+            raise ApiError(ERR_PARSE_FAILED, "docx 单个条目解压后超过 64MB 上限", 422)
+        tail = b""
+        read = 0
         with archive.open(name) as fh:
-            data = fh.read(self.max_uncompressed_bytes + 1)  # 实读限量，防谎报声明头
-        if len(data) > self.max_uncompressed_bytes:
-            raise ApiError(ERR_PARSE_FAILED, "docx 解压后总字节超过 500MB 上限", 422)
-        lowered = data.lower()
-        if b"<!doctype" in lowered or b"<!entity" in lowered:
-            raise ApiError(ERR_PARSE_FAILED, "docx 内含 DOCTYPE/ENTITY 声明，已拒绝解析", 422)
+            while chunk := fh.read(_XML_SCAN_CHUNK):
+                read += len(chunk)
+                if read > self.max_entry_xml_bytes:  # 实读限量：谎报声明头的第二道闸
+                    raise ApiError(ERR_PARSE_FAILED, "docx 单个条目解压后超过 64MB 上限", 422)
+                window = (tail + chunk).lower()  # 仅块级小写副本，无全量 data.lower()
+                if b"<!doctype" in window or b"<!entity" in window:
+                    raise ApiError(
+                        ERR_PARSE_FAILED, "docx 内含 DOCTYPE/ENTITY 声明，已拒绝解析", 422
+                    )
+                tail = window[-_SCAN_OVERLAP:]
 
     def _collect(self, document: DocumentObject) -> list[Block]:
         """按文档序遍历段落与表格：标题开新节（heading_path 置根到当前节全路径），正文/表格并入当前节。"""
@@ -159,7 +186,7 @@ class DocxParser:
             if isinstance(item, Paragraph):
                 level = _heading_level(item)
                 if level is not None and item.text.strip():
-                    path = [*path[: level - 1], item.text.strip()]
+                    path = [*path[: level - 1], item.text.strip()]  # 跳级截断回退，不补空占位
                     current = Block(level=level, heading_path=list(path), text="")
                     blocks.append(current)
                 else:
@@ -178,15 +205,20 @@ class PdfFallbackParser:
     engine: str = "pypdf"
     degraded: bool = True  # MinerU 不可用时的降级路径，入库状态机据此注明"降级解析"
 
-    def __init__(self, max_output_chars: int = MAX_OUTPUT_CHARS) -> None:
+    def __init__(
+        self, max_pages: int = MAX_PAGES, max_output_chars: int = MAX_OUTPUT_CHARS
+    ) -> None:
+        self.max_pages: int = max_pages
         self.max_output_chars: int = max_output_chars
 
     def parse(self, filename: str, content: bytes) -> ParsedDoc:
         """提取全部页面文本为单块 ParsedDoc（PDF 无标题层级，标题取文件名主干）。"""
         try:
             reader = PdfReader(io.BytesIO(content))
+            if len(reader.pages) > self.max_pages:  # §6.3 页数上限，先于逐页提取
+                raise ApiError(ERR_PARSE_FAILED, "pdf 页数超过上限", 422)
             pages = [page.extract_text() or "" for page in reader.pages]
-        except PyPdfError as exc:  # 损坏/加密（含缺解密依赖）统一拒收
+        except (PyPdfError, ValueError, KeyError) as exc:  # 损坏/加密/截断等一律契约 422
             raise ApiError(ERR_PARSE_FAILED, "pdf 解析失败：文档损坏或已加密", 422) from exc
         text = PDF_PAGE_SEPARATOR.join(pages)
         _check_output(len(text), self.max_output_chars)
@@ -198,29 +230,41 @@ class MinerUParser:
     """MinerU 解析服务 HTTP 客户端（版面分析/表格/OCR）。
 
     契约：POST {base_url}/file_parse（multipart 字段 file），JSON 响应
-    {"content": 文本}；网络/超时/非 2xx 重试 1 次后抛 UpstreamError。
-    W2 对接真实部署时契约如有出入只改本类。
-    """
+    {"content": str, "pages": int?}（pages 可选，供 §6.3 页数闸）；网络/超时/非 2xx
+    重试 1 次后抛 UpstreamError。W2 对接真实部署时契约如有出入只改本类。"""
 
     engine: str = "mineru"
     degraded: bool = False
 
     def __init__(
-        self, base_url: str, timeout_s: int = 300, transport: httpx.BaseTransport | None = None
+        self,
+        base_url: str,
+        timeout_s: int = 300,
+        transport: httpx.BaseTransport | None = None,
+        max_pages: int = MAX_PAGES,
+        max_output_chars: int = MAX_OUTPUT_CHARS,
     ) -> None:
         self.base_url: str = base_url.rstrip("/")
         self.timeout_s: int = timeout_s
+        self.max_pages: int = max_pages
+        self.max_output_chars: int = max_output_chars
         self._transport: httpx.BaseTransport | None = transport  # 测试注入 httpx.MockTransport
 
     def parse(self, filename: str, content: bytes) -> ParsedDoc:
-        """上传字节取回文本为单块 ParsedDoc（标题取文件名主干）；输出受字符上限约束。"""
+        """上传字节取回文本为单块 ParsedDoc；响应须为 {"content": str, "pages": int?}。"""
         with httpx.Client(timeout=self.timeout_s, transport=self._transport) as client:
             response = self._post_with_retry(client, filename, content)
             try:
-                text: str = response.json()["content"]
-            except (KeyError, ValueError) as exc:  # 缺字段或非 JSON 均按上游故障
-                raise UpstreamError("mineru 响应缺少 content 字段") from exc
-        _check_output(len(text), MAX_OUTPUT_CHARS)
+                payload = response.json()
+            except ValueError as exc:  # 含 JSONDecodeError
+                raise UpstreamError("mineru 响应不是合法 JSON") from exc
+        text = payload.get("content") if isinstance(payload, dict) else None
+        if not isinstance(text, str):  # 缺字段/非 str/非 dict 一律上游故障，不给半成品
+            raise UpstreamError("mineru 响应缺少 content 字段")
+        pages = payload.get("pages") if isinstance(payload, dict) else None
+        if isinstance(pages, int) and pages > self.max_pages:  # §6.3 页数闸，响应未携带则跳过
+            raise ApiError(ERR_PARSE_FAILED, "pdf 页数超过上限", 422)
+        _check_output(len(text), self.max_output_chars)
         stem = _stem(filename)
         return ParsedDoc(title=stem, blocks=[Block(level=1, heading_path=[stem], text=text)])
 
@@ -236,7 +280,7 @@ class MinerUParser:
                 )
                 response.raise_for_status()
                 return response
-            except httpx.HTTPError as exc:
+            except httpx.HTTPError as exc:  # 含 ConnectError/TimeoutException/HTTPStatusError
                 last_error = exc
         raise UpstreamError("mineru 解析服务调用失败（已重试 1 次）") from last_error
 
