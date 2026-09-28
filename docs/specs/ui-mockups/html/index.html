@@ -1,0 +1,1393 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>企业智能工作台 · 交互式界面原型（评审用）</title>
+<link rel="stylesheet" href="lib/element-plus.css">
+<style>
+  html,body,#app{height:100%;margin:0}
+  body{font-family:"Helvetica Neue",Helvetica,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",Arial,sans-serif;background:#f5f7fa}
+  /* 只读置灰（standards §8.8）：需复制的只读值用 readonly，保留选中复制 */
+  .readonly-grey .el-input__inner,.el-input__inner[readonly]{color:#a8abb2!important;background:#f5f7fa!important;cursor:text}
+  .layout{display:flex;height:100%}
+  .sidebar{width:220px;background:#fff;border-right:1px solid #e4e7ed;display:flex;flex-direction:column}
+  .logo{height:56px;display:flex;align-items:center;padding:0 16px;font-weight:600;font-size:16px;color:#409eff;border-bottom:1px solid #f0f0f0}
+  .main{flex:1;display:flex;flex-direction:column;min-width:0}
+  .topbar{height:56px;background:#fff;border-bottom:1px solid #e4e7ed;display:flex;align-items:center;justify-content:space-between;padding:0 20px}
+  .content{flex:1;overflow:auto;padding:16px 20px}
+  .filter-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+  .pager-row{display:flex;justify-content:flex-end;margin-top:12px}
+  /* 问答页 */
+  .chat-wrap{display:flex;gap:12px;height:100%}
+  .conv-list{width:230px;background:#fff;border:1px solid #e4e7ed;border-radius:6px;display:flex;flex-direction:column}
+  .conv-list .new-btn{margin:10px}
+  .conv-items{flex:1;overflow:auto}
+  .conv-item{padding:10px 12px;cursor:pointer;border-bottom:1px solid #f5f7fa;display:flex;justify-content:space-between;align-items:center}
+  .conv-item:hover{background:#f5f7fa}
+  .conv-item.active{background:#ecf5ff;color:#409eff}
+  .conv-item .del{visibility:hidden;color:#c0c4cc}
+  .conv-item:hover .del{visibility:visible}
+  .chat-main{flex:1;display:flex;flex-direction:column;background:#fff;border:1px solid #e4e7ed;border-radius:6px;min-width:0;position:relative}
+  .msgs{flex:1;overflow:auto;padding:16px 20px}
+  .bubble{max-width:78%;margin-bottom:14px;padding:10px 14px;border-radius:8px;line-height:1.7;font-size:14px;white-space:pre-wrap;word-break:break-word}
+  .bubble.user{background:#409eff;color:#fff;margin-left:auto}
+  .bubble.assistant{background:#f4f4f5;color:#303133}
+  .bubble .cite{display:inline-block;min-width:18px;text-align:center;background:#d9ecff;color:#409eff;border-radius:4px;font-size:12px;margin:0 2px;cursor:pointer;padding:0 3px}
+  .bubble .cite.hl{background:#409eff;color:#fff}
+  .msg-meta{font-size:12px;color:#909399;margin-top:6px;display:flex;gap:10px;align-items:center}
+  .cite-panel{width:300px;background:#fff;border:1px solid #e4e7ed;border-radius:6px;display:flex;flex-direction:column}
+  .cite-panel .head{padding:10px 14px;border-bottom:1px solid #f0f0f0;font-weight:600}
+  .cite-panel .list{flex:1;overflow:auto;padding:10px}
+  .cite-card{border:1px solid #e4e7ed;border-radius:6px;padding:10px;margin-bottom:8px;font-size:13px;cursor:pointer;transition:all .2s}
+  .cite-card:hover{border-color:#409eff}
+  .cite-card.hl{border-color:#409eff;background:#ecf5ff}
+  .cite-card .score{color:#909399;font-size:12px}
+  .chat-input{border-top:1px solid #e4e7ed;padding:12px 16px;display:flex;gap:10px;align-items:flex-end}
+  /* 概览 */
+  .stat-cards{display:flex;gap:12px;margin-bottom:16px}
+  .stat-card{flex:1;background:#fff;border:1px solid #e4e7ed;border-radius:6px;padding:16px}
+  .stat-card .num{font-size:28px;font-weight:600;color:#303133}
+  .stat-card .lbl{font-size:13px;color:#909399;margin-top:4px}
+  .bar-row{display:flex;align-items:center;gap:10px;margin-bottom:8px;font-size:13px}
+  .bar-name{width:120px;color:#606266}
+  .bar-track{flex:1;background:#f0f2f5;border-radius:4px;height:14px;overflow:hidden}
+  .bar-fill{height:100%;background:#409eff;border-radius:4px}
+  .panel{background:#fff;border:1px solid #e4e7ed;border-radius:6px;padding:16px;margin-bottom:16px}
+  .panel h4{margin:0 0 12px;font-size:14px;color:#303133}
+  .login-box{width:380px;margin:10vh auto;background:#fff;border:1px solid #e4e7ed;border-radius:8px;padding:32px}
+  .login-box h2{text-align:center;margin:0 0 8px;color:#303133}
+  .login-sub{text-align:center;color:#909399;font-size:13px;margin-bottom:20px}
+  .demo-tip{margin-top:16px;font-size:12px;color:#909399;background:#f4f4f5;border-radius:4px;padding:8px 12px;line-height:1.8}
+  .err-inline{color:#f56c6c;font-size:12px;margin-top:4px}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script src="lib/vue.global.prod.js"></script>
+<script src="lib/element-plus.full.min.js"></script>
+<script src="lib/element-plus-zh-cn.min.js"></script>
+<script src="lib/icons.iife.min.js"></script>
+<script>
+/* =========================================================
+   企业智能工作台 · 交互式界面原型（评审用）
+   依据：ui-spec.md P1-P10 · standards.md §8/§22/§23
+   演示登录：admin / 客服小王 / 新员工小李，密码 123456
+   注意：本原型为纯前端演示，无真实后端；数据为内置模拟数据。
+   ========================================================= */
+const { createApp, reactive, ref, computed, watch, nextTick } = Vue;
+
+/* ---------- 模拟数据 ---------- */
+const S = reactive({
+  loggedUser: null,
+  page: 'chat',
+  deptName: { all: '全员', service: '客服', hr: '人力' },
+  users: [
+    { id: 1, username: 'admin',       name: '管理员',   dept: 'all',     role: 'admin',  status: '正常', lastLogin: '2026-09-28 09:00' },
+    { id: 2, username: '客服小王',     name: '王敏',     dept: 'service', role: 'member', status: '正常', lastLogin: '2026-09-28 08:40' },
+    { id: 3, username: 'HR李丽',      name: '李丽',     dept: 'hr',      role: 'member', status: '正常', lastLogin: '2026-09-27 17:22' },
+    { id: 4, username: '新员工小李',   name: '李强',     dept: 'service', role: 'member', status: '正常', lastLogin: '-', mustChange: true },
+    { id: 5, username: '临时账号陈七', name: '陈七',     dept: 'all',     role: 'member', status: '锁定至 15:30', lastLogin: '2026-09-28 11:00' },
+  ],
+  documents: [
+    { id: 1, title: '客服_退货政策', dept: 'service', ver: 3, status: 'ready', owner: '张三', eff: '2026-01-10', degraded: false, active: true },
+    { id: 2, title: '客服_话术手册', dept: 'service', ver: 2, status: 'parsing', progress: 45, owner: '李四', eff: '2026-03-01', degraded: false, active: true },
+    { id: 3, title: '客服_保修条款', dept: 'service', ver: 1, status: 'failed', err: '解析失败：文档疑似扫描件或空文档', owner: '张三', eff: '2025-12-01', degraded: false, active: true },
+    { id: 4, title: '客服_快递费率表', dept: 'service', ver: 1, status: 'ready', owner: '王敏', eff: '2026-02-15', degraded: true, active: true },
+    { id: 5, title: 'HR_报销管理制度', dept: 'hr', ver: 4, status: 'ready', owner: '李丽', eff: '2026-04-01', degraded: false, active: true },
+    { id: 6, title: 'HR_考勤与假勤制度', dept: 'hr', ver: 2, status: 'ready', owner: '赵六', eff: '2026-03-20', degraded: false, active: true },
+    { id: 7, title: 'HR_入离职流程', dept: 'hr', ver: 1, status: 'parsing', progress: 80, owner: '李丽', eff: '2026-06-01', degraded: false, active: true },
+  ],
+  qaPairs: [
+    { id: 1, dept: 'service', q: '退货的运费谁承担？', a: '质量问题退货由公司承担运费；非质量问题7天无理由退货由客户承担。', status: true, batch: 'B20260901' },
+    { id: 2, dept: 'service', q: '开发票需要提供什么信息？', a: '需提供：发票抬头、纳税人识别号、注册地址电话、开户行及账号。', status: true, batch: 'B20260901' },
+    { id: 3, dept: 'service', q: '保修期是多久？', a: '整机保修1年，主要部件保修3年，自开具发票之日起计算。', status: true, batch: 'B20260910' },
+    { id: 4, dept: 'service', q: '可以指定快递吗？', a: '默认顺丰，客户可指定中通/圆通，运费差异多退少补。', status: false, batch: 'B20260910' },
+    { id: 5, dept: 'hr', q: '试用期有年假吗？', a: '试用期折算年假：入职满1年后按比例折算，试用期期间暂不可休。', status: true, batch: 'B20260905' },
+    { id: 6, dept: 'hr', q: '报销流程走多久？', a: '单据提交后3个工作日内完成部门审核，财务每周二/四集中打款。', status: true, batch: 'B20260905' },
+  ],
+  conversations: [
+    { id: 1, title: '报销标准咨询', dept: 'hr', time: '09-28 14:20', msgs: [
+      { id: 101, role: 'user', text: '差旅报销标准是多少？', time: '09-28 14:19' },
+      { id: 102, role: 'assistant', segs: [ { t: 'text', s: '根据资料' }, { t: 'cite', n: 1 }, { t: 'text', s: '，市内交通实报实销（上限 80 元/天）；住宿标准一线城市 400 元/晚、其他城市 300 元/晚；餐补 100 元/天，无需发票。' } ],
+        citations: [
+          { n: 1, title: 'HR_报销管理制度', page: 3, path: '第4章 差旅费 > 4.2 住宿与交通标准', score: 0.91, type: 'doc', content: '4.2 住宿与交通标准：住宿一线城市（北上广深）400元/晚，其他城市300元/晚；市内交通实报实销，单日上限80元……' },
+          { n: 2, title: 'FAQ：差旅餐补怎么算？', page: '-', path: '问答对 B20260905', score: 0.88, type: 'qa', content: '餐补100元/天，按出差自然日计，无需提供发票，与住宿标准并行发放。' },
+        ],
+        tokens: 'in 1,024 / out 186', time: '09-28 14:20', feedback: null, cacheHit: false, refused: false },
+    ]},
+    { id: 2, title: '退货流程', dept: 'service', time: '09-28 13:05', msgs: [
+      { id: 201, role: 'user', text: '客户收到货物有质量问题怎么处理退货？', time: '09-28 13:04' },
+      { id: 202, role: 'assistant', segs: [ { t: 'text', s: '质量问题退货流程：客户提供照片凭证 → 客服审核（' }, { t: 'cite', n: 1 }, { t: 'text', s: '）→ 上门取件，运费由公司承担 → 仓库验收后 48 小时内退款。' } ],
+        citations: [ { n: 1, title: '客服_退货政策', page: 2, path: '第2章 质量问题退货 > 2.1 流程', score: 0.93, type: 'doc', content: '2.1 质量问题退货流程：客户提供问题照片→客服1个工作日内审核→安排上门取件（运费公司承担）→仓库验收合格后48小时内原路退款……' } ],
+        tokens: 'in 986 / out 142', time: '09-28 13:05', feedback: 'down', feedbackComment: '缺少"客户拒收"场景', feedbackCategory: '答案错误', refused: false, cacheHit: false },
+    ]},
+  ],
+  badcases: [
+    { id: 1, time: '09-28 13:06', dept: 'service', q: '客户收到货物有质量问题怎么处理退货？', cat: '答案错误', comment: '缺少"客户拒收"场景', status: '待处理' },
+    { id: 2, time: '09-27 16:40', dept: 'hr', q: '年假可以跨年攒吗？', cat: '拒答不当', comment: '考勤制度里有写，但没检索到', status: '已修语料' },
+    { id: 3, time: '09-27 10:12', dept: 'service', q: '保修期内上门收费吗？', cat: '引用无关', comment: '引用的是快递费率', status: '待处理' },
+    { id: 4, time: '09-26 15:30', dept: 'hr', q: '试用期社保怎么缴？', cat: '其他', comment: '答案对但太简略', status: '已忽略' },
+  ],
+  evalQuestions: [
+    { id: 1, dept: 'service', q: '退货的运费谁承担？', expected: '质量问题公司承担，非质量问题客户承担', ref: '客服_退货政策 v3', type: 'factual', active: true,
+      ans: '质量问题退货由公司承担运费；非质量问题 7 天无理由退货由客户承担。', cite: '客服_退货政策 v3 · p2 [0.93] ＋ FAQ-B20260901 [0.90]' },
+    { id: 2, dept: 'service', q: '保修期内上门维修收费吗？', expected: '不收费', ref: '客服_保修条款', type: 'factual', active: true,
+      ans: '整机保修 1 年、主要部件保修 3 年，保修期内上门维修不收取任何费用。', cite: 'FAQ：保修期是多久？[0.92]' },
+    { id: 3, dept: 'hr', q: '试用期社保怎么缴？', expected: '按转正后标准足额缴纳', ref: 'HR_入离职流程', type: 'factual', active: true,
+      ans: '试用期社保按转正后标准足额缴纳，基数与转正后一致。', cite: 'HR_入离职流程 v1 · p4 [0.87]' },
+    { id: 4, dept: 'hr', q: '华东区客户问 HR 制度，应该回答吗？', expected: '拒答（串库）', ref: '-', type: 'cross_reject', active: true,
+      ans: '知识库中未找到相关内容。', cite: '（拒答，无引用）' },
+  ],
+  evalRuns: [
+    { id: 1, name: 'W4 客服上线前回归', model: 'glm-4-air', prompt: 'v1.2', total: 75, correct: 62, acc: 0.827, deptAcc: { service: 0.84, hr: 0.81 }, time: '2026-09-27 18:00' },
+  ],
+  auditLogs: [
+    { id: 1, actor: '管理员', action: 'document.upload', obj: '文档 #7', detail: 'HR_入离职流程 v1', time: '2026-09-28 10:02' },
+    { id: 2, actor: '管理员', action: 'qa.import', obj: '批次 B20260910', detail: '导入 24 条，停用 1 条', time: '2026-09-27 15:10' },
+    { id: 3, actor: '管理员', action: 'user.create', obj: '用户 #4', detail: '新员工小李（客服）', time: '2026-09-26 09:30' },
+  ],
+  thresholds: { refuse: 0.55, qa: 0.85 },
+  auditSeq: 4,
+});
+
+let uid = 1000;
+const nextId = () => ++uid;
+function addAudit(action, obj, detail) {
+  S.auditLogs.unshift({ id: nextId(), actor: S.loggedUser.name, action, obj, detail, time: nowStr() });
+}
+function nowStr() {
+  const d = new Date(); const p = n => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/* ---------- 知识库模拟（问答演示用） ---------- */
+const KB = [
+  { keys: ['报销', '差旅', '发票'], answer: '根据资料{1}，差旅报销标准：住宿一线城市 400 元/晚、其他城市 300 元/晚；市内交通实报实销（单日上限 80 元）；餐补 100 元/天无需发票{2}。单据提交后 3 个工作日完成部门审核。', cites: [
+      { n: 1, title: 'HR_报销管理制度', page: 3, path: '第4章 差旅费 > 4.2 住宿与交通标准', score: 0.91, type: 'doc', content: '4.2 住宿与交通标准：住宿一线城市（北上广深）400元/晚，其他城市300元/晚；市内交通实报实销，单日上限80元；票据需注明事由……' },
+      { n: 2, title: 'FAQ：差旅餐补怎么算？', page: '-', path: '问答对 B20260905', score: 0.88, type: 'qa', content: '餐补100元/天，按出差自然日计，无需提供发票，与住宿标准并行发放。' } ] },
+  { keys: ['退货', '退款', '质量'], answer: '质量问题退货{1}：客户提供照片凭证 → 客服 1 个工作日内审核 → 上门取件（运费公司承担）→ 仓库验收后 48 小时内原路退款。非质量问题 7 天无理由退货，运费由客户承担{2}。', cites: [
+      { n: 1, title: '客服_退货政策', page: 2, path: '第2章 质量问题退货 > 2.1 流程', score: 0.93, type: 'doc', content: '2.1 质量问题退货流程：客户提供问题照片→客服1个工作日内审核→安排上门取件（运费公司承担）→仓库验收合格后48小时内原路退款……' },
+      { n: 2, title: 'FAQ：退货的运费谁承担？', page: '-', path: '问答对 B20260901', score: 0.90, type: 'qa', content: '质量问题退货由公司承担运费；非质量问题7天无理由退货由客户承担。' } ] },
+  { keys: ['保修', '维修'], answer: '根据资料{1}，整机保修 1 年、主要部件保修 3 年，自开票之日起计算；保修期内上门维修不收取任何费用。', cites: [
+      { n: 1, title: 'FAQ：保修期是多久？', page: '-', path: '问答对 B20260910', score: 0.92, type: 'qa', content: '整机保修1年，主要部件保修3年，自开具发票之日起计算。' } ] },
+  { keys: ['年假', '请假', '考勤'], answer: '根据资料{1}，年假按工龄折算：满 1 年不足 10 年的 5 天/年，满 10 年的 10 天/年；当年未休完的年假经审批可顺延至次年 3 月底{2}。', cites: [
+      { n: 1, title: 'HR_考勤与假勤制度', page: 5, path: '第3章 假勤管理 > 3.4 年假', score: 0.89, type: 'doc', content: '3.4 年假：员工累计工作满1年不满10年的，年休假5天；满10年的10天。当年未休完部分经部门负责人审批可顺延至次年3月底……' },
+      { n: 2, title: 'FAQ：试用期有年假吗？', page: '-', path: '问答对 B20260905', score: 0.85, type: 'qa', content: '试用期折算年假：入职满1年后按比例折算，试用期期间暂不可休。' } ] },
+];
+function mockAnswer(q) {
+  for (const item of KB) if (item.keys.some(k => q.includes(k))) return item;
+  return null;
+}
+
+/* ---------- 根组件 ---------- */
+const App = {
+  data() { return { S, page: 'login', loginUser: null, sidebarCollapsed: false }; },
+  computed: {
+    isAdmin() { return S.loggedUser && S.loggedUser.role === 'admin'; },
+    menus() {
+      const all = [
+        { key: 'chat', label: '智能问答' },
+        { key: 'docs', label: '知识库·文档', admin: true },
+        { key: 'qa', label: '知识库·问答对', admin: true },
+        { key: 'retrieval', label: '检索测试', admin: true },
+        { key: 'users', label: '用户管理', admin: true },
+        { key: 'messages', label: '提问记录', admin: true },
+        { key: 'badcase', label: 'badcase 管理', admin: true },
+        { key: 'eval', label: '评测管理', admin: true },
+        { key: 'overview', label: '运营概览', admin: true },
+        { key: 'audit', label: '审计日志', admin: true },
+      ];
+      return all.filter(m => !m.admin || this.isAdmin);
+    },
+  },
+  methods: {
+    onLogged(user) { S.loggedUser = user; this.page = 'chat'; },
+    logout() { S.loggedUser = null; this.page = 'login'; },
+  },
+  template: `
+  <div style="height:100%">
+    <login-view v-if="!S.loggedUser" @logged="onLogged"></login-view>
+    <div v-else class="layout">
+      <div class="sidebar">
+        <div class="logo">📘 企业智能工作台</div>
+        <el-menu :default-active="page" style="border-right:none;flex:1" @select="k => page = k">
+          <el-menu-item v-for="m in menus" :key="m.key" :index="m.key">{{ m.label }}</el-menu-item>
+        </el-menu>
+        <div style="padding:12px 16px;font-size:12px;color:#c0c4cc">界面原型 v1.0 · 评审用</div>
+      </div>
+      <div class="main">
+        <div class="topbar">
+          <span style="font-weight:600">{{ menus.find(m => m.key === page)?.label || '智能问答' }}</span>
+          <span style="display:flex;align-items:center;gap:12px">
+            <el-tag size="small" type="info">{{ S.deptName[S.loggedUser.dept] }}</el-tag>
+            <span>{{ S.loggedUser.name }}（{{ S.loggedUser.role === 'admin' ? '管理员' : '成员' }}）</span>
+            <el-button link type="danger" @click="logout">退出</el-button>
+          </span>
+        </div>
+        <div class="content" :style="page === 'chat' ? 'padding:12px' : ''">
+          <chat-view v-if="page === 'chat'"></chat-view>
+          <doc-view v-else-if="page === 'docs'"></doc-view>
+          <qa-view v-else-if="page === 'qa'"></qa-view>
+          <retrieval-view v-else-if="page === 'retrieval'"></retrieval-view>
+          <users-view v-else-if="page === 'users'"></users-view>
+          <messages-view v-else-if="page === 'messages'"></messages-view>
+          <badcase-view v-else-if="page === 'badcase'"></badcase-view>
+          <eval-view v-else-if="page === 'eval'"></eval-view>
+          <audit-view v-else-if="page === 'audit'"></audit-view>
+          <overview-view v-else-if="page === 'overview'"></overview-view>
+        </div>
+      </div>
+    </div>
+  </div>`,
+};
+
+/* ---------- P1 登录 ---------- */
+const LoginView = {
+  data() {
+    return { form: { username: '', password: '' }, err: '', attempts: 0, locked: false,
+      changePwd: { show: false, p1: '', p2: '', err: '' } };
+  },
+  template: `
+  <div>
+    <div class="login-box">
+      <h2>企业智能工作台</h2>
+      <div class="login-sub">基于企业知识库的智能问答 · 内部系统</div>
+      <el-form @submit.prevent>
+        <el-form-item><el-input v-model="form.username" placeholder="用户名" @keyup.enter="doLogin"></el-input></el-form-item>
+        <el-form-item><el-input v-model="form.password" type="password" placeholder="密码" show-password @keyup.enter="doLogin"></el-input></el-form-item>
+        <div class="err-inline" v-if="err">{{ err }}</div>
+        <el-button type="primary" style="width:100%;margin-top:8px" @click="doLogin">登 录</el-button>
+      </el-form>
+      <div class="demo-tip">
+        演示账号（原型无真实鉴权，密码统一 <b>123456</b>）：<br/>
+        admin（管理员，可见全部页面）· 客服小王（成员，仅问答页）<br/>
+        新员工小李（演示首登强制改密）
+      </div>
+    </div>
+    <el-dialog v-model="changePwd.show" title="首次登录请修改密码" :close-on-click-modal="false" :show-close="false" width="420px">
+      <el-form label-width="90px">
+        <el-form-item label="新密码"><el-input v-model="changePwd.p1" type="password" show-password placeholder="至少 8 位"></el-input></el-form-item>
+        <el-form-item label="确认密码"><el-input v-model="changePwd.p2" type="password" show-password></el-input></el-form-item>
+        <div class="err-inline" v-if="changePwd.err">{{ changePwd.err }}</div>
+      </el-form>
+      <template #footer>
+        <el-button type="primary" @click="doChangePwd">确认修改并进入</el-button>
+      </template>
+    </el-dialog>
+  </div>`,
+  methods: {
+    doLogin() {
+      if (this.locked) { this.err = '账号已锁定（演示：失败 5 次），请 15 分钟后再试'; return; }
+      const u = S.users.find(x => x.username === this.form.username.trim());
+      if (!u || this.form.password !== '123456') {
+        this.attempts++;
+        if (this.attempts >= 5) { this.locked = true; this.err = '连续失败 5 次，账号已锁定 15 分钟'; }
+        else this.err = '用户名或密码错误（演示密码：123456），已失败 ' + this.attempts + '/5 次';
+        return;
+      }
+      if (u.mustChange) { this.pendingUser = u; this.changePwd.show = true; return; }
+      u.lastLogin = nowStr();
+      this.$emit('logged', u);
+    },
+    doChangePwd() {
+      if (this.changePwd.p1.length < 8) { this.changePwd.err = '密码至少 8 位'; return; }
+      if (this.changePwd.p1 !== this.changePwd.p2) { this.changePwd.err = '两次输入不一致'; return; }
+      const u = this.pendingUser; u.mustChange = false; u.lastLogin = nowStr();
+      this.changePwd.show = false;
+      this.$emit('logged', u);
+    },
+  },
+};
+
+/* ---------- P2 智能问答 ---------- */
+const ChatView = {
+  data() {
+    return {
+      S, activeConvId: S.conversations[0]?.id || null,
+      input: '', streaming: false,
+      citeHl: 0,
+      citeCollapsed: false,
+      fbDialog: { show: false, msg: null, cat: '', comment: '', err: '' },
+      srcDialog: { show: false, cite: null },
+      cats: ['答案错误', '引用无关', '拒答不当', '其他'],
+    };
+  },
+  computed: {
+    activeConv() { return S.conversations.find(c => c.id === this.activeConvId); },
+    lastAssistant() {
+      if (!this.activeConv) return null;
+      const a = [...this.activeConv.msgs].reverse().find(m => m.role === 'assistant');
+      return a || null;
+    },
+    inputLen() { return this.input.trim().length; },
+    inputErr() { if (this.inputLen === 0) return ''; if (this.inputLen > 2000) return '问题长度不能超过 2000 字'; return ''; },
+  },
+  methods: {
+    onEnter(e) {
+      // 中文输入法选词回车不发送（isComposing 守卫）
+      if (e.isComposing || e.keyCode === 229) return;
+      this.send();
+    },
+    newConv() {
+      const c = { id: nextId(), title: '新会话', dept: S.loggedUser.dept, time: nowStr(), msgs: [] };
+      S.conversations.unshift(c); this.activeConvId = c.id;
+    },
+    delConv(c) {
+      const i = S.conversations.indexOf(c); S.conversations.splice(i, 1);
+      if (this.activeConvId === c.id) this.activeConvId = S.conversations[0]?.id || null;
+      ElementPlus.ElMessage.success('会话已删除');
+    },
+    visibleSegs(m) {
+      if (m.role === 'user' || m.refused || !m.segs) return m.refused ? [{ t: 'text', s: m.text }] : [{ t: 'text', s: m.text }];
+      if (m.shown === undefined || m.shown >= m.total) return m.segs;
+      const out = []; let left = m.shown;
+      for (const seg of m.segs) {
+        if (seg.t === 'cite') { out.push(seg); continue; }
+        if (left <= 0) break;
+        if (seg.s.length <= left) { out.push(seg); left -= seg.s.length; }
+        else { out.push({ t: 'text', s: seg.s.slice(0, left) }); left = 0; }
+      }
+      return out;
+    },
+    send() {
+      if (this.inputErr || this.streaming) return;
+      const q = this.input.trim(); if (!q) return;
+      if (!this.activeConv) this.newConv();
+      const conv = this.activeConv;
+      conv.msgs.push({ id: nextId(), role: 'user', text: q, time: nowStr() });
+      if (conv.title === '新会话') conv.title = q.slice(0, 12);
+      this.input = '';
+      conv.time = nowStr();
+      const ci = S.conversations.indexOf(conv);
+      if (ci > 0) { S.conversations.splice(ci, 1); S.conversations.unshift(conv); }
+      const cacheKey = S.loggedUser.dept + '|' + q;
+      this.streaming = true;
+      const hit = this._cache && this._cache[cacheKey];
+      const finish = (answer) => {
+        const m = { id: nextId(), role: 'assistant', time: nowStr(), feedback: null,
+          cacheHit: !!hit, refused: !answer,
+          segs: answer ? answer.segs : undefined,
+          text: answer ? undefined : '知识库中未找到相关内容。建议换个问法，或联系管理员补充知识库。',
+          citations: answer ? answer.cites : [], tokens: answer ? ('in ' + (800 + q.length * 2) + ' / out ' + (120 + q.length)) : '-',
+          durationMs: answer ? 900 + q.length * 15 : 600 };
+        if (hit) { m.segs = hit.segs; m.citations = hit.citations; m.tokens = hit.tokens; }
+        conv.msgs.push(m);
+        if (!hit && answer) this._cache = { ...(this._cache || {}), [cacheKey]: { segs: m.segs, citations: m.citations, tokens: m.tokens } };
+        if (!hit) this.typeOut(m);
+        else { this.streaming = false; ElementPlus.ElMessage({ message: '命中缓存，本次未调用模型', type: 'info' }); }
+        this.scrollBottom();
+      };
+      setTimeout(() => {
+        // 演示断流：问题含"断流"时模拟生成中断（error 事件分支，CHAT-12）
+        if (q.includes('断流')) {
+          const m = { id: nextId(), role: 'assistant', time: nowStr(), feedback: null,
+            segs: [{ t: 'text', s: '根据资料[1]，……' }], shown: 12, total: 12,
+            citations: [], tokens: 'in 912 / out 36', durationMs: 2400,
+            failed: true, refused: false, cacheHit: false };
+          conv.msgs.push(m);
+          this.streaming = false;
+          this.scrollBottom();
+          ElementPlus.ElMessage({ message: '生成中断，请点击"重试"重新生成', type: 'error' });
+          return;
+        }
+        const item = mockAnswer(q);
+        if (!item) { finish(null); return; }
+        const segs = [];
+        for (const part of item.answer.split(/\{(\d+)\}/).filter(x => x !== '')) {
+          if (/^\d+$/.test(part)) segs.push({ t: 'cite', n: Number(part) });
+          else segs.push({ t: 'text', s: part });
+        }
+        finish({ segs, cites: item.cites });
+      }, 600);
+    },
+    typeOut(m) {
+      if (!m.segs) { this.streaming = false; return; }  // 拒答路径无 segments，直接结束
+      m.total = m.segs.reduce((n, s) => n + (s.t === 'text' ? s.s.length : 1), 0);
+      m.shown = 0;
+      const timer = setInterval(() => {
+        m.shown += 3;
+        this.scrollBottom();
+        if (m.shown >= m.total) { m.shown = m.total; clearInterval(timer); this.streaming = false; }
+      }, 24);
+    },
+    scrollBottom() {
+      nextTick(() => { const el = this.$refs.msgs; if (el) el.scrollTop = el.scrollHeight; });
+    },
+    retryMsg(m) {
+      // 中断重试：移除失败消息，用原问题重新生成（重试=新消息，不重复落库用户消息）
+      const conv = this.activeConv;
+      const i = conv.msgs.indexOf(m);
+      if (i >= 0) conv.msgs.splice(i, 1);
+      const lastUser = [...conv.msgs].reverse().find(x => x.role === 'user');
+      if (lastUser) { this.input = lastUser.text; this.send(); }
+    },
+    hlCite(n) { this.citeHl = n; nextTick(() => { const el = document.getElementById('cite-' + n); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }); },
+    showSrc(cite) { this.srcDialog.cite = cite; this.srcDialog.show = true; },
+    openFb(m) { this.fbDialog = { show: true, msg: m, cat: '', comment: '', err: '' }; },
+    submitFb() {
+      if (!this.fbDialog.cat) { this.fbDialog.err = '请选择问题分类'; return; }
+      if (!this.fbDialog.comment.trim()) { this.fbDialog.err = '点踩必须填写备注（帮助定位 badcase）'; return; }
+      const m = this.fbDialog.msg;
+      m.feedback = 'down'; m.feedbackCategory = this.fbDialog.cat; m.feedbackComment = this.fbDialog.comment;
+      S.badcases.unshift({ id: nextId(), time: nowStr(), dept: S.loggedUser.dept, q: this.activeConv.msgs.filter(x => x.role === 'user').slice(-1)[0].text,
+        cat: this.fbDialog.cat, comment: this.fbDialog.comment, status: '待处理' });
+      addAudit('message.feedback', '会话 #' + this.activeConv.id, '点踩：' + this.fbDialog.cat);
+      this.fbDialog.show = false;
+      ElementPlus.ElMessage.success('反馈已提交，感谢帮助改进');
+    },
+    like(m) { m.feedback = 'up'; ElementPlus.ElMessage.success('已点赞'); },
+  },
+  template: `
+  <div class="chat-wrap">
+    <div class="conv-list">
+      <el-button type="primary" class="new-btn" style="width:calc(100% - 20px)" @click="newConv">＋ 新会话</el-button>
+      <div class="conv-items">
+        <el-empty v-if="!S.conversations.length" description="还没有会话" :image-size="60">
+          <el-button type="primary" size="small" @click="newConv">发起第一场问答</el-button>
+        </el-empty>
+        <div v-for="c in S.conversations" :key="c.id" class="conv-item" :class="{active: c.id === activeConvId}" @click="activeConvId = c.id">
+          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ c.title }}<div style="font-size:12px;color:#c0c4cc">{{ c.time }}</div></span>
+          <el-popconfirm title="确认删除该会话？" confirm-button-text="删除" cancel-button-text="取消" @confirm="delConv(c)">
+            <template #reference><el-button class="del" link size="small">删除</el-button></template>
+          </el-popconfirm>
+        </div>
+      </div>
+    </div>
+    <div class="chat-main">
+      <el-button v-if="citeCollapsed" link type="primary" size="small" style="position:absolute;top:10px;right:12px;z-index:5" @click="citeCollapsed = false">引用面板</el-button>
+      <div class="msgs" ref="msgs">
+        <el-empty v-if="!activeConv || !activeConv.msgs.length" description="问点什么吧，例如：差旅报销标准是多少？"></el-empty>
+        <template v-for="m in activeConv?.msgs || []" :key="m.id">
+          <div v-if="m.role === 'user'" class="bubble user">{{ m.text }}</div>
+          <div v-else class="bubble assistant">
+            <template v-for="(seg, i) in visibleSegs(m)" :key="i">
+              <span v-if="seg.t === 'text'">{{ seg.s }}</span>
+              <sup v-else class="cite" :class="{hl: citeHl === seg.n}" @click="hlCite(seg.n)">{{ seg.n }}</sup>
+            </template>
+            <div class="msg-meta" v-if="m.shown === undefined || m.shown >= (m.total || 0)">
+              <template v-if="m.failed">
+                <el-tag type="danger" size="small">生成中断</el-tag>
+                <el-button link type="primary" size="small" @click="retryMsg(m)">重试</el-button>
+              </template>
+              <span v-if="m.refused">⚠️ 已拒答：知识库中暂无相关内容</span>
+              <el-tag v-if="m.cacheHit" size="small" type="info">来自缓存</el-tag>
+              <span v-if="m.tokens && m.tokens !== '-'">token: {{ m.tokens }} · {{ m.durationMs || '-' }}ms</span>
+              <span style="flex:1"></span>
+              <template v-if="!m.refused">
+                <el-button link size="small" :type="m.feedback === 'up' ? 'primary' : ''" @click="like(m)">👍</el-button>
+                <el-button link size="small" :type="m.feedback === 'down' ? 'danger' : ''" @click="openFb(m)">👎</el-button>
+              </template>
+              <span v-if="m.feedback === 'down'" style="color:#f56c6c">已点踩：{{ m.feedbackCategory }}</span>
+            </div>
+          </div>
+        </template>
+      </div>
+      <div class="chat-input">
+        <el-input v-model="input" type="textarea" :rows="2" resize="none" maxlength="2100"
+          placeholder="输入问题（1-2000 字），Enter 发送 / Shift+Enter 换行" @keydown.enter.exact.prevent="onEnter"></el-input>
+        <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">
+          <el-tooltip :content="streaming ? '回答生成中，请稍候' : (inputErr || (inputLen === 0 ? '请输入问题' : '发送'))" :disabled="streaming" placement="top">
+            <span><el-button type="primary" :disabled="streaming || inputErr !== ''" @click="send">发送</el-button></span>
+          </el-tooltip>
+          <span style="font-size:12px" :class="inputErr ? 'err-inline' : ''">{{ inputLen }}/2000{{ inputErr ? ' ' + inputErr : '' }}</span>
+        </div>
+      </div>
+    </div>
+      <div class="cite-panel" v-if="!citeCollapsed">
+      <div class="head" style="display:flex;align-items:center">引用来源<span style="flex:1"></span><el-button link size="small" @click="citeCollapsed = true">收起</el-button></div>
+      <div class="list">
+        <el-empty v-if="!lastAssistant || !lastAssistant.citations || !lastAssistant.citations.length" description="无引用（拒答回答不带引用）" :image-size="60"></el-empty>
+        <div v-for="c in lastAssistant?.citations || []" :key="c.n" class="cite-card" :id="'cite-' + c.n" :class="{hl: citeHl === c.n}" @click="showSrc(c)">
+          <div><b>[{{ c.n }}] {{ c.title }}</b> <el-tag size="small" :type="c.type === 'qa' ? 'warning' : 'primary'">{{ c.type === 'qa' ? '问答对' : '文档块' }}</el-tag></div>
+          <div class="score">{{ c.path }} · 相似度 {{ c.score }}</div>
+        </div>
+      </div>
+    </div>
+
+    <el-dialog v-model="fbDialog.show" title="反馈问题（点踩）" :close-on-click-modal="false" width="440px">
+      <el-form label-width="80px">
+        <el-form-item label="分类" required>
+          <el-radio-group v-model="fbDialog.cat">
+            <el-radio v-for="c in cats" :key="c" :value="c">{{ c }}</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="备注" required>
+          <el-input v-model="fbDialog.comment" type="textarea" :rows="3" placeholder="请描述问题，帮助定位 badcase"></el-input>
+        </el-form-item>
+        <div class="err-inline" v-if="fbDialog.err">{{ fbDialog.err }}</div>
+      </el-form>
+      <template #footer>
+        <el-button @click="fbDialog.show = false">取消</el-button>
+        <el-button type="primary" @click="submitFb">提交反馈</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="srcDialog.show" title="引用原文核对" :close-on-click-modal="false" width="560px">
+      <template v-if="srcDialog.cite">
+        <p style="margin:0 0 8px"><b>[{{ srcDialog.cite.n }}] {{ srcDialog.cite.title }}</b></p>
+        <p style="margin:0 0 8px;color:#909399;font-size:13px">页码/来源：{{ srcDialog.cite.page }} ｜ 位置：{{ srcDialog.cite.path }} ｜ 相似度：{{ srcDialog.cite.score }}</p>
+        <div class="readonly-grey"><el-input type="textarea" :rows="6" :model-value="srcDialog.cite.content" readonly></el-input></div>
+      </template>
+    </el-dialog>
+  </div>`,
+};
+
+/* ---------- P3 文档管理 ---------- */
+const DocView = {
+  data() {
+    return { S, page: 1, pageSize: 20,
+      filters: { dept: '', status: '', kw: '' },
+      upload: { show: false, step: 1, file: null, fileErr: '', form: { title: '', dept: '', owner: '', eff: '' }, comply: false, formErr: '' },
+      hist: { show: false, doc: null },
+      versions: [
+        { ver: 3, date: '2026-01-10', by: '张三', status: '生效中' },
+        { ver: 2, date: '2025-09-01', by: '张三', status: '已归档' },
+        { ver: 1, date: '2025-05-01', by: '李四', status: '已归档' },
+      ],
+      rebuilding: false, rebuildConfirm: false };
+  },
+  computed: {
+    filtered() {
+      return S.documents.filter(d =>
+        (!this.filters.dept || d.dept === this.filters.dept) &&
+        (!this.filters.status || d.status === this.filters.status) &&
+        (!this.filters.kw || d.title.includes(this.filters.kw.trim())));
+    },
+    paged() { const s = (this.page - 1) * this.pageSize; return this.filtered.slice(s, s + this.pageSize); },
+  },
+  template: `
+  <div>
+    <div class="filter-row" style="background:#fff;border:1px solid #e4e7ed;border-radius:6px;padding:8px 12px;font-size:13px">
+      <span>文档总数 <b>7</b></span><el-divider direction="vertical"></el-divider>
+      <span>就绪率 <b>71%</b></span><el-divider direction="vertical"></el-divider>
+      <span>重复组 <b style="color:#e6a23c">1</b></span><el-divider direction="vertical"></el-divider>
+      <span>零召回文档 <b style="color:#f56c6c">2</b></span><el-divider direction="vertical"></el-divider>
+      <span>待过期 <b style="color:#e6a23c">1</b></span>
+      <span style="flex:1"></span>
+      <span style="color:#c0c4cc;font-size:12px">语料健康度（演示数据）</span>
+    </div>
+    <div class="filter-row">
+      <el-select v-model="filters.dept" placeholder="部门" clearable style="width:130px" @change="page = 1">
+        <el-option label="客服" value="service"></el-option><el-option label="人力" value="hr"></el-option><el-option label="全员" value="all"></el-option>
+      </el-select>
+      <el-select v-model="filters.status" placeholder="状态" clearable style="width:130px" @change="page = 1">
+        <el-option label="排队中" value="pending"></el-option><el-option label="解析中" value="parsing"></el-option>
+        <el-option label="就绪" value="ready"></el-option><el-option label="失败" value="failed"></el-option>
+      </el-select>
+      <el-input v-model="filters.kw" placeholder="标题关键字" style="width:200px" clearable @keyup.enter="page = 1"></el-input>
+      <el-button type="primary" @click="page = 1">查询</el-button>
+      <el-button @click="filters = { dept: '', status: '', kw: '' }; page = 1">重置</el-button>
+      <span style="flex:1"></span>
+      <el-tooltip content="全库重建期间问答不中断；演示环境不真实执行" placement="top">
+        <el-button :loading="rebuilding" @click="rebuildConfirm = true">全库重建索引</el-button>
+      </el-tooltip>
+      <el-button type="primary" @click="openUpload">＋ 上传文档</el-button>
+    </div>
+    <el-table :data="paged" border stripe>
+      <el-table-column prop="title" label="标题" min-width="180">
+        <template #default="{ row }">{{ row.title }} <span style="color:#909399">v{{ row.ver }}</span>
+          <el-tag v-if="row.degraded" size="small" type="info" style="margin-left:4px">降级解析</el-tag></template>
+      </el-table-column>
+      <el-table-column label="部门" width="90"><template #default="{ row }">{{ S.deptName[row.dept] }}</template></el-table-column>
+      <el-table-column label="状态" width="170">
+        <template #default="{ row }">
+          <el-tag v-if="row.status === 'ready'" type="success">● 就绪</el-tag>
+          <span v-else-if="row.status === 'parsing'"><el-tag type="warning">◐ 解析中</el-tag>
+            <el-progress :percentage="row.progress || 0" :stroke-width="6" style="width:90px;display:inline-table;vertical-align:middle;margin-left:6px"></el-progress></span>
+          <el-tooltip v-else-if="row.status === 'failed'" :content="row.err" placement="top">
+            <el-tag type="danger">✖ 失败(悬停看原因)</el-tag></el-tooltip>
+          <el-tag v-else type="info">◔ 排队中</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column prop="owner" label="责任人" width="90"></el-table-column>
+      <el-table-column prop="eff" label="生效日期" width="110"></el-table-column>
+      <el-table-column label="操作" width="230" fixed="right">
+        <template #default="{ row }">
+          <el-button link type="primary" @click="hist.show = true; hist.doc = row">版本历史</el-button>
+          <el-button link type="primary" @click="rebuild(row)">重建索引</el-button>
+          <el-button v-if="row.status === 'failed' || row.status === 'pending'" link type="warning" @click="retry(row)">重试</el-button>
+          <el-popconfirm title="该文档将被停用且检索不再命中，确认删除？" confirm-button-text="删除" cancel-button-text="取消" @confirm="del(row)">
+            <template #reference><el-button link type="danger">删除</el-button></template>
+          </el-popconfirm>
+        </template>
+      </el-table-column>
+      <template #empty>
+        <el-empty description="还没有文档" :image-size="60">
+          <el-button type="primary" size="small" @click="openUpload">上传第一份文档</el-button>
+        </el-empty>
+      </template>
+    </el-table>
+    <div class="pager-row">
+      <el-pagination v-model:current-page="page" v-model:page-size="pageSize" :page-sizes="[10,20,50,100]"
+        layout="total, sizes, prev, pager, next" :total="filtered.length"></el-pagination>
+    </div>
+
+    <el-dialog v-model="upload.show" title="上传文档" :close-on-click-modal="false" width="560px" @closed="resetUpload">
+      <template v-if="upload.step === 1">
+        <el-upload drag :auto-upload="false" :limit="1" :on-change="onFile" :file-list="upload.file ? [upload.file] : []" accept=".pdf,.docx,.doc">
+          <div style="padding:20px">将文件拖到此处，或 <em>点击选择</em><br/><span style="font-size:12px;color:#909399">仅支持 pdf / docx，≤50MB；.doc 请先另存为 docx</span></div>
+        </el-upload>
+        <div class="err-inline" v-if="upload.fileErr">{{ upload.fileErr }}</div>
+        <div v-if="upload.file" style="margin-top:10px;border:1px solid #ebeef5;border-radius:6px;padding:8px 12px;font-size:13px;line-height:1.9">
+          <div style="font-weight:600">自动预检</div>
+          <div>✅ 精确查重：库内无相同文件</div>
+          <div style="color:#e6a23c">⚠️ 近似重复：与《客服_退货政策》相似度 92%，可继续上传并计入重复组</div>
+          <div>✅ 敏感信息扫描：未命中</div>
+          <div>✅ 编码检测：正常（近似/敏感/编码的完整结果在解析完成后展示）</div>
+        </div>
+      </template>
+      <template v-else>
+        <el-form label-width="90px">
+          <el-form-item label="标题" required><el-input v-model="upload.form.title" placeholder="规范命名：部门_主题（版本自动递增）"></el-input></el-form-item>
+          <el-form-item label="部门" required>
+            <el-select v-model="upload.form.dept" style="width:100%"><el-option label="客服" value="service"></el-option><el-option label="人力" value="hr"></el-option><el-option label="全员" value="all"></el-option></el-select>
+          </el-form-item>
+          <el-form-item label="责任人" required><el-input v-model="upload.form.owner"></el-input></el-form-item>
+          <el-form-item label="生效日期" required><el-date-picker v-model="upload.form.eff" type="date" value-format="YYYY-MM-DD" style="width:100%"></el-date-picker></el-form-item>
+          <el-form-item label="到期日期"><el-date-picker v-model="upload.form.exp" type="date" value-format="YYYY-MM-DD" style="width:100%" placeholder="选填，到期自动下线"></el-date-picker></el-form-item>
+          <el-form-item label="合规确认" required>
+            <el-checkbox v-model="upload.comply">我确认本文档为试点部门<b>人人可读</b>，无涉密内容</el-checkbox>
+          </el-form-item>
+          <div class="err-inline" v-if="upload.formErr">{{ upload.formErr }}</div>
+        </el-form>
+      </template>
+      <template #footer>
+        <el-button @click="upload.show = false">取消</el-button>
+        <el-button v-if="upload.step === 1" type="primary" :disabled="!upload.file" @click="upload.step = 2">下一步</el-button>
+        <el-button v-else type="primary" @click="submitUpload">提交入库</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="hist.show" :title="'版本历史：' + (hist.doc?.title || '')" :close-on-click-modal="false" width="520px">
+      <el-table :data="versions" border>
+        <el-table-column prop="ver" label="版本" width="80"><template #default="{ row }">v{{ row.ver }}</template></el-table-column>
+        <el-table-column prop="date" label="上传日期" width="120"></el-table-column>
+        <el-table-column prop="by" label="上传人" width="100"></el-table-column>
+        <el-table-column prop="status" label="状态">
+          <template #default="{ row }"><el-tag :type="row.status === '生效中' ? 'success' : 'info'" size="small">{{ row.status }}</el-tag></template>
+        </el-table-column>
+      </el-table>
+      <div style="font-size:12px;color:#909399;margin-top:8px">同一主题任一时刻仅一个生效版本；历史版本只读可查。</div>
+    </el-dialog>
+
+    <el-dialog v-model="rebuildConfirm" title="全库重建索引" :close-on-click-modal="false" width="440px">
+      <el-alert type="error" :closable="false" show-icon
+        title="将对全部文档重建向量索引。重建期间问答不中断，但新上传文档需等待重建完成。确认执行？"></el-alert>
+      <template #footer>
+        <el-button @click="rebuildConfirm = false">取消</el-button>
+        <el-button type="danger" :loading="rebuilding" @click="doRebuildAll">确认重建</el-button>
+      </template>
+    </el-dialog>
+  </div>`,
+  methods: {
+    onFile(file) {
+      const name = file.name.toLowerCase();
+      if (name.endsWith('.doc')) { this.upload.fileErr = '.doc 不支持，请另存为 docx 后上传'; this.upload.file = null; return; }
+      if (!name.endsWith('.pdf') && !name.endsWith('.docx')) { this.upload.fileErr = '仅支持 pdf / docx 文件'; this.upload.file = null; return; }
+      if (file.size > 50 * 1024 * 1024) { this.upload.fileErr = '文件超过 50MB'; this.upload.file = null; return; }
+      this.upload.fileErr = ''; this.upload.file = file;
+      if (!this.upload.form.title) this.upload.form.title = file.name.replace(/\.[^.]+$/, '');
+    },
+    openUpload() { this.upload.show = true; },
+    resetUpload() { this.upload = { show: false, step: 1, file: null, fileErr: '', form: { title: '', dept: '', owner: '', eff: '', exp: '' }, comply: false, formErr: '' }; },
+    submitUpload() {
+      const f = this.upload.form;
+      if (!f.title || !f.dept || !f.owner || !f.eff) { this.upload.formErr = '标题、部门、责任人、生效日期均为必填元数据'; return; }
+      if (!this.upload.comply) { this.upload.formErr = '必须勾选合规确认后才能入库'; return; }
+      const dept = f.dept === 'all' ? 'all' : f.dept;
+      const doc = { id: nextId(), title: f.title, dept, ver: 1, status: 'pending', owner: f.owner, eff: f.eff, exp: f.exp || null, degraded: false, active: true };
+      S.documents.unshift(doc);
+      this.page = 1;
+      addAudit('document.upload', '文档 #' + doc.id, f.title + ' v1');
+      this.upload.show = false;
+      ElementPlus.ElMessage.success('已加入解析队列');
+      setTimeout(() => { doc.status = 'parsing'; }, 1200);
+      const t = setInterval(() => {
+        doc.progress = (doc.progress || 0) + 15;
+        if (doc.progress >= 100) { clearInterval(t); doc.status = 'ready'; ElementPlus.ElMessage.success(doc.title + ' 解析完成'); }
+      }, 900);
+    },
+    retry(row) { row.status = 'parsing'; row.progress = 10; addAudit('document.retry', '文档 #' + row.id, row.title);
+      const t = setInterval(() => { row.progress += 20; if (row.progress >= 100) { clearInterval(t); row.status = 'ready'; row.err = undefined; } }, 700); },
+    del(row) {
+      if (row.title.includes('退货政策')) { ElementPlus.ElMessage.warning('该文档被评测题引用，请先停用相关评测题再删除'); return; }
+      S.documents = S.documents.filter(d => d.id !== row.id); addAudit('document.delete', '文档 #' + row.id, row.title); ElementPlus.ElMessage.success('已删除');
+    },
+    rebuild(row) { addAudit('document.rebuild', '文档 #' + row.id, row.title); ElementPlus.ElMessage.success('重建任务已提交，服务不中断（演示）'); },
+    rebuildAll() { this.rebuilding = true; this.rebuildConfirm = false; setTimeout(() => { this.rebuilding = false; addAudit('index.rebuild_all', '全库', '7 文档'); ElementPlus.ElMessage.success('全库重建任务已提交（演示）'); }, 1200); },
+  },
+};
+
+/* ---------- P4 问答对管理 ---------- */
+const QaView = {
+  data() {
+    return { S, page: 1, pageSize: 20, filters: { dept: '', status: '', kw: '' },
+      wizard: { show: false, step: 0, file: null, fileErr: '', report: null },
+      edit: { show: false, row: null, form: { q: '', a: '' }, err: '' } };
+  },
+  computed: {
+    filtered() {
+      return S.qaPairs.filter(x =>
+        (!this.filters.dept || x.dept === this.filters.dept) &&
+        (this.filters.status === '' || x.status === this.filters.status) &&
+        (!this.filters.kw || x.q.includes(this.filters.kw.trim())));
+    },
+    paged() { const s = (this.page - 1) * this.pageSize; return this.filtered.slice(s, s + this.pageSize); },
+  },
+  template: `
+  <div>
+    <div class="filter-row">
+      <el-select v-model="filters.dept" placeholder="部门" clearable style="width:130px" @change="page = 1">
+        <el-option label="客服" value="service"></el-option><el-option label="人力" value="hr"></el-option>
+      </el-select>
+      <el-select v-model="filters.status" placeholder="状态" clearable style="width:130px" @change="page = 1">
+        <el-option label="启用" :value="true"></el-option><el-option label="停用" :value="false"></el-option>
+      </el-select>
+      <el-input v-model="filters.kw" placeholder="问题关键字" style="width:200px" clearable @keyup.enter="page = 1"></el-input>
+      <el-button type="primary" @click="page = 1">查询</el-button>
+      <el-button @click="filters = { dept: '', status: '', kw: '' }; page = 1">重置</el-button>
+      <span style="flex:1"></span>
+      <el-button @click="ElementPlus.ElMessage.success('模板已下载（含 3 行示例）')">下载导入模板</el-button>
+      <el-button type="primary" @click="wizard.show = true; wizard.step = 0">Excel 批量导入</el-button>
+    </div>
+    <el-table :data="paged" border stripe>
+      <el-table-column prop="q" label="问题" min-width="220"></el-table-column>
+      <el-table-column prop="a" label="答案" min-width="300" show-overflow-tooltip></el-table-column>
+      <el-table-column label="部门" width="90"><template #default="{ row }">{{ S.deptName[row.dept] }}</template></el-table-column>
+      <el-table-column prop="upd" label="更新时间" width="140">
+        <template #default="{ row }">{{ row.upd || '2026-09-27 15:10' }}</template>
+      </el-table-column>
+      <el-table-column label="启用" width="90">
+        <template #default="{ row }"><el-switch v-model="row.status" @change="toggle(row)"></el-switch></template>
+      </el-table-column>
+      <el-table-column prop="batch" label="批次" width="120"></el-table-column>
+      <el-table-column label="操作" width="130" fixed="right">
+        <template #default="{ row }">
+          <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
+          <el-popconfirm title="确认删除该问答对？" @confirm="del(row)">
+            <template #reference><el-button link type="danger">删除</el-button></template>
+          </el-popconfirm>
+        </template>
+      </el-table-column>
+      <template #empty>
+        <el-empty description="还没有问答对" :image-size="60">
+          <el-button type="primary" size="small" @click="wizard.show = true; wizard.step = 0">Excel 批量导入</el-button>
+        </el-empty>
+      </template>
+    </el-table>
+    <div class="pager-row">
+      <el-pagination v-model:current-page="page" v-model:page-size="pageSize" :page-sizes="[10,20,50,100]"
+        layout="total, sizes, prev, pager, next" :total="filtered.length"></el-pagination>
+    </div>
+
+    <el-dialog v-model="wizard.show" title="问答对 Excel 导入（整批校验）" :close-on-click-modal="false" width="680px" @closed="resetWizard">
+      <el-steps :active="wizard.step" align-center finish-status="success" style="margin-bottom:18px">
+        <el-step title="选择文件"></el-step><el-step title="校验报告"></el-step><el-step title="确认导入"></el-step>
+      </el-steps>
+      <div v-if="wizard.step === 0">
+        <el-upload drag :auto-upload="false" :limit="1" :on-change="onFile" :file-list="wizard.file ? [wizard.file] : []" accept=".xlsx">
+          <div style="padding:20px">选择 .xlsx 文件<br/><span style="font-size:12px;color:#909399">列：问题 / 答案 / 状态（启用·停用）；≤5000 行；答案 ≤10000 字</span></div>
+        </el-upload>
+        <div class="err-inline" v-if="wizard.fileErr">{{ wizard.fileErr }}</div>
+      </div>
+      <div v-else-if="wizard.step === 1 && wizard.report">
+        <el-alert :type="wizard.report.errors.length ? 'error' : 'success'" :closable="false" show-icon style="margin-bottom:10px"
+          :title="wizard.report.errors.length
+            ? ('校验未通过：共 ' + wizard.report.total + ' 行，' + wizard.report.errors.length + ' 行有误。修正后请重新导入（整批校验，禁止半批入库）')
+            : ('校验通过：共 ' + wizard.report.total + ' 行，全部合格')">
+        </el-alert>
+        <el-table v-if="wizard.report.errors.length" :data="wizard.report.errors" border size="small" max-height="220">
+          <el-table-column prop="line" label="行号" width="80"></el-table-column>
+          <el-table-column prop="reason" label="错误原因（中文）"></el-table-column>
+        </el-table>
+      </div>
+      <div v-else-if="wizard.step === 2">
+        <el-result icon="success" title="导入完成" :sub-title="'本批 ' + wizard.report.total + ' 条问答对已入库并向量化，批次号 ' + (wizard.batchNo || '')"></el-result>
+      </div>
+      <template #footer>
+        <el-button @click="wizard.show = false">{{ wizard.step === 2 ? '关闭' : '取消' }}</el-button>
+        <el-button v-if="wizard.step === 0" type="primary" :disabled="!wizard.file" @click="validate">开始校验</el-button>
+        <el-button v-if="wizard.step === 1 && wizard.report && !wizard.report.errors.length" type="primary" @click="doImport">确认导入</el-button>
+      </template>
+    </el-dialog>
+    <el-dialog v-model="edit.show" title="编辑问答对" :close-on-click-modal="false" width="520px">
+      <el-form label-width="70px">
+        <el-form-item label="问题" required><el-input v-model="edit.form.q" maxlength="2000" show-word-limit></el-input></el-form-item>
+        <el-form-item label="答案" required><el-input v-model="edit.form.a" type="textarea" :rows="4" maxlength="10000" show-word-limit></el-input></el-form-item>
+        <div class="err-inline" v-if="edit.err">{{ edit.err }}</div>
+      </el-form>
+      <template #footer>
+        <el-button @click="edit.show = false">取消</el-button>
+        <el-button type="primary" @click="saveEdit">保存</el-button>
+      </template>
+    </el-dialog>
+  </div>`,
+  methods: {
+    openEdit(row) { this.edit = { show: true, row, form: { q: row.q, a: row.a }, err: '' }; },
+    saveEdit() {
+      if (!this.edit.form.q.trim() || !this.edit.form.a.trim()) { this.edit.err = '问题与答案均为必填'; return; }
+      this.edit.row.q = this.edit.form.q.trim();
+      this.edit.row.a = this.edit.form.a.trim();
+      this.edit.row.upd = nowStr();
+      addAudit('qa.edit', '问答对 #' + this.edit.row.id, this.edit.row.q);
+      this.edit.show = false;
+      ElementPlus.ElMessage.success('已保存并重新向量化（演示）');
+    },
+    toggle(row) { addAudit('qa.toggle', '问答对 #' + row.id, (row.status ? '启用' : '停用') + '：' + row.q); ElementPlus.ElMessage.success(row.status ? '已启用，立即参与匹配' : '已停用，立即退出匹配'); },
+    del(row) { S.qaPairs = S.qaPairs.filter(x => x.id !== row.id); addAudit('qa.delete', '问答对 #' + row.id, row.q); },
+    onFile(file) {
+      if (!file.name.toLowerCase().endsWith('.xlsx')) { this.wizard.fileErr = '仅支持 .xlsx'; this.wizard.file = null; return; }
+      this.wizard.fileErr = ''; this.wizard.file = file;
+    },
+    validate() {
+      // 演示：首个文件带 2 行错误；点击“重新校验合格演示”给全对报告
+      const bad = this.wizard.file && this.wizard.file.name.includes('合格') ? [] :
+        [ { line: 3, reason: '答案列为空（必填）' }, { line: 7, reason: '答案超过 10000 字上限' } ];
+      this.wizard.report = { total: bad.length ? 120 : 118, errors: bad };
+      this.wizard.step = 1;
+    },
+    doImport() {
+      this.wizard.batchNo = 'B' + Date.now().toString().slice(-8);
+      S.qaPairs.unshift({ id: nextId(), dept: 'service', q: '（演示）7 天无理由退货怎么算？', a: '自签收之日起 7 天内，商品完好可无理由退货。', status: true, batch: this.wizard.batchNo, upd: nowStr() });
+      this.page = 1;
+      addAudit('qa.import', '批次 ' + this.wizard.batchNo, '导入 ' + this.wizard.report.total + ' 条');
+      this.wizard.step = 2;
+    },
+    resetWizard() { this.wizard = { show: false, step: 0, file: null, fileErr: '', report: null }; },
+  },
+};
+
+/* ---------- P5 检索测试 ---------- */
+const RetrievalView = {
+  data() {
+    return { S, scope: 'service', q: '', testing: false, result: null };
+  },
+  template: `
+  <div style="max-width:900px">
+    <div class="panel">
+      <h4>检索测试（admin 调试工具 · F-503）</h4>
+      <div class="filter-row">
+        <span style="font-size:13px;color:#606266">部门范围</span>
+        <el-select v-model="scope" style="width:140px">
+          <el-option label="客服" value="service"></el-option><el-option label="人力" value="hr"></el-option>
+          <el-option label="全员" value="all"></el-option><el-option label="全部（admin）" value="alldepts"></el-option>
+        </el-select>
+      </div>
+      <div class="filter-row">
+        <el-input v-model="q" placeholder="输入测试问题，例如：退货运费谁承担 / 年假怎么算" style="max-width:520px" @keyup.enter="test"></el-input>
+        <el-button type="primary" :loading="testing" @click="test">测 试</el-button>
+      </div>
+      <template v-if="result">
+        <h4 style="margin-top:16px">问答对命中</h4>
+        <template v-if="result.qa">
+          <el-tag type="success">FAQ-{{ result.qa.id }} 相似度 {{ result.qa.score }} ✓ 超阈值(0.85)，将整条注入</el-tag>
+          <div style="font-size:13px;color:#606266;margin-top:6px">{{ result.qa.q }}</div>
+        </template>
+        <el-tag v-else type="info">无超阈值命中 → 走文档检索链路</el-tag>
+        <h4 style="margin-top:16px">文档块命中（top20 → 重排 top5）</h4>
+        <el-table :data="result.chunks" border size="small">
+          <el-table-column label="#" width="50"><template #default="{ $index }">{{ $index + 1 }}</template></el-table-column>
+          <el-table-column prop="score" label="rerank 分数" width="110"></el-table-column>
+          <el-table-column prop="title" label="文档" width="170"></el-table-column>
+          <el-table-column prop="path" label="标题路径"></el-table-column>
+          <el-table-column prop="snippet" label="内容摘要" show-overflow-tooltip></el-table-column>
+        </el-table>
+        <el-alert v-if="result.refuse" type="warning" :closable="false" show-icon style="margin-top:10px"
+          title="top1 分数低于拒答阈值 → 将拒答'知识库中未找到相关内容'"></el-alert>
+      </template>
+    </div>
+    <div class="panel">
+      <h4>阈值设置（改动须附评测对比）</h4>
+      <div class="filter-row">
+        <span style="font-size:13px;color:#606266">拒答阈值</span>
+        <el-input-number v-model="S.thresholds.refuse" :min="0" :max="1" :step="0.05"></el-input-number>
+        <span style="font-size:13px;color:#606266">问答对阈值</span>
+        <el-input-number v-model="S.thresholds.qa" :min="0" :max="1" :step="0.05"></el-input-number>
+        <el-button type="primary" @click="ElementPlus.ElMessage.success('阈值已保存（演示）')">保存</el-button>
+      </div>
+    </div>
+  </div>`,
+  methods: {
+    test() {
+      if (!this.q.trim()) return;
+      this.testing = true;
+      setTimeout(() => {
+        const item = mockAnswer(this.q.trim());
+        this.result = item ? {
+          qa: item.cites.find(c => c.type === 'qa') ? { id: 1024, score: item.cites.find(c => c.type === 'qa').score, q: item.cites.find(c => c.type === 'qa').title } : null,
+          chunks: item.cites.filter(c => c.type === 'doc').map(c => ({ score: c.score, title: c.title, path: c.path, snippet: c.content })),
+          refuse: false,
+        } : {
+          qa: null,
+          chunks: this.scope === 'alldepts' ? [] : [],
+          refuse: true,
+        };
+        if (this.result.chunks.length === 0 && !this.result.qa) this.result.refuse = true;
+        this.testing = false;
+      }, 700);
+    },
+  },
+};
+
+/* ---------- P6 用户管理 ---------- */
+const UsersView = {
+  data() {
+    return { S, page: 1, pageSize: 20,
+      create: { show: false, form: { username: '', dept: '', role: 'member' }, err: '' },
+      pwd: { show: false, value: '' } };
+  },
+  computed: { paged() { const s = (this.page - 1) * this.pageSize; return S.users.slice(s, s + this.pageSize); } },
+  template: `
+  <div>
+    <div class="filter-row">
+      <el-input placeholder="搜索用户名" style="width:200px" clearable></el-input>
+      <span style="flex:1"></span>
+      <el-button type="primary" @click="create.show = true">＋ 新建用户</el-button>
+    </div>
+    <el-table :data="paged" border stripe>
+      <el-table-column prop="username" label="用户名" width="140"></el-table-column>
+      <el-table-column prop="name" label="姓名" width="110"></el-table-column>
+      <el-table-column label="部门" width="110"><template #default="{ row }">{{ S.deptName[row.dept] }}</template></el-table-column>
+      <el-table-column label="角色" width="100">
+        <template #default="{ row }"><el-tag :type="row.role === 'admin' ? 'danger' : ''" size="small">{{ row.role === 'admin' ? '管理员' : '成员' }}</el-tag></template>
+      </el-table-column>
+      <el-table-column prop="status" label="状态" width="130">
+        <template #default="{ row }"><el-tag :type="row.status === '正常' ? 'success' : (row.status === '已禁用' ? 'danger' : 'warning')" size="small">{{ row.status }}</el-tag></template>
+      </el-table-column>
+      <el-table-column prop="lastLogin" label="最近登录" width="150"></el-table-column>
+      <el-table-column label="操作" width="200" fixed="right">
+        <template #default="{ row }">
+          <el-popconfirm :title="(row.status === '正常' ? '禁用后该账号立即失效，确认？' : (row.status === '已禁用' ? '确认恢复该账号？' : '确认解锁该账号？'))" @confirm="toggle(row)">
+            <template #reference><el-button link :type="row.status === '正常' ? 'danger' : 'primary'">{{ row.status === '正常' ? '禁用' : (row.status === '已禁用' ? '启用' : '解锁') }}</el-button></template>
+          </el-popconfirm>
+          <el-popconfirm title="重置后将生成新的初始密码（一次性展示），确认？" @confirm="resetPwd(row)">
+            <template #reference><el-button link type="warning">重置密码</el-button></template>
+          </el-popconfirm>
+        </template>
+      </el-table-column>
+    </el-table>
+    <div class="pager-row">
+      <el-pagination v-model:current-page="page" v-model:page-size="pageSize" :page-sizes="[10,20,50,100]"
+        layout="total, sizes, prev, pager, next" :total="S.users.length"></el-pagination>
+    </div>
+
+    <el-dialog v-model="create.show" title="新建用户" :close-on-click-modal="false" width="460px" @closed="create = { show: false, form: { username: '', dept: '', role: 'member' }, err: '' }">
+      <el-form label-width="80px">
+        <el-form-item label="用户名" required><el-input v-model="create.form.username" placeholder="2-32 位，支持中文、字母、数字"></el-input></el-form-item>
+        <el-form-item label="部门" required>
+          <el-select v-model="create.form.dept" style="width:100%">
+            <el-option label="客服" value="service"></el-option><el-option label="人力" value="hr"></el-option><el-option label="全员" value="all"></el-option>
+          </el-select>
+        </el-form-item>
+        <el-form-item label="角色">
+          <el-radio-group v-model="create.form.role"><el-radio value="member">成员</el-radio><el-radio value="admin">管理员</el-radio></el-radio-group>
+        </el-form-item>
+        <div class="err-inline" v-if="create.err">{{ create.err }}</div>
+      </el-form>
+      <template #footer>
+        <el-button @click="create.show = false">取消</el-button>
+        <el-button type="primary" @click="doCreate">创建并生成初始密码</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="pwd.show" title="初始密码（仅此一次展示）" :close-on-click-modal="false" :show-close="false" width="440px">
+      <el-alert type="warning" :closable="false" show-icon title="请立即复制并发送给用户，关闭后不可再查看；用户首次登录将被强制改密" style="margin-bottom:12px"></el-alert>
+      <div class="readonly-grey"><el-input :model-value="pwd.value" readonly><template #append><el-button @click="copyPwd">复制</el-button></template></el-input></div>
+      <template #footer>
+        <el-button type="primary" @click="pwd.show = false">我已保存</el-button>
+      </template>
+    </el-dialog>
+  </div>`,
+  methods: {
+    doCreate() {
+      const u = this.create.form;
+      if (!u.username.trim() || u.username.trim().length < 2) { this.create.err = '用户名需 2-32 位'; return; }
+      if (!u.dept) { this.create.err = '必须指定部门'; return; }
+      if (S.users.some(x => x.username === u.username.trim())) { this.create.err = '用户名已存在'; return; }
+      S.users.push({ id: nextId(), username: u.username.trim(), name: u.username.trim(), dept: u.dept, role: u.role, status: '正常', lastLogin: '-', mustChange: true });
+      this.page = 1;
+      addAudit('user.create', '用户 #' + (S.users.length), u.username + '（' + S.deptName[u.dept] + '）');
+      this.create.show = false;
+      this.pwd.value = 'Ak' + Math.random().toString(36).slice(2, 8) + '9Q';
+      this.pwd.show = true;
+    },
+    copyPwd() {
+      const v = this.pwd.value;
+      if (navigator.clipboard) navigator.clipboard.writeText(v).then(() => ElementPlus.ElMessage.success('已复制'));
+      else ElementPlus.ElMessage.info('请手动选中复制');
+    },
+    toggle(row) {
+      const from = row.status;
+      row.status = row.status === '正常' ? '已禁用' : '正常';
+      addAudit('user.toggle', '用户 #' + row.id, row.username + '：' + from + ' → ' + row.status);
+      ElementPlus.ElMessage.success(row.status === '已禁用' ? '已禁用：该账号立即无法登录' : (from !== '正常' && from !== '已禁用' ? '已解锁' : '已启用'));
+    },
+    resetPwd(row) { addAudit('user.reset_pwd', '用户 #' + row.id, row.username); this.pwd.value = 'Rk' + Math.random().toString(36).slice(2, 8) + '7M'; this.pwd.show = true; },
+  },
+};
+
+/* ---------- P7 提问记录 ---------- */
+const MessagesView = {
+  data() {
+    return { S, page: 1, pageSize: 20, filters: { dept: '', fb: '' }, detail: { show: false, m: null } };
+  },
+  computed: {
+    rows() {
+      const out = [];
+      S.conversations.forEach(c => c.msgs.forEach(m => { if (m.role === 'assistant') out.push({ conv: c.title, dept: c.dept || S.loggedUser.dept, ...m }); }));
+      return out.reverse();
+    },
+    filtered() {
+      return this.rows.filter(r => (!this.filters.dept || r.dept === this.filters.dept) &&
+        (this.filters.fb === '' || (this.filters.fb === 'down' ? r.feedback === 'down' : r.feedback !== 'down')));
+    },
+    paged() { const s = (this.page - 1) * this.pageSize; return this.filtered.slice(s, s + this.pageSize); },
+  },
+  template: `
+  <div>
+    <el-alert type="info" :closable="false" show-icon style="margin-bottom:12px"
+      title="提问记录保留 90 天（天数可配置），仅管理员可见；调优使用前先脱敏"></el-alert>
+    <div class="filter-row">
+      <el-select v-model="filters.dept" placeholder="部门" clearable style="width:130px" @change="page = 1">
+        <el-option label="客服" value="service"></el-option><el-option label="人力" value="hr"></el-option>
+      </el-select>
+      <el-select v-model="filters.fb" placeholder="反馈" clearable style="width:130px" @change="page = 1">
+        <el-option label="有点踩" value="down"></el-option><el-option label="无点踩" value="none"></el-option>
+      </el-select>
+      <el-button type="primary" @click="page = 1">查询</el-button>
+      <el-button @click="filters = { dept: '', fb: '' }; page = 1">重置</el-button>
+    </div>
+    <el-table :data="paged" border stripe>
+      <el-table-column prop="time" label="时间" width="120"></el-table-column>
+      <el-table-column prop="dept" label="部门" width="90"><template #default="{ row }">{{ S.deptName[row.dept] }}</template></el-table-column>
+      <el-table-column prop="conv" label="会话" width="150" show-overflow-tooltip></el-table-column>
+      <el-table-column label="回答摘要" min-width="240">
+        <template #default="{ row }">{{ row.refused ? '（拒答）知识库中未找到相关内容' : segText(row) }}</template>
+      </el-table-column>
+      <el-table-column label="引用" width="80">
+        <template #default="{ row }"><el-tag v-if="row.citations && row.citations.length" size="small" type="success">{{ row.citations.length }} 条</el-tag><span v-else>-</span></template>
+      </el-table-column>
+      <el-table-column label="反馈" width="100">
+        <template #default="{ row }">
+          <el-tag v-if="row.feedback === 'down'" type="danger" size="small">点踩·{{ row.feedbackCategory }}</el-tag>
+          <el-tag v-else-if="row.feedback === 'up'" type="success" size="small">点赞</el-tag><span v-else>-</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" width="90" fixed="right">
+        <template #default="{ row }"><el-button link type="primary" @click="detail.show = true; detail.m = row">详情</el-button></template>
+      </el-table-column>
+    </el-table>
+    <div class="pager-row">
+      <el-pagination v-model:current-page="page" v-model:page-size="pageSize" :page-sizes="[10,20,50,100]"
+        layout="total, sizes, prev, pager, next" :total="filtered.length"></el-pagination>
+    </div>
+    <el-drawer v-model="detail.show" title="提问详情（只读）" size="480px">
+      <template v-if="detail.m">
+        <div class="readonly-grey">
+          <p><b>回答全文</b></p>
+          <el-input type="textarea" :rows="4" :model-value="detail.m.refused ? '知识库中未找到相关内容' : segText(detail.m)" readonly></el-input>
+          <p style="margin-top:12px"><b>引用 JSON</b></p>
+          <el-input type="textarea" :rows="6" :model-value="JSON.stringify(detail.m.citations, null, 2)" readonly></el-input>
+          <p style="margin-top:12px"><b>运行信息</b></p>
+          <el-input :model-value="'token ' + (detail.m.tokens || '-') + ' · 耗时 ' + (detail.m.durationMs || '-') + 'ms · 缓存命中：' + (detail.m.cacheHit ? '是' : '否') + ' · 拒答：' + (detail.m.refused ? '是' : '否')" readonly></el-input>
+          <p v-if="detail.m.feedback === 'down'" style="margin-top:12px"><b>点踩备注</b></p>
+          <el-input v-if="detail.m.feedback === 'down'" :model-value="detail.m.feedbackCategory + '：' + detail.m.feedbackComment" readonly></el-input>
+        </div>
+      </template>
+    </el-drawer>
+  </div>`,
+  methods: {
+    segText(m) {
+      if (m.refused) return '知识库中未找到相关内容';
+      if (m.segs) return m.segs.map(s => s.t === 'text' ? s.s : '[' + s.n + ']').join('');
+      return m.text || '';
+    },
+  },
+};
+
+/* ---------- P8 badcase ---------- */
+const BadcaseView = {
+  data() {
+    return { S, page: 1, pageSize: 20, filters: { dept: '', status: '待处理' },
+      handle: { show: false, row: null, action: '已修语料', note: '', err: '' } };
+  },
+  computed: {
+    filtered() {
+      return S.badcases.filter(b => (!this.filters.dept || b.dept === this.filters.dept) &&
+        (!this.filters.status || b.status === this.filters.status));
+    },
+    paged() { const s = (this.page - 1) * this.pageSize; return this.filtered.slice(s, s + this.pageSize); },
+  },
+  template: `
+  <div>
+    <div class="filter-row">
+      <el-select v-model="filters.dept" placeholder="部门" clearable style="width:130px" @change="page = 1">
+        <el-option label="客服" value="service"></el-option><el-option label="人力" value="hr"></el-option>
+      </el-select>
+      <el-select v-model="filters.status" placeholder="处理状态" clearable style="width:140px" @change="page = 1">
+        <el-option label="待处理" value="待处理"></el-option><el-option label="已修语料" value="已修语料"></el-option><el-option label="已忽略" value="已忽略"></el-option>
+      </el-select>
+      <el-button type="primary" @click="page = 1">查询</el-button>
+      <el-button @click="filters = { dept: '', status: '' }; page = 1">重置</el-button>
+    </div>
+    <el-table :data="paged" border stripe>
+      <el-table-column prop="time" label="时间" width="120"></el-table-column>
+      <el-table-column label="部门" width="90"><template #default="{ row }">{{ S.deptName[row.dept] }}</template></el-table-column>
+      <el-table-column prop="q" label="问题" min-width="200" show-overflow-tooltip></el-table-column>
+      <el-table-column prop="cat" label="分类" width="110">
+        <template #default="{ row }"><el-tag size="small" type="danger">{{ row.cat }}</el-tag></template>
+      </el-table-column>
+      <el-table-column prop="comment" label="备注" min-width="180" show-overflow-tooltip></el-table-column>
+      <el-table-column prop="status" label="状态" width="110">
+        <template #default="{ row }"><el-tag size="small" :type="row.status === '待处理' ? 'warning' : 'success'">{{ row.status }}</el-tag></template>
+      </el-table-column>
+      <el-table-column label="操作" width="100" fixed="right">
+        <template #default="{ row }"><el-button v-if="row.status === '待处理'" link type="primary" @click="openHandle(row)">处理</el-button></template>
+      </el-table-column>
+    </el-table>
+    <div class="pager-row">
+      <el-pagination v-model:current-page="page" v-model:page-size="pageSize" :page-sizes="[10,20,50,100]"
+        layout="total, sizes, prev, pager, next" :total="filtered.length"></el-pagination>
+    </div>
+    <el-dialog v-model="handle.show" title="处理 badcase（flows F4 治理闭环）" :close-on-click-modal="false" width="480px">
+      <p style="margin:0 0 10px;color:#606266;font-size:13px">{{ handle.row?.q }}</p>
+      <el-form label-width="80px">
+        <el-form-item label="处理方式">
+          <el-radio-group v-model="handle.action">
+            <el-radio value="已修语料">更新文档/补问答对</el-radio>
+            <el-radio value="已忽略">忽略（说明理由）</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="备注"><el-input v-model="handle.note" type="textarea" :rows="2"></el-input></el-form-item>
+        <div class="err-inline" v-if="handle.err">{{ handle.err }}</div>
+      </el-form>
+      <template #footer>
+        <el-button @click="handle.show = false">取消</el-button>
+        <el-button type="primary" @click="submitHandle">提交并纳入评测题库</el-button>
+      </template>
+    </el-dialog>
+  </div>`,
+  methods: {
+    openHandle(row) { this.handle = { show: true, row, action: '已修语料', note: '', err: '' }; },
+    submitHandle() {
+      if (!this.handle.note.trim() && this.handle.action === '已忽略') { this.handle.err = '忽略必须说明理由'; return; }
+      this.handle.row.status = this.handle.action;
+      addAudit('badcase.handle', 'badcase #' + this.handle.row.id, this.handle.action + '：' + this.handle.row.q);
+      this.handle.show = false;
+      ElementPlus.ElMessage.success('已处理；该问题已建议纳入评测题库防回归（F-601）');
+    },
+  },
+};
+
+/* ---------- P9 评测管理 ---------- */
+const EvalView = {
+  data() {
+    return { S, tab: 'questions', page: 1, pageSize: 20,
+      run: { show: false, scope: 'all', running: false },
+      report: { show: false, run: null },
+      judge: {} };
+  },
+  computed: {
+    paged() { const s = (this.page - 1) * this.pageSize; return S.evalQuestions.slice(s, s + this.pageSize); },
+    deptRows() {
+      const r = this.report.run; if (!r) return [];
+      if (r.deptAcc) return Object.keys(r.deptAcc).map(d => ({ dept: S.deptName[d] || d, acc: r.deptAcc[d] }));
+      return [{ dept: '全部', acc: r.acc }];
+    },
+  },
+  template: `
+  <div>
+    <el-tabs v-model="tab">
+      <el-tab-pane label="评测题库" name="questions">
+        <div class="filter-row">
+          <span style="flex:1"></span>
+          <el-button @click="ElementPlus.ElMessage.success('题库模板已下载（含题型说明）')">下载模板</el-button>
+          <el-button type="primary" @click="ElementPlus.ElMessage.success('演示环境：请走真实 Excel 导入流程（同 P4 向导）')">Excel 导入题目</el-button>
+        </div>
+        <el-table :data="paged" border stripe>
+          <el-table-column label="部门" width="90"><template #default="{ row }">{{ S.deptName[row.dept] }}</template></el-table-column>
+          <el-table-column prop="q" label="问题" min-width="220"></el-table-column>
+          <el-table-column prop="expected" label="期望答案" min-width="180" show-overflow-tooltip></el-table-column>
+          <el-table-column label="题型" width="110">
+            <template #default="{ row }">
+              <el-tag size="small" :type="row.type === 'cross_reject' ? 'danger' : (row.type === 'multi_hop' ? 'warning' : 'primary')">
+                {{ row.type === 'cross_reject' ? '串库拒答' : (row.type === 'multi_hop' ? '多跳' : '事实型') }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="ref" label="期望出处" width="150"></el-table-column>
+        </el-table>
+        <div class="pager-row">
+          <el-pagination v-model:current-page="page" v-model:page-size="pageSize" :page-sizes="[10,20,50,100]"
+            layout="total, sizes, prev, pager, next" :total="S.evalQuestions.length"></el-pagination>
+        </div>
+      </el-tab-pane>
+      <el-tab-pane label="跑分记录" name="runs">
+        <div class="filter-row"><span style="flex:1"></span>
+          <el-tooltip content="评测按题库逐题走问答链路，串库题用跨部门账号验证拒答" placement="top">
+            <el-button type="primary" :loading="run.running" @click="run.show = true">发起跑分</el-button>
+          </el-tooltip>
+        </div>
+        <el-table :data="S.evalRuns" border stripe>
+          <el-table-column prop="name" label="名称" min-width="160"></el-table-column>
+          <el-table-column prop="model" label="模型" width="120"></el-table-column>
+          <el-table-column prop="prompt" label="提示词版本" width="110"></el-table-column>
+          <el-table-column label="总数/正确" width="100"><template #default="{ row }">{{ row.total }}/{{ row.correct }}</template></el-table-column>
+          <el-table-column label="总体准确率" width="110">
+            <template #default="{ row }"><el-tag :type="row.acc >= 0.8 ? 'success' : 'danger'">{{ (row.acc * 100).toFixed(1) }}%</el-tag></template>
+          </el-table-column>
+          <el-table-column prop="time" label="时间" width="160"></el-table-column>
+          <el-table-column label="操作" width="90" fixed="right">
+            <template #default="{ row }"><el-button link type="primary" @click="report.show = true; report.run = row">报告</el-button></template>
+          </el-table-column>
+        </el-table>
+      </el-tab-pane>
+    </el-tabs>
+
+    <el-dialog v-model="run.show" title="发起评测跑分" :close-on-click-modal="false" width="420px">
+      <el-form label-width="90px">
+        <el-form-item label="部门范围">
+          <el-select v-model="run.scope" style="width:100%">
+            <el-option label="全部（客服+人力）" value="all"></el-option>
+            <el-option label="仅客服" value="service"></el-option><el-option label="仅人力" value="hr"></el-option>
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="run.show = false">取消</el-button>
+        <el-button type="primary" :loading="run.running" @click="doRun">开始跑分</el-button>
+      </template>
+    </el-dialog>
+
+    <el-drawer v-model="report.show" title="评测报告" size="560px">
+      <template v-if="report.run">
+        <h4 style="margin:0 0 10px">{{ report.run.name }} · {{ report.run.model }} · 提示词 {{ report.run.prompt }}</h4>
+        <el-table :data="deptRows" border size="small" style="margin-bottom:16px">
+          <el-table-column prop="dept" label="部门" width="100"></el-table-column>
+          <el-table-column label="准确率" width="110">
+            <template #default="{ row }"><el-tag :type="row.acc >= 0.8 ? 'success' : 'danger'">{{ (row.acc * 100).toFixed(1) }}%</el-tag></template>
+          </el-table-column>
+          <el-table-column label="达标（≥80%）" width="120">
+            <template #default="{ row }">{{ row.acc >= 0.8 ? '✅ 达标' : '❌ 未达标' }}</template>
+          </el-table-column>
+        </el-table>
+        <h4 style="margin:0 0 10px">逐题人工复核（判定写入 eval_runs.detail）</h4>
+        <div v-for="q in S.evalQuestions" :key="q.id" style="border:1px solid #ebeef5;border-radius:6px;padding:10px;margin-bottom:8px">
+          <div style="font-size:13px"><el-tag size="small" style="margin-right:6px">{{ S.deptName[q.dept] }}</el-tag>{{ q.q }}</div>
+          <div style="font-size:12px;color:#909399;margin:6px 0">期望：{{ q.expected }} ｜ 出处：{{ q.ref }}</div>
+          <div class="readonly-grey" style="margin:6px 0"><el-input type="textarea" :rows="2" :model-value="q.ans || '（待跑分生成）'" readonly></el-input></div>
+          <div style="font-size:12px;color:#909399;margin:6px 0">命中引用：{{ q.cite || '-' }}</div>
+          <el-radio-group v-model="judge[q.id]" size="small">
+            <el-radio-button value="correct">正确</el-radio-button>
+            <el-radio-button value="wrong">错误</el-radio-button>
+            <el-radio-button value="refuse_ok">拒答正确</el-radio-button>
+          </el-radio-group>
+        </div>
+      </template>
+    </el-drawer>
+  </div>`,
+  methods: {
+    doRun() {
+      this.run.running = true; this.run.show = false;
+      setTimeout(() => {
+        const acc = 0.78 + Math.random() * 0.12;
+        S.evalRuns.unshift({ id: nextId(), name: '演示回归 ' + nowStr(), model: 'glm-4-air', prompt: 'v1.2',
+          total: S.evalQuestions.length * 10, correct: Math.round(S.evalQuestions.length * 10 * acc), acc,
+          deptAcc: { service: Math.min(0.95, acc + 0.02), hr: Math.max(0.7, acc - 0.02) }, time: nowStr() + ':00' });
+        addAudit('eval.run', '评测', '演示回归，准确率 ' + (acc * 100).toFixed(1) + '%');
+        this.run.running = false;
+        ElementPlus.ElMessage.success('跑分完成，准确率 ' + (acc * 100).toFixed(1) + '%');
+      }, 2000);
+    },
+  },
+};
+
+/* ---------- 审计日志 ---------- */
+const AuditView = {
+  data() { return { S, page: 1, pageSize: 20, kw: '' }; },
+  computed: {
+    filtered() {
+      const k = this.kw.trim();
+      return S.auditLogs.filter(a => !k || a.actor.includes(k) || a.action.includes(k) || a.obj.includes(k) || a.detail.includes(k));
+    },
+    paged() { const s = (this.page - 1) * this.pageSize; return this.filtered.slice(s, s + this.pageSize); },
+  },
+  template: `
+  <div>
+    <div class="filter-row">
+      <el-input v-model="kw" placeholder="操作人 / 动作 / 对象关键字" style="width:240px" clearable @keyup.enter="page = 1"></el-input>
+      <el-button type="primary" @click="page = 1">查询</el-button><el-button @click="kw = ''; page = 1">重置</el-button>
+      <span style="flex:1"></span>
+      <el-button @click="ElementPlus.ElMessage.success('CSV 导出（演示）')">导出 CSV</el-button>
+    </div>
+    <el-table :data="paged" border stripe>
+      <el-table-column prop="time" label="时间" width="140"></el-table-column>
+      <el-table-column prop="actor" label="操作人" width="120"></el-table-column>
+      <el-table-column prop="action" label="动作" width="170"><template #default="{ row }"><code>{{ row.action }}</code></template></el-table-column>
+      <el-table-column prop="obj" label="对象" width="160"></el-table-column>
+      <el-table-column prop="detail" label="详情" min-width="240"></el-table-column>
+    </el-table>
+    <div class="pager-row">
+      <el-pagination v-model:current-page="page" v-model:page-size="pageSize" :page-sizes="[10,20,50,100]"
+        layout="total, sizes, prev, pager, next" :total="filtered.length"></el-pagination>
+    </div>
+  </div>`,
+};
+
+/* ---------- P10 运营概览 ---------- */
+const OverviewView = {
+  data() { return { S }; },
+  computed: {
+    tokenBars() {
+      return [ { name: '客服（service）', v: 1200000 }, { name: '人力（hr）', v: 820000 }, { name: '全员（all）', v: 150000 } ];
+    },
+    maxToken() { return Math.max(...this.tokenBars.map(t => t.v)); },
+  },
+  template: `
+  <div>
+    <div class="stat-cards">
+      <div class="stat-card"><div class="num">128</div><div class="lbl">今日提问</div></div>
+      <div class="stat-card"><div class="num">87%</div><div class="lbl">命中率（非拒答）</div></div>
+      <div class="stat-card"><div class="num">9%</div><div class="lbl">拒答率</div></div>
+      <div class="stat-card"><div class="num" style="color:#f56c6c">4%</div><div class="lbl">点踩率</div></div>
+    </div>
+    <div class="panel">
+      <h4>token 消耗（按部门 · 数据源 按日聚合，≤5 分钟延迟）</h4>
+      <div class="bar-row" v-for="t in tokenBars" :key="t.name">
+        <span class="bar-name">{{ t.name }}</span>
+        <div class="bar-track"><div class="bar-fill" :style="{ width: (t.v / maxToken * 100) + '%' }"></div></div>
+        <span style="width:90px;text-align:right;color:#606266">{{ (t.v / 10000).toFixed(1) }} 万</span>
+      </div>
+    </div>
+    <div class="panel">
+      <h4>最近 badcase（点击去处理）</h4>
+      <el-table :data="S.badcases.slice(0, 5)" size="small" @row-click="() => $root.page = 'badcase'" style="cursor:pointer">
+        <el-table-column prop="time" label="时间" width="120"></el-table-column>
+        <el-table-column label="部门" width="90"><template #default="{ row }">{{ S.deptName[row.dept] }}</template></el-table-column>
+        <el-table-column prop="q" label="问题" min-width="200" show-overflow-tooltip></el-table-column>
+        <el-table-column prop="cat" label="分类" width="110"></el-table-column>
+        <el-table-column prop="status" label="状态" width="100"></el-table-column>
+      </el-table>
+    </div>
+  </div>`,
+};
+
+/* ---------- 装配 ---------- */
+const app = createApp(App);
+app.use(ElementPlus, { locale: ElementPlusLocaleZhCn });
+for (const [name, comp] of Object.entries(ElementPlusIconsVue)) app.component(name, comp);
+app.component('login-view', LoginView);
+app.component('chat-view', ChatView);
+app.component('doc-view', DocView);
+app.component('qa-view', QaView);
+app.component('retrieval-view', RetrievalView);
+app.component('users-view', UsersView);
+app.component('messages-view', MessagesView);
+app.component('badcase-view', BadcaseView);
+app.component('eval-view', EvalView);
+app.component('audit-view', AuditView);
+app.component('overview-view', OverviewView);
+app.mount('#app');
+</script>
+</body>
+</html>

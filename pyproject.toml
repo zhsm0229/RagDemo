@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ragdemo"
+version = "0.1.0"
+description = "企业智能工作台（RAG 知识问答工作台）"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "sqlalchemy",
+    "psycopg[binary]",
+    "alembic",
+    "passlib[bcrypt]",
+    "pyjwt",
+    "python-multipart",
+    "python-docx",
+    "pypdf",
+    "pydantic-settings",
+    "apscheduler",
+    "httpx",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "httpx",
+    "ruff",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.coverage.run]
+include = ["app/rag/*", "app/services/*"]
+
+[tool.coverage.report]
+fail_under = 70

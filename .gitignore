@@ -1,0 +1,28 @@
+# ===== 密钥（仓库只提交 .env.example）=====
+.env
+.env.*
+!.env.example
+
+# ===== 运行时数据 =====
+data/
+*.log
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# ===== Node =====
+node_modules/
+
+# ===== 本地工作区状态 =====
+.superpowers/
+.mimosa/
