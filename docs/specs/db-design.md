@@ -170,7 +170,7 @@ CREATE TABLE messages (
     feedback          TEXT CHECK (feedback IN ('up','down') OR feedback IS NULL),
     feedback_comment  TEXT,
     feedback_category TEXT,                        -- 答案错误/引用无关/拒答不当/其他
-    badcase_status    TEXT CHECK (badcase_status IN ('待处理','已修语料','已忽略')) OR badcase_status IS NULL,  -- F-702 处理状态落库
+    badcase_status    TEXT CHECK (badcase_status IN ('待处理','已修语料','已忽略') OR badcase_status IS NULL),  -- F-702 处理状态落库（2026-09-28 修正：原稿 CHECK 括号提前闭合致 SQL 语法错误，实现迁移已按本式落地）
     is_eval           BOOLEAN NOT NULL DEFAULT FALSE,  -- 评测链路标记（F-5），评测记录不污染运营统计
     answer_type       TEXT CHECK (answer_type IN ('rag','qa','refuse') OR answer_type IS NULL),  -- 拒答率/命中率口径
     model             TEXT,
