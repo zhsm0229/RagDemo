@@ -1,8 +1,8 @@
-# RagDemo 接口文档（W1 + W2）
+# RagDemo 接口文档（W1 - W3）
 
 > 依据 `docs/standards.md` §3（API 接口规范）编写，随代码演进（§19.1 文档随代码）。
-> 覆盖 `app/api/` 当前全部路由：auth 4 个、documents 4 个、chat 1 个、conversations 4 个、messages（feedback）1 个，共 14 个端点。
-> 最后更新：W2 收口（Task 12）。
+> 覆盖 `app/api/` 当前全部路由：auth 4 个、documents 4 个、chat 1 个、conversations 4 个、messages（feedback）1 个、admin 管理端 20 个，共 34 个端点。
+> 最后更新：W3 收口（Task 14）。
 
 ## 1. 通用约定
 
@@ -12,7 +12,7 @@
   （httpOnly、SameSite=Lax，有效期默认 8 小时）。
 - 权限门两级：
   - **ReadyUser**（已登录且已完成首登改密）：问答 / 会话 / 反馈全部端点；
-  - **AdminUser**（admin 角色，链在改密门之后）：文档管理全部端点。
+  - **AdminUser**（admin 角色，链在改密门之后）：文档管理 + W3 全部管理端点（问答对 / 评测 / 提问记录与 badcase 治理 / 检索测试 / 运营概览与语料健康度）。
 - 首登未改密用户访问业务接口一律 `403/2004`；登录过期 / 令牌无效 / 账号禁用一律 `401/2003`。
 
 ### 1.2 统一响应体（standards §3-2）
@@ -57,7 +57,8 @@ POST SSE 须用 fetch + ReadableStream 消费（无 EventSource 自动重连）�
 | 2005 | 429 | 登录请求过于频繁（进程内滑动窗口限流） | login |
 | 3001 | 409 | 上传文件与库内已有文档完全重复。**一码双文案**：同步查重命中（F-1001）带已有文档 ID——"文件与已有文档完全重复（已有文档 ID N），如需更新请上传新版本"；并发撞唯一索引（DOC-06）为通用文案——"文件与已有文档重复，请勿重复上传" | POST /api/documents |
 | 3002 | 429 | 单用户每日提问次数已达上限（问答端点开流前拒绝） | POST /api/chat/stream |
-| 3003 | 404 | 会话/消息不存在或无权访问（归属校验 IDOR 防线，§21.8；不区分"不存在"与"无权"） | chat / conversations / feedback |
+| 3003 | 404 | 会话/消息不存在或无权访问（归属校验 IDOR 防线，§21.8；不区分"不存在"与"无权"）。W3 管理端寻址失败同码：提问记录不存在 / 点踩记录不存在 / 评测任务不存在 | chat / conversations / feedback / admin 治理与评测端点 |
+| 3004 | 422 | 评测任务状态冲突：仅 status=done 收口的跑分可人工录分（running 时后台正逐题写 detail，failed 明细不完整） | POST /api/admin/eval-runs/{id}/judgments |
 | 5000 | 500 | 兜底系统错误（响应体只给通用提示"系统繁忙，请稍后重试"，堆栈进日志） | 全部端点 |
 | 5001 | —（SSE） | 生成服务暂时不可用（仅经 SSE `error` 事件下发，`retryable=true`，话术对外脱敏） | POST /api/chat/stream |
 
@@ -205,3 +206,190 @@ SSE 事件 DTO 字段表（**逐字引自 standards §3 第 6 条**）：
 | 请求体 | `feedback`（枚举 `"up"` / `"down"`）；`category`（down 必填，枚举：答案错误 / 引用无关 / 拒答不当 / 其他）；`comment`（down 必填，strip 后 1-500 字）。up 时二者忽略置 null |
 | 成功响应 | `200`，`data: {id, feedback, feedbackCategory, feedbackComment, badcaseStatus}`。down 落三列并把 badcase_status="待处理" 进治理队列（F-702；仅状态为空或"待处理"时置，admin 处理终态"已修语料"/"已忽略"不被用户改评重开）；改评语义：down→up 清空备注/类型但 badcase_status 不回退，重复 down 幂等更新备注/类型 |
 | 错误分支 | `422/1003` 备注长度非法（field=comment）/ 类型不在枚举（field=category）；`404/3003` 消息不存在或无权访问（不存在 / 他人消息 / 非 assistant / 中断占位行同判）；`401/2003`；`403/2004` |
+
+---
+
+## 4. W3 端点（管理后台）
+
+W3 全部 20 个端点均为 **AdminUser 门**（依赖链：登录 → 首登改密 → admin 角色；`401/2003` 未登录 / 令牌无效、`403/2004` 已登录但无权限，下文各端点不再重复）。按域分五个 router：问答对管理（M4）、评测（M6）、提问记录与 badcase 治理（M7）、检索测试、运营概览与语料健康度。涉及列表的响应统一 `{items, total, page, pageSize}`、created_at 降序（同刻 id 降序兜底）；DTO 键 camelCase。
+
+### 4.1 问答对管理（M4，/api/admin/qa-pairs）
+
+#### 4.1.1 POST /api/admin/qa-pairs/import — Excel 整批导入
+
+| 项 | 说明 |
+|----|------|
+| 鉴权 | AdminUser |
+| 请求 | multipart/form-data：`file`（.xlsx，≤50MB；扩展名 / Content-Type / 魔数三重校验）；`deptCode`（表单字段，可选，缺省 `all`，枚举 service / hr / all——模板不含部门列，导入部门由此指定，保证检索 `dept_id IN (用户部门, all)` 语义可用） |
+| 行级规则 | 问题非空 ≤2000 字、答案非空 ≤10000 字、状态列枚举 `enabled`/`disabled`（空缺省 enabled）；任何一行不合格整批退回零入库（QA-02/03/08）；单批上限 5000 行 |
+| 成功响应 | `201`，`data: {imported, batchNo}`（batchNo 形如 `QA-YYYYMMDD-XXXX`）；只向量化问题列（答案不向量化，与检索同一 embedder）；成功即整清问答精确缓存 |
+| 错误分支 | `422/1003` 文件超 50MB / 格式不支持或已损坏（三重白名单任一不过）；`422/1003` 行级错误整批退回——message 统一"导入文件存在 N 处错误，已整批退回，未入库"，`data` 为错误行数组 `[{row, field, reason}]`（row 为 Excel 物理行号，表头=1 数据从 2 起）；文件级单一错误（无数据 / 超 5000 行）reason 直接上 message；`422/1003` 部门编码无效 |
+
+#### 4.1.2 GET /api/admin/qa-pairs/template — 模板下载
+
+| 项 | 说明 |
+|----|------|
+| 成功响应 | `200`，xlsx 字节流，`Content-Disposition: attachment`（文件名 `qa_pairs_template.xlsx`）；表头 问题 / 答案 / 状态 + 3 行示例 |
+
+#### 4.1.3 GET /api/admin/qa-pairs — 管理列表
+
+| 项 | 说明 |
+|----|------|
+| 查询参数 | `deptId`（可选）、`status`（enabled / disabled，可选）、`keyword`（问题/答案 ILIKE 模糊，`%`/`_`/`\` 已转义按字面匹配）、`page`（≥1，默认 1）、`pageSize`（1-100，默认 20） |
+| 成功响应 | `200`，`data: {items, total, page, pageSize}`。items 项字段：`id, deptId, question, answer, status, batchNo, createdAt, isActive`；软删行不出现 |
+| 错误分支 | `422/1003` status 取值无效、分页越界 |
+
+#### 4.1.4 PATCH /api/admin/qa-pairs/{id}/status — 停用 / 启用
+
+| 项 | 说明 |
+|----|------|
+| 请求体 | `status`（枚举 `enabled`=参与检索 / `disabled`=停用不参与） |
+| 成功响应 | `200`，`data: {id, status}`；停用改变可检索事实，成功响应前整清问答精确缓存；审计 `qa.toggle {from, to}` |
+| 错误分支 | `422/1003` status 枚举外；`404/1003` 问答对不存在或已软删 |
+
+#### 4.1.5 PUT /api/admin/qa-pairs/{id} — 编辑
+
+| 项 | 说明 |
+|----|------|
+| 请求体 | `question`、`answer`（全文；校验同导入规则：问题 1-2000、答案 1-10000 非空） |
+| 成功响应 | `200`，`data: {id, question, answer}`；问题单条重嵌（与检索同一 embedder，同指纹空间）后整清缓存，新答案立即生效；审计 `qa.update {before, after 摘要}` |
+| 错误分支 | `422/1003` 校验失败；`404/1003` 不存在或已软删 |
+
+#### 4.1.6 DELETE /api/admin/qa-pairs/{id} — 删除（软删）
+
+| 项 | 说明 |
+|----|------|
+| 成功响应 | `200`，`data: {id, isActive: false}`；置 is_active=false 退出检索与列表（行保留可追溯），整清缓存；审计 `qa.delete` |
+| 错误分支 | `404/1003` 不存在或已软删（已删行不可再管理） |
+
+### 4.2 评测（M6，/api/admin/eval-questions + /api/admin/eval-runs）
+
+#### 4.2.1 POST /api/admin/eval-questions/import — 题库 Excel 整批导入
+
+| 项 | 说明 |
+|----|------|
+| 请求 | multipart/form-data：`file`（.xlsx，≤50MB，三重校验同 4.1.1；单批上限 5000 行） |
+| 表头 | 部门 / 问题 / 期望答案 / 来源 / 题型：**部门在文件行内**用中文枚举（客服 / 人力 / 全员——与问答对导入的表单 deptCode 口径不同）；来源可空（空串落 NULL）；题型枚举 `factual` / `multi_hop` / `cross_reject`（空缺省 factual） |
+| 拒答归一 | 期望答案填 `[拒答]` → 题型归一为 cross_reject；题型 cross_reject 而期望答案非 `[拒答]` → 期望答案归一为 `[拒答]`（双向静默归一，判定协议第 3 条） |
+| 成功响应 | `201`，`data: {imported}`（表无批次号列，不回 batchNo）；评测题纯文本存库不向量化、不参与问答检索，导入不失效问答缓存 |
+| 错误分支 | `422/1003` 行级错误整批退回（语义同 4.1.1；规则：部门中文枚举、问题非空 ≤2000、期望答案非空 ≤10000、题型枚举）；`422/1003` 部门未播种 |
+
+#### 4.2.2 GET /api/admin/eval-questions/template — 模板下载
+
+| 项 | 说明 |
+|----|------|
+| 成功响应 | `200`，xlsx 字节流（`eval_questions_template.xlsx`）；表头 部门 / 问题 / 期望答案 / 来源 / 题型 + 3 行示例（事实型 / 多跳 / 串库拒答） |
+
+#### 4.2.3 POST /api/admin/eval-runs — 发起跑分（异步）
+
+| 项 | 说明 |
+|----|------|
+| 请求体 | `name`（strip 后非空 ≤100 字）、`perspectiveDeptCode`（视角部门 code；检索范围恒为 [视角部门, 全员]，题面部门只进报告口径不参与检索） |
+| 成功响应 | `202`，`data: {id}`；创建即落 running 行并提交，跑分由后台任务执行（BackgroundTasks，逐题 commit 进度可查；单题异常记入明细不拖垮整体）；跑分走评测专用依赖副本：旁路问答精确缓存、不占每日提问限额，消息带 `is_eval=true` 不入运营统计 |
+| 错误分支 | `422/1003` name 为空 / 超 100 字；`422/1003` 视角部门未播种 |
+
+#### 4.2.4 GET /api/admin/eval-runs — 跑分任务列表
+
+| 项 | 说明 |
+|----|------|
+| 查询参数 | `page`（≥1，默认 1）、`pageSize`（1-100，默认 20） |
+| 成功响应 | `200`，`data: {items, total, page, pageSize}`。items 项字段：`id, name, status(running/done/failed), total, correct, accuracy, createdAt`——correct 为加权总分（NUMERIC 容半分）、accuracy=correct/total（pending 计 0，4 位小数） |
+
+#### 4.2.5 GET /api/admin/eval-runs/{id} — 跑分详情（轮询用）
+
+| 项 | 说明 |
+|----|------|
+| 成功响应 | `200`，`data` = 4.2.4 列表项字段 + `config` + `detail`；`config` 为收口时 9 字段快照（model / promptVersion / qaThreshold / refuseThreshold / efSearch / topK / topN / temperature / manifestVersion，锁定阈值与模型防跨跑对比被污染；running 期为 null） |
+| detail 结构 | `{items: [逐题], pendingCount: n}`。逐题字段：`questionId, deptId, qtype, expected, answerType, answer, citations, autoJudgment, error`——autoJudgment ∈ correct / wrong / pending；error 仅单题失败时非 null（user 消息留痕、不落 assistant 行）；人工录分后逐题追加 `judgment` 字段。`pendingCount` = 人工与 auto 均未判（最终判定 pending）的题数 |
+| 自动判分口径 | 拒答类（期望答案 `[拒答]` 或题型 cross_reject）按回答是否逐字等于固定拒答话术"知识库中未找到相关内容"自动判 correct / wrong；其余题型 autoJudgment=pending 留人工评判（判定协议第 3 条） |
+| 错误分支 | `404/3003` 评测任务不存在 |
+
+#### 4.2.6 POST /api/admin/eval-runs/{id}/judgments — 人工评判录分
+
+| 项 | 说明 |
+|----|------|
+| 请求体 | `items`（非空数组）：`[{questionId, judgment}]`；judgment 三档枚举锁 API（判定协议第 1 条）：`correct` / `partial` / `wrong` |
+| 折算口径 | correct=1 / partial=0.5 / wrong=0 / pending=0；每题最终判定 = 人工 judgment 优先，否则 autoJudgment（录分与报告共用同一合并口径）；correct/accuracy 即时重算 |
+| 成功响应 | `200`，`data` = 收口后 summary（同 4.2.4 项字段）+ `pendingCount`（同步刷新，前端即时更新）；审计 `eval.judge {runId, judged}` |
+| 错误分支 | `422/3004` 跑分未收口（仅 status=done 可录分，见错误码表）；`422/1003` questionId 不在本次明细（message 指名题号）、items 为空、judgment 枚举外；`404/3003` 任务不存在 |
+
+#### 4.2.7 GET /api/admin/eval-runs/{id}/report — 分组报告
+
+| 项 | 说明 |
+|----|------|
+| 成功响应 | `200`，`data: {config, status, totals, byDept, byQtype}`：`totals: {total, correct, accuracy, pendingCount}`（从 detail 明细聚合而非直读列，与录分口径自洽）；`byDept: [{deptCode, total, accuracy}]`（按题面部门，字典序）；`byQtype: [{qtype, total, accuracy}]`（字典序）；组内 accuracy = 组内加权 correct / 组内 total。running / failed 也可出报告（部分明细 + 真实状态，不做状态闸） |
+| 错误分支 | `404/3003` 任务不存在 |
+
+### 4.3 提问记录与 badcase 治理（M7，/api/admin/messages、/api/admin/badcases）
+
+两查询恒滤 `is_eval=true`（W3 约束：评测数据不污染运营查询）；提问记录以 user 消息行为单位，badcase 队列以点踩回答为单位。
+
+#### 4.3.1 GET /api/admin/messages — 提问记录列表（F-701）
+
+| 项 | 说明 |
+|----|------|
+| 查询参数 | `deptId`（≥1，可选）、`dateFrom` / `dateTo`（YYYY-MM-DD，含首尾日，可选）、`hasFeedback`（bool，true=回答被点踩，可选）、`page`（≥1，默认 1）、`pageSize`（1-100，默认 20） |
+| 成功响应 | `200`，`data: {items, total, page, pageSize}`。items 项字段：`id, conversationId, createdAt, username, deptCode, questionPreview（截 50 字）, answerType, hasCitations, feedback`——后三项取自配对回答；无回答 / 中断的问题记 None / false |
+
+#### 4.3.2 GET /api/admin/messages/{id} — 提问详情
+
+| 项 | 说明 |
+|----|------|
+| 成功响应 | `200`，`data: {user, assistant}`。user 段：`{id, conversationId, createdAt, username, deptCode, content（提问原文，区别于列表 50 字摘要）}`；assistant 段为 null（该问无有效回答，如中断）或 `{id, content, citations（JSONB 原样，含 id——badcase 处理入口）, answerType, model, promptTokens, completionTokens, latencyMs, cacheHit, feedback, feedbackCategory, feedbackComment}` |
+| 错误分支 | `404/3003` 提问记录不存在（非 user 行 / 评测消息 / 不存在 id 同文案，不给探测空间） |
+
+#### 4.3.3 GET /api/admin/badcases — badcase 队列（F-702）
+
+| 项 | 说明 |
+|----|------|
+| 查询参数 | `deptId`（≥1，可选）、`badcaseStatus`（可选，缺省不过滤——"待处理"由前端显式传参，默认视图由前端带参）、`page`（≥1，默认 1）、`pageSize`（1-100，默认 20） |
+| 队列口径 | feedback='down' 且非评测的 assistant 消息（软删中断行不入），一条回答一条记录不重复；created_at 降序 |
+| 成功响应 | `200`，`data: {items, total, page, pageSize}`。items 项字段：`messageId, createdAt, deptCode, questionPreview（截 50 字）, category, comment, badcaseStatus` |
+
+#### 4.3.4 PATCH /api/admin/badcases/{messageId} — badcase 处置
+
+| 项 | 说明 |
+|----|------|
+| 请求体 | `badcaseStatus`（枚举 `"已修语料"` / `"已忽略"`——只收 admin 终态，"待处理"仅由 W2 点踩入口产生，不提供重开回退）；`note`（处理理由，随冻结基线 ADM-03：`已忽略` 必填 strip 后 1-500 字、`已修语料` 可选给了则同样 1-500；只入审计不入 messages） |
+| 成功响应 | `200`，`data: {messageId, badcaseStatus}`；审计 `badcase.update {messageId, from, to, note}` 与状态更新同事务落库 |
+| 错误分支 | `422/1003` 枚举外（字段级指名 badcaseStatus）/ note 长度非法；`404/3003` 点踩记录不存在（不存在 / 非 down / 评测点踩同文案） |
+
+### 4.4 检索测试（/api/admin/retrieval-test）
+
+#### 4.4.1 POST /api/admin/retrieval-test — 检索调参工具（只读）
+
+| 项 | 说明 |
+|----|------|
+| 请求体 | `question`（strip 后 1-2000 字）、`deptCode`（枚举 service / hr / all，检索视角；admin 任意视角，但检索 SQL 恒带部门过滤） |
+| 成功响应 | `200`，`data: {qa, docs, thresholds}`——重放检索管道（normalize → embed → 问答对匹配 → 向量检索 → 重排折叠），qa 与 docs 两路结果并呈互不短路 |
+| qa 字段 | `{id, question, similarity, thresholdPassed}` 或 null——similarity 为 **embedding 余弦**（qa 口径，对照当前 qa 阈值；低于阈值即返回 null，命中时 thresholdPassed 恒 true）。**两套分数口径不互比**：qa 的余弦与 docs 的 rerank 分分属不同空间（standards §4.4） |
+| docs 项字段 | `{chunkId, documentTitle, page, titlePath, rerankScore, recallCosine, thresholdPassed, folded}`——**rerankScore 为 rerank sigmoid 分、recallCosine 为召回阶段余弦**，两套分数分字段呈列；folded=true 标记进 top_n 但被折叠丢弃的块（调参需可见）；thresholdPassed 对照当前 Settings 阈值逐块标记 |
+| thresholds | `{qa, refuse}` 当前生效阈值（config 缺省 0.85 / 0.55） |
+| 副作用 | 无：不调 LLM、不写召回计数（不污染零召回榜）、只读不落审计 |
+| 错误分支 | `422/1003` question 长度非法（field 级）、deptCode 枚举外 |
+
+### 4.5 运营概览与语料健康度
+
+#### 4.5.1 GET /api/admin/overview — 运营概览（F-704）
+
+| 项 | 说明 |
+|----|------|
+| 查询参数 | `days`——仅 `1` 或 `7` 两档（缺省 7；窗口 created_at >= now-days） |
+| 成功响应 | `200`，`data: {totals, byDept}`。两组同构：`{questions, hitRate, refuseRate, downRate, tokens}`——questions=窗口内 assistant **非评测**回答行数（含中断行）；分母恒为 questions（各比率同口径可横向对比）：hitRate=qa+rag 回答占比、refuseRate=拒答占比、downRate=点踩占比；比率统一 0-1 四位小数；tokens=prompt+completion 之和。byDept 按 deptCode 升序且只含有数据的部门 |
+| 错误分支 | `422/1003` days 取值非法（窗口外） |
+
+#### 4.5.2 GET /api/admin/health — 语料健康度（F-1009）
+
+| 项 | 说明 |
+|----|------|
+| 成功响应 | `200`，`data: {totalDocs, readyCount, readyRate, pendingConfirm, zeroRecall, expiringSoon}`——`zeroRecall` 零召回文档榜：is_active+ready 且建档严格早于 30 天前、且近 30 天无任一 chunk 被命中（文档级反连接，恰在 30 天线的命中即算近期）；项 `{id, title, deptCode, createdAt}` 按建档升序。`expiringSoon` 待过期清单：expiry_date ≤ 今天+7 天且未删除（**含已到期未下线**）；项 `{id, title, expiryDate}` |
+
+### 4.6 提问记录保留策略（非端点，后台任务）
+
+提问记录两段式清理（F-803 / §4.6，无管理端点，随进程调度执行）：
+
+- **第一阶段（归档停用）**：created_at 早于 now − `message_retention_days`（默认 90）的 messages 置 is_active=false，幂等空跑不审计；命中时写批量审计 `message.archive`（detail 记 archived 条数与 cutoff 边界）。
+- **冷却期**：`message_cleanup_cooldown_days`（默认 30）。
+- **第二阶段（物理清理）**：created_at 早于 now −（保留 + 冷却）的消息物理删除——messages 是全库**唯一物理删除点**，分批 ≤1000 行/批、批间独立提交；purge 阶段不再逐条审计（audit_logs 只增不删，被清理记录靠归档批量审计可追溯）。
+- **调度**：每日 03:00 UTC（APScheduler cron，单机单实例语义）；保留 / 冷却天数实时读 Settings，改配置无需重启调度器。
+
