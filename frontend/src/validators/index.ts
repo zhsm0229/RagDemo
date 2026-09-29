@@ -38,6 +38,23 @@ export function checkPageSize(value: unknown): ValidatorResult {
   return true
 }
 
+/**
+ * 登录/改密必填口径：仅拦空值与超长，其余规则交后端。
+ * 登录密码不设 ≥8 位——那是新密码规则，旧密码可能短于它，前端拦截会挡住合法登录
+ * （后端 LoginRequest/ChangePasswordRequest 仅约束 1-64 / 1-200 字符）。
+ */
+export function checkRequiredText(value: unknown, label: string, max: number): ValidatorResult {
+  const text = typeof value === 'string' ? value.trim() : ''
+  if (text.length < 1) return `请输入${label}`
+  if (text.length > max) return `${label}最长 ${max} 个字符`
+  return true
+}
+
+/** 确认字段一致（新密码/确认密码等）：期望值经 getter 实时取，避免快照过期 */
+export function checkConfirm(value: unknown, expected: unknown): ValidatorResult {
+  return value === expected ? true : '两次输入不一致'
+}
+
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/
 
 function isCalendarDate(text: string): boolean {
@@ -70,3 +87,18 @@ export const questionValidator = toElementValidator(checkQuestion)
 export const usernameValidator = toElementValidator(checkUsername)
 export const passwordValidator = toElementValidator(checkPassword)
 export const pageSizeValidator = toElementValidator(checkPageSize)
+
+/** 必填文本 validator 工厂（登录账号/密码、改密原密码等仅必填口径，label 用于错误文案） */
+export function requiredTextValidator(
+  label: string,
+  max: number,
+): (rule: unknown, value: unknown, callback: (error?: Error) => void) => void {
+  return toElementValidator((value) => checkRequiredText(value, label, max))
+}
+
+/** 确认字段一致 validator 工厂：expected 经 getter 实时取（如 () => form.new） */
+export function confirmValidator(
+  getExpected: () => unknown,
+): (rule: unknown, value: unknown, callback: (error?: Error) => void) => void {
+  return toElementValidator((value) => checkConfirm(value, getExpected()))
+}

@@ -35,17 +35,20 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  /** 登录成功即写状态；mustChangePassword 由路由守卫引导去改密页 */
+  /**
+   * 登录成功即写状态；mustChangePassword 由路由守卫引导去改密页。
+   * silent：登录/改密页错误内联展示（§22.2），不走全局 ElMessage 兜底。
+   */
   async function login(payload: LoginRequest): Promise<UserInfo> {
-    const me = await post<UserInfo>('/auth/login', payload)
+    const me = await post<UserInfo>('/auth/login', payload, { silent: true })
     user.value = me
     loaded.value = true
     return me
   }
 
-  /** 改密成功后刷新本地用户态（mustChangePassword 清零） */
+  /** 改密成功后刷新本地用户态（mustChangePassword 清零）；错误同样内联（§22.2） */
   async function changePassword(payload: ChangePasswordRequest): Promise<UserInfo> {
-    const me = await post<UserInfo>('/auth/change-password', payload)
+    const me = await post<UserInfo>('/auth/change-password', payload, { silent: true })
     user.value = me
     return me
   }

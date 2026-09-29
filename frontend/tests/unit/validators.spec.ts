@@ -3,12 +3,16 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import {
+  checkConfirm,
   checkDateRange,
   checkPassword,
   checkPageSize,
   checkQuestion,
+  checkRequiredText,
   checkUsername,
+  confirmValidator,
   questionValidator,
+  requiredTextValidator,
 } from '@/validators'
 
 describe('提问校验（strip 后 1-2000 字）', () => {
@@ -90,5 +94,49 @@ describe('Element 表单 validator 适配', () => {
     const pass = vi.fn()
     questionValidator({}, '合法问题', pass)
     expect(pass).toHaveBeenCalledWith(undefined)
+  })
+})
+
+describe('必填文本校验（登录/改密仅必填口径，上限随后端字段）', () => {
+  it('空值与纯空白拒绝并带字段名，非字符串输入拒绝', () => {
+    expect(checkRequiredText('', '用户名', 64)).toBe('请输入用户名')
+    expect(checkRequiredText('   ', '原密码', 200)).toBe('请输入原密码')
+    expect(checkRequiredText(null, '用户名', 64)).toBe('请输入用户名')
+  })
+
+  it('超上限拒绝（用户名 64、密码 200），边界值通过；密码不设 ≥8（旧密码可短）', () => {
+    expect(checkRequiredText('a'.repeat(64), '用户名', 64)).toBe(true)
+    expect(checkRequiredText('a'.repeat(65), '用户名', 64)).toBe('用户名最长 64 个字符')
+    expect(checkRequiredText('p'.repeat(200), '密码', 200)).toBe(true)
+    expect(checkRequiredText('p'.repeat(201), '密码', 200)).toBe('密码最长 200 个字符')
+    expect(checkRequiredText('123456', '密码', 200)).toBe(true)
+  })
+
+  it('requiredTextValidator 工厂：失败回调 Error、通过回调 undefined', () => {
+    const fail = vi.fn()
+    requiredTextValidator('用户名', 64)({}, '', fail)
+    expect(fail).toHaveBeenCalledWith(expect.any(Error))
+
+    const pass = vi.fn()
+    requiredTextValidator('用户名', 64)({}, 'admin', pass)
+    expect(pass).toHaveBeenCalledWith(undefined)
+  })
+})
+
+describe('确认字段一致校验（改密页 新密码/确认密码）', () => {
+  it('与期望值一致通过，不一致返回固定文案', () => {
+    expect(checkConfirm('NewPass1234', 'NewPass1234')).toBe(true)
+    expect(checkConfirm('NewPass1235', 'NewPass1234')).toBe('两次输入不一致')
+  })
+
+  it('confirmValidator 经 getter 实时取期望值（新密码改后确认位随之失效）', () => {
+    let expected = 'AAAABBBB'
+    const validator = confirmValidator(() => expected)
+    const fail = vi.fn()
+    validator({}, 'AAAABBBB', fail)
+    expect(fail).toHaveBeenCalledWith(undefined)
+    expected = 'CCCCDDDD'
+    validator({}, 'AAAABBBB', fail)
+    expect(fail).toHaveBeenCalledWith(expect.any(Error))
   })
 })
