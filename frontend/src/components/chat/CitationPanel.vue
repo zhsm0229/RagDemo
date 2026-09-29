@@ -2,7 +2,7 @@
 /**
  * 引用面板（P2 右栏，对照原型 cite-panel/cite-card，可折叠）：
  * 展示最近一条 assistant 回答的引用（citations 事件先于 token 到达即上板），
- * 角标点击联动高亮对应卡片；"查看原文"核对弹窗与点踩反馈属 T9 交付范围。
+ * 角标点击联动高亮对应卡片；点卡片打开"查看原文"核对弹窗（kotaemon 式溯源 §8.2）。
  */
 import type { CitationItem } from '@/api/types'
 
@@ -14,6 +14,7 @@ defineProps<{
 
 defineEmits<{
   close: []
+  open: [citation: CitationItem]
 }>()
 </script>
 
@@ -36,6 +37,7 @@ defineEmits<{
         :key="c.n"
         class="cite-card"
         :class="{ hl: highlightN === c.n }"
+        @click="$emit('open', c)"
       >
         <div class="cite-title">
           <span class="cite-name">[{{ c.n }}] {{ c.title }}</span>
@@ -83,6 +85,7 @@ defineEmits<{
   padding: 10px;
   margin-bottom: 8px;
   font-size: 13px;
+  cursor: pointer;
   transition: all 0.2s;
 }
 .cite-card.hl,

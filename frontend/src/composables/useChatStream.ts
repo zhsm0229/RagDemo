@@ -5,14 +5,17 @@
  *   未落库会话（首问 conversationId=null）的消息暂存 UNASSIGNED 桶，
  *   done 后由页面把桶迁移到后端返回的真实会话 id 上。
  * - 事件应用顺序即后端时序：citations（先到，渲染引用占位）→ token（增量拼接）
- *   → done（refused/cacheHit 收尾）→ error（标失败态，retryable 才出重试）。
+ *   → done（refused/cacheHit/用量收尾）→ error（标失败态，retryable 才出重试）；
+ *   未知事件名忽略。
+ * - 停止（T8 评审清单③）：streamChat 传 AbortController.signal，stop() 中止后
+ *   气泡标"已停止"且可重问。
  * - 重试语义（CHAT-12）：以相同问题新发一条（新 user 气泡 + 新流），
  *   失败消息保留标失败态，后端不重复落库。
  */
 import { reactive, ref } from 'vue'
-import { ApiClientError } from '@/api/client'
+import { ABORTED_CODE, ApiClientError } from '@/api/client'
 import { NON_RETRYABLE_PRESTREAM_CODES, streamChat, type MessageItem } from '@/api/chat'
-import type { ChatStreamEvent, CitationItem } from '@/api/types'
+import type { ChatStreamEvent, CitationItem, FeedbackKind } from '@/api/types'
 
 export type MessageStatus = 'streaming' | 'done' | 'failed'
 
@@ -26,6 +29,15 @@ export interface ChatMessage {
   status: MessageStatus
   refused: boolean
   cacheHit: boolean
+  /** done 事件下发的用量（对照原型 msg-meta 的 token·耗时；历史接口无此字段恒 null） */
+  promptTokens: number | null
+  completionTokens: number | null
+  durationMs: number | null
+  /** 反馈状态（F-208；历史加载与反馈提交回填，取消反馈后端无端点故只进不退） */
+  feedback: FeedbackKind | null
+  feedbackCategory: string | null
+  /** 用户主动停止生成（气泡标"已停止"且可重问，T8 评审清单③） */
+  stopped: boolean
   /** failed 态的脱敏失败原因（气泡内联展示） */
   failure: string | null
   retryable: boolean
@@ -56,6 +68,12 @@ function userMessage(question: string, keyOf: () => number): ChatMessage {
     status: 'done',
     refused: false,
     cacheHit: false,
+    promptTokens: null,
+    completionTokens: null,
+    durationMs: null,
+    feedback: null,
+    feedbackCategory: null,
+    stopped: false,
     failure: null,
     retryable: false,
   }
@@ -71,6 +89,12 @@ function assistantPlaceholder(keyOf: () => number): ChatMessage {
     status: 'streaming',
     refused: false,
     cacheHit: false,
+    promptTokens: null,
+    completionTokens: null,
+    durationMs: null,
+    feedback: null,
+    feedbackCategory: null,
+    stopped: false,
     failure: null,
     retryable: false,
   }
@@ -93,6 +117,12 @@ export function mapHistory(items: MessageItem[], keyOf: () => number): ChatMessa
       status: 'done',
       refused: item.answerType === 'refuse',
       cacheHit: item.cacheHit,
+      promptTokens: null,
+      completionTokens: null,
+      durationMs: null,
+      feedback: item.feedback,
+      feedbackCategory: item.feedbackCategory,
+      stopped: false,
       failure: null,
       retryable: false,
     })
@@ -112,6 +142,12 @@ export function mapHistory(items: MessageItem[], keyOf: () => number): ChatMessa
         status: 'failed',
         refused: false,
         cacheHit: false,
+        promptTokens: null,
+        completionTokens: null,
+        durationMs: null,
+        feedback: null,
+        feedbackCategory: null,
+        stopped: false,
         failure: '生成失败，可重试',
         retryable: true,
       })
@@ -121,19 +157,30 @@ export function mapHistory(items: MessageItem[], keyOf: () => number): ChatMessa
 }
 
 function applyEvent(message: ChatMessage, event: ChatStreamEvent): void {
-  if (event.event === 'citations') {
-    message.citations = event.items
-  } else if (event.event === 'token') {
-    message.content += event.content
-  } else if (event.event === 'done') {
-    message.status = 'done'
-    message.id = event.messageId
-    message.refused = event.refused
-    message.cacheHit = event.cacheHit
-  } else {
-    message.status = 'failed'
-    message.failure = event.message
-    message.retryable = event.retryable
+  switch (event.event) {
+    case 'citations':
+      message.citations = event.items
+      break
+    case 'token':
+      message.content += event.content
+      break
+    case 'done':
+      message.status = 'done'
+      message.id = event.messageId
+      message.refused = event.refused
+      message.cacheHit = event.cacheHit
+      message.promptTokens = event.promptTokens
+      message.completionTokens = event.completionTokens
+      message.durationMs = event.durationMs
+      break
+    case 'error':
+      message.status = 'failed'
+      message.failure = event.message
+      message.retryable = event.retryable
+      break
+    default:
+      // 未知事件名（心跳/未来扩展）忽略，不判 error（T8 评审清单②）
+      break
   }
 }
 
@@ -180,27 +227,48 @@ export function useChatStream(hooks: ChatStreamHooks = {}) {
     messagesByConv[conversationId] = mapHistory(items, keyOf)
   }
 
+  /** 当前流的取消器（一机一流，全局串行） */
+  let controller: AbortController | null = null
+
+  /** 用户停止当前生成：气泡标"已停止"并可重问（T8 评审清单③；非流式态空操作） */
+  function stop(): void {
+    controller?.abort()
+  }
+
   /** 发问：追加 user 气泡 + 流式占位，逐事件增量应用（一机一流，全局串行） */
   async function send(question: string, conversationId: number | null): Promise<void> {
     if (streaming.value) return
     streaming.value = true
+    controller = new AbortController()
     const list = bucket(conversationId)
     list.push(userMessage(question, keyOf), assistantPlaceholder(keyOf))
     // 事件须作用在 reactive 代理上：直接改原始对象不触发依赖更新（模板经代理读取）
     const placeholder = list[list.length - 1]
     try {
-      await streamChat({ conversationId, question }, (event) => {
-        applyEvent(placeholder, event)
-        hooks.onUpdate?.()
-      })
+      await streamChat(
+        { conversationId, question },
+        (event) => {
+          applyEvent(placeholder, event)
+          hooks.onUpdate?.()
+        },
+        controller.signal,
+      )
     } catch (error) {
-      const { failure, retryable } = fromPreStreamError(error)
       placeholder.status = 'failed'
-      placeholder.failure = failure
-      placeholder.retryable = retryable
+      if (error instanceof ApiClientError && error.code === ABORTED_CODE) {
+        // 用户停止：不打失败原因文案，可重问（重试=同问题新发一条）
+        placeholder.stopped = true
+        placeholder.retryable = true
+      } else {
+        const { failure, retryable } = fromPreStreamError(error)
+        placeholder.failure = failure
+        placeholder.retryable = retryable
+      }
+    } finally {
+      controller = null
+      streaming.value = false
+      hooks.onSettled?.(conversationId)
     }
-    streaming.value = false
-    hooks.onSettled?.(conversationId)
   }
 
   /** 重试（CHAT-12）：取失败消息前最近一条 user 提问，以相同问题新发一条 */
@@ -225,6 +293,7 @@ export function useChatStream(hooks: ChatStreamHooks = {}) {
     dropConversation,
     loadHistory,
     send,
+    stop,
     retryFailed,
   }
 }

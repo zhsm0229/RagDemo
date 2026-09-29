@@ -85,3 +85,27 @@ export interface ChatErrorEvent {
 }
 
 export type ChatStreamEvent = ChatCitationsEvent | ChatTokenEvent | ChatDoneEvent | ChatErrorEvent
+
+// ---- 引用原文核对（docs/api.md §3.7 契约，GET /api/citations/content） ----
+
+/** refType=doc → chunk 正文；refType=qa → 问答对答案文本 */
+export interface CitationContent {
+  refType: RefType
+  refId: number
+  content: string
+  title: string
+  page: number | null
+  titlePath: string | null
+}
+
+// ---- 消息反馈（docs/api.md §3.6，POST /api/messages/{id}/feedback） ----
+
+export type FeedbackKind = 'up' | 'down'
+
+export interface FeedbackResult {
+  id: number
+  feedback: FeedbackKind
+  feedbackCategory: string | null
+  feedbackComment: string | null
+  badcaseStatus: string | null
+}

@@ -37,4 +37,16 @@ describe('parseSseFrames（SSE 文本帧解析纯函数）', () => {
       { event: 'ping', data: '1' },
     ])
   })
+
+  it('注释/心跳块（无 event:/data: 行）整块跳过不产帧，流继续（T8 评审清单②）', () => {
+    const buffer = ': keep-alive\n\nevent: token\ndata: {"content":"你好"}\n\n: ping\n\n'
+    const { frames, rest } = parseSseFrames(buffer)
+    expect(frames).toEqual([{ event: 'token', data: '{"content":"你好"}' }])
+    expect(rest).toBe('')
+  })
+
+  it('仅 data 行（无 event: 行）保留默认事件名 message 的解析行为', () => {
+    const { frames } = parseSseFrames('data: 1\n\n')
+    expect(frames).toEqual([{ event: 'message', data: '1' }])
+  })
 })

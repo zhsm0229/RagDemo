@@ -3,7 +3,8 @@
  * 单条消息气泡（对照原型 bubble user/assistant + msg-meta）。
  * markdown 不渲染（纯文本+换行，white-space: pre-wrap）；引用角标 [n] 用正则分段
  * 转可点 sup（仅当 n 在本条 citations 中存在），禁 v-html。
- * meta 行按状态展示：失败（生成失败+原因+重试）/ 完成（已拒答、来自缓存标注）。
+ * meta 行按状态展示：失败（生成失败+原因+重试）/ 已停止（可重试）/
+ * 完成（已拒答、来自缓存、token·耗时、👍👎 反馈与已点踩标注）。
  */
 import { computed } from 'vue'
 import type { ChatMessage } from '@/composables/useChatStream'
@@ -17,6 +18,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   cite: [n: number]
   retry: []
+  like: []
+  dislike: []
 }>()
 
 interface Segment {
@@ -42,6 +45,14 @@ const segments = computed<Segment[]>(() => {
   if (last < content.length) out.push({ type: 'text', text: content.slice(last) })
   return out
 })
+
+/**
+ * 反馈入口：仅本人已落库回答（id 回填）且非拒答可反馈——中断占位/拒答行不可，
+ * 与后端"仅本人 assistant 消息且 is_active"口径一致（docs/api.md §3.6）
+ */
+const canFeedback = computed(
+  () => props.message.id !== null && props.message.status === 'done' && !props.message.refused,
+)
 </script>
 
 <template>
@@ -59,18 +70,42 @@ const segments = computed<Segment[]>(() => {
     </template>
     <span v-if="message.status === 'streaming'" class="cursor">▍</span>
     <div v-if="message.status === 'failed'" class="msg-meta">
-      <el-tag type="danger" size="small">生成失败</el-tag>
-      <span class="fail-text">{{ message.failure }}</span>
+      <el-tag v-if="message.stopped" size="small" type="info">已停止</el-tag>
+      <template v-else>
+        <el-tag type="danger" size="small">生成失败</el-tag>
+        <span class="fail-text">{{ message.failure }}</span>
+      </template>
       <el-button v-if="message.retryable" link type="primary" size="small" @click="emit('retry')"
         >重试</el-button
       >
     </div>
-    <div
-      v-else-if="message.status === 'done' && (message.refused || message.cacheHit)"
-      class="msg-meta"
-    >
+    <div v-else-if="message.status === 'done'" class="msg-meta">
       <el-tag v-if="message.refused" size="small" type="warning">已拒答</el-tag>
       <el-tag v-if="message.cacheHit" size="small" type="info">来自缓存</el-tag>
+      <span v-if="message.promptTokens !== null" class="token-info">
+        token: in {{ message.promptTokens }} / out {{ message.completionTokens }} ·
+        {{ message.durationMs }}ms
+      </span>
+      <span class="spacer" />
+      <template v-if="canFeedback">
+        <el-button
+          link
+          size="small"
+          :type="message.feedback === 'up' ? 'primary' : ''"
+          @click="emit('like')"
+          >👍</el-button
+        >
+        <el-button
+          link
+          size="small"
+          :type="message.feedback === 'down' ? 'danger' : ''"
+          @click="emit('dislike')"
+          >👎</el-button
+        >
+      </template>
+      <span v-if="message.feedback === 'down'" class="fb-down"
+        >已点踩：{{ message.feedbackCategory }}</span
+      >
     </div>
   </div>
 </template>
@@ -132,5 +167,15 @@ const segments = computed<Segment[]>(() => {
 }
 .fail-text {
   color: var(--el-color-danger);
+}
+.token-info {
+  white-space: nowrap;
+}
+.spacer {
+  flex: 1;
+}
+.fb-down {
+  color: var(--el-color-danger);
+  white-space: nowrap;
 }
 </style>

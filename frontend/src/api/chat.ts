@@ -23,8 +23,12 @@ import type {
   ApiResponse,
   ChatStreamEvent,
   ChatStreamRequest,
+  CitationContent,
   CitationItem,
+  FeedbackKind,
+  FeedbackResult,
   PageData,
+  RefType,
 } from './types'
 
 // ---- 会话 / 消息响应字段（docs/api.md §3.3 / §3.4） ----
@@ -75,6 +79,9 @@ export type ChatEventHandler = (event: ChatStreamEvent) => void
 /** 开流前错误里由前端决定可否重试的码：参数/鉴权/限额/会话归属，重试无意义 */
 const NON_RETRYABLE_PRESTREAM_CODES = new Set([1003, 2003, 2004, 3002, 3003])
 
+/** 点踩分类枚举（docs/api.md §3.6，与后端 FeedbackRequest 同源） */
+export const FEEDBACK_CATEGORIES = ['答案错误', '引用无关', '拒答不当', '其他'] as const
+
 async function toEnvelopeError(res: Response): Promise<ApiClientError> {
   try {
     const payload = (await res.json()) as ApiResponse<unknown>
@@ -120,19 +127,33 @@ export async function streamChat(
   const reader = res.body?.getReader()
   if (!reader) throw new ApiClientError(BAD_RESPONSE_CODE, FALLBACK_MESSAGE)
 
+  // 坏帧容错（T8 评审清单②）：代理注入的心跳/脏 data 非 JSON 时跳过该帧，不中止整条流
   const dispatch = (frame: { event: string; data: string }): void => {
-    onEvent({ ...JSON.parse(frame.data), event: frame.event } as ChatStreamEvent)
+    try {
+      onEvent({ ...JSON.parse(frame.data), event: frame.event } as ChatStreamEvent)
+    } catch {
+      // 非 JSON data 帧丢弃
+    }
   }
 
   const decoder = new TextDecoder()
   let buffer = ''
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (value !== undefined) buffer += decoder.decode(value, { stream: true })
-    const { frames, rest } = parseSseFrames(buffer)
-    buffer = rest
-    frames.forEach(dispatch)
-    if (done) break
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (value !== undefined) buffer += decoder.decode(value, { stream: true })
+      const { frames, rest } = parseSseFrames(buffer)
+      buffer = rest
+      frames.forEach(dispatch)
+      if (done) break
+    }
+  } catch (error) {
+    // 中途断流（T8 评审清单①）：read 抛错（断网/代理重置）映射网络错误码呈现，
+    // 非 NON_RETRYABLE 集合成员 → 气泡失败态可重试；用户 abort 单独成码
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new ApiClientError(ABORTED_CODE, ABORTED_MESSAGE)
+    }
+    throw new ApiClientError(NETWORK_ERROR_CODE, NETWORK_ERROR_MESSAGE)
   }
   // 收尾残尾：服务端若未以空行收尾也尽力解析最后一个事件
   buffer += decoder.decode()
@@ -140,3 +161,32 @@ export async function streamChat(
 }
 
 export { NON_RETRYABLE_PRESTREAM_CODES }
+
+// ---- 引用原文核对 / 消息反馈 ----
+
+/** 引用正文（doc → chunk 全文 / qa → 答案文本）；404/3003 由弹窗内联展示故 silent */
+export function getCitationContent(refType: RefType, refId: number): Promise<CitationContent> {
+  return get<CitationContent>(`/citations/content?refType=${refType}&refId=${refId}`, {
+    silent: true,
+  })
+}
+
+export interface FeedbackPayload {
+  feedback: FeedbackKind
+  /** down 必填枚举；up 时后端忽略置 null */
+  category?: string
+  /** down 必填 strip 后 1-500 字；up 时后端忽略置 null */
+  comment?: string
+}
+
+/**
+ * 消息反馈（F-208）。down 弹窗内联展示 422/1003 兜底错误需传 silent=true；
+ * up 轻交互走默认 ElMessage 兜底。
+ */
+export function leaveFeedback(
+  messageId: number,
+  payload: FeedbackPayload,
+  silent = false,
+): Promise<FeedbackResult> {
+  return post<FeedbackResult>(`/messages/${messageId}/feedback`, payload, { silent })
+}

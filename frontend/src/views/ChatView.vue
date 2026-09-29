@@ -1,8 +1,9 @@
 <script setup lang="ts">
 /**
  * P2 问答工作台（ui-spec §二，三栏布局对照原型 chat-wrap）：
- * 会话列表（新建/删除二次确认/切换/高亮）+ 对话区（SSE 流式气泡 + 输入区）
- * + 引用面板（可折叠）。SSE 事件时序与重试语义见 useChatStream。
+ * 会话列表（新建/删除二次确认/切换/高亮）+ 对话区（SSE 流式气泡 + 输入区，发送中可停止）
+ * + 引用面板（可折叠，点卡片开"查看原文"核对弹窗）+ 点赞/点踩反馈（F-208）。
+ * SSE 事件时序与重试/停止语义见 useChatStream。
  *
  * 首问自动建会话（api.md §3.1 conversationId 可空）：不先建会话直接提问，
  * done 后刷新列表，把暂存消息桶迁移到后端自建会话并选中（updated_at 降序首条）。
@@ -12,11 +13,14 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import ChatInput from '@/components/chat/ChatInput.vue'
 import CitationPanel from '@/components/chat/CitationPanel.vue'
 import ConversationList from '@/components/chat/ConversationList.vue'
+import FeedbackDialog from '@/components/chat/FeedbackDialog.vue'
 import MessageBubble from '@/components/chat/MessageBubble.vue'
+import SourceDialog from '@/components/chat/SourceDialog.vue'
 import {
   createConversation,
   deleteConversation,
   getConversationMessages,
+  leaveFeedback,
   listConversations,
   type ConversationItem,
 } from '@/api/chat'
@@ -32,6 +36,11 @@ const activeConvId = ref<number | null>(null)
 const citeCollapsed = ref(false)
 const citeHl = ref<number | null>(null)
 const msgsEl = ref<HTMLElement | null>(null)
+/** "查看原文"核对弹窗（F-202）与点踩弹窗（F-208）状态 */
+const sourceCitation = ref<CitationItem | null>(null)
+const sourceVisible = ref(false)
+const feedbackMessage = ref<ChatMessage | null>(null)
+const feedbackVisible = ref(false)
 
 function scrollBottom(): void {
   void nextTick(() => {
@@ -151,6 +160,45 @@ function onRetry(message: ChatMessage): void {
   void chat.retryFailed(message, activeConvId.value)
 }
 
+/** 发送中停止生成（AbortController）：气泡标"已停止"且可重问 */
+function onStop(): void {
+  chat.stop()
+}
+
+function onCiteCardClick(citation: CitationItem): void {
+  // 点卡片同步高亮气泡对应角标（task-9 brief：点卡片高亮对应角标、点角标滚动定位）
+  citeHl.value = citation.n
+  sourceCitation.value = citation
+  sourceVisible.value = true
+}
+
+/** 点赞轻交互（对照原型无弹窗）：成功后回填 meta 高亮；失败 client 已统一提示 */
+async function onLike(message: ChatMessage): Promise<void> {
+  if (message.id === null) return
+  try {
+    await leaveFeedback(message.id, { feedback: 'up' })
+  } catch {
+    return
+  }
+  message.feedback = 'up'
+  message.feedbackCategory = null
+  ElMessage.success('已点赞')
+}
+
+function onDislike(message: ChatMessage): void {
+  feedbackMessage.value = message
+  feedbackVisible.value = true
+}
+
+/** 点踩提交成功：回填消息 meta（"已点踩：分类"）；备注不在气泡展示（P7 详情可查） */
+function onFeedbackSubmitted(payload: { category: string; comment: string }): void {
+  const message = feedbackMessage.value
+  if (message === null) return
+  message.feedback = 'down'
+  message.feedbackCategory = payload.category
+  feedbackMessage.value = null
+}
+
 function onCiteClick(n: number): void {
   citeHl.value = n
   if (citeCollapsed.value) return
@@ -194,9 +242,11 @@ function onCiteClick(n: number): void {
           :highlight-n="citeHl"
           @cite="onCiteClick"
           @retry="onRetry(m)"
+          @like="onLike(m)"
+          @dislike="onDislike(m)"
         />
       </div>
-      <ChatInput :disabled="chat.streaming.value" @send="onSend" />
+      <ChatInput :disabled="chat.streaming.value" @send="onSend" @stop="onStop" />
     </div>
 
     <CitationPanel
@@ -204,6 +254,19 @@ function onCiteClick(n: number): void {
       :citations="panelCitations"
       :highlight-n="citeHl"
       @close="citeCollapsed = true"
+      @open="onCiteCardClick"
+    />
+
+    <SourceDialog
+      :citation="sourceCitation"
+      :visible="sourceVisible"
+      @close="sourceVisible = false"
+    />
+    <FeedbackDialog
+      :message="feedbackMessage"
+      :visible="feedbackVisible"
+      @close="feedbackVisible = false"
+      @submitted="onFeedbackSubmitted"
     />
   </div>
 </template>

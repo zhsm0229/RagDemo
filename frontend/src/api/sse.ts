@@ -22,11 +22,19 @@ export function parseSseFrames(buffer: string): { frames: SseFrame[]; rest: stri
     if (block.trim() === '') continue
     let event = 'message'
     let data = ''
+    let hasPayload = false
     for (const rawLine of block.split('\n')) {
       const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine
-      if (line.startsWith('event:')) event = line.slice('event:'.length).trim()
-      else if (line.startsWith('data:')) data += line.slice('data:'.length).trim()
+      if (line.startsWith('event:')) {
+        event = line.slice('event:'.length).trim()
+        hasPayload = true
+      } else if (line.startsWith('data:')) {
+        data += line.slice('data:'.length).trim()
+        hasPayload = true
+      }
     }
+    // 注释/心跳块（如 ": keep-alive"，无 event:/data: 行）整块跳过（T8 评审清单②）
+    if (!hasPayload) continue
     frames.push({ event, data })
   }
   return { frames, rest }

@@ -2,19 +2,21 @@
 /**
  * 输入区（对照原型 chat-input）：1-2000 字（strip 口径，validators 与后端一致）
  * + 字数计数器 + 空禁发送；Enter 发送 / Shift+Enter 换行（中文输入法选词回车不发送）；
- * 发送中禁用；失焦校验空值、超长即时提示并禁发送（ui-spec §二交互表）。
+ * 发送中禁用并显示"停止"（AbortController 取消，T8 评审清单③，原型无此控件）；
+ * 失焦校验空值、超长即时提示并禁发送（ui-spec §二交互表）。
  */
 import { computed, ref } from 'vue'
 import type { FormInstance, FormRules } from 'element-plus'
 import { questionValidator } from '@/validators'
 
 const props = defineProps<{
-  /** 发送中禁用（全局一机一流） */
+  /** 发送中禁用（全局一机一流），同时作为"停止"按钮的展示开关 */
   disabled?: boolean
 }>()
 
 const emit = defineEmits<{
   send: [question: string]
+  stop: []
 }>()
 
 const formRef = ref<FormInstance>()
@@ -62,6 +64,9 @@ function trySend(): void {
       </el-form-item>
     </el-form>
     <div class="input-side">
+      <el-button v-if="disabled" size="small" plain type="warning" @click="emit('stop')"
+        >停止</el-button
+      >
       <el-tooltip
         :content="
           disabled ? '回答生成中，请稍候' : overLimit ? '问题长度须在 1-2000 字之间' : '发送'
