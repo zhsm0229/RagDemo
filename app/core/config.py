@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     rerank_top_n: int = 5  # 重排后保留条数 top_n
     chunk_dedup_sim: float = 0.98  # 检索结果去重相似度阈值
     hnsw_ef_search: int = 40  # pgvector HNSW 查询 ef_search
+    message_retention_days: int = 90  # 提问记录保留天数，超过即归档停用（两段式第一阶段，§7.3）
+    message_cleanup_cooldown_days: int = 30  # 归档冷却天数，期满物理清理（两段式第二阶段，§4.6）
     test_mode: bool = False
 
 
