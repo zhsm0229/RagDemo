@@ -300,7 +300,7 @@ W3 全部 20 个端点均为 **AdminUser 门**（依赖链：登录 → 首登�
 | 项 | 说明 |
 |----|------|
 | 成功响应 | `200`，`data` = 4.2.4 列表项字段 + `config` + `detail`；`config` 为收口时 9 字段快照（model / promptVersion / qaThreshold / refuseThreshold / efSearch / topK / topN / temperature / manifestVersion，锁定阈值与模型防跨跑对比被污染；running 期为 null） |
-| detail 结构 | `{items: [逐题], pendingCount: n}`。逐题字段：`questionId, deptId, qtype, expected, answerType, answer, citations, autoJudgment, error`——autoJudgment ∈ correct / wrong / pending；error 仅单题失败时非 null（user 消息留痕、不落 assistant 行）；人工录分后逐题追加 `judgment` 字段。`pendingCount` = 人工与 auto 均未判（最终判定 pending）的题数 |
+| detail 结构 | `{items: [逐题], pendingCount: n}`。逐题字段：`questionId, deptId, qtype, expected, answerType, answer, citations, autoJudgment, error`——autoJudgment ∈ correct / wrong / pending；error 仅单题失败时非 null（user 消息留痕、不落 assistant 行）；人工录分后逐题追加 `judgment` 字段。`pendingCount` = 人工与 auto 均未判（最终判定 pending）的题数。running 期逐题 commit 仅含 `items`；failed 态无 `pendingCount` 键（前端轮询需容忍键缺失） |
 | 自动判分口径 | 拒答类（期望答案 `[拒答]` 或题型 cross_reject）按回答是否逐字等于固定拒答话术"知识库中未找到相关内容"自动判 correct / wrong；其余题型 autoJudgment=pending 留人工评判（判定协议第 3 条） |
 | 错误分支 | `404/3003` 评测任务不存在 |
 
