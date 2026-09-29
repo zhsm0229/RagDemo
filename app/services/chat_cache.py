@@ -67,6 +67,17 @@ class ExactCache:
         with self._lock:
             self._entries[key] = (entry, expire_at)
 
+    def clear(self) -> None:
+        """整清全部条目（W3 Task 1）：文档 retry/confirm 改变可检索事实，陈旧答案
+        不能等 TTL 自然过期，成功响应前接线调用本方法（app/api/documents.py）。
+
+        并发契约：与 put/get 共用同一把粗锁，锁内 ``_entries.clear()``——失效线程与
+        并发问答线程交错时字典结构不被并发改写（类 docstring 的锁契约同样覆盖本方法，
+        不做逐键精细删除的细锁）。清空不可逆且刻意从宽：宁可多一次生成，不留旧答案。
+        """
+        with self._lock:
+            self._entries.clear()
+
 
 class DailyCounter:
     """单用户每日提问限额：{user_id: (当日, 已用次数)}，跨日自动重置。

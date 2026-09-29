@@ -145,6 +145,36 @@ class TestExactCacheRoundTrip:
         assert cache.get(key) == {"answer": "a", "citations": [], "answer_type": "doc"}
 
 
+class TestExactCacheClear:
+    def test_clear_drops_all_entries_within_ttl(self) -> None:
+        """clear 整清（文档 retry/confirm 失效接线，W3 Task 1）：TTL 内条目一并丢弃，
+        get 立即未命中——文档状态变化改变可检索事实，失效不等 TTL 自然过期。"""
+        cache = ExactCache(_clock(), ttl_s=300)
+        entry = {"answer": "a", "citations": [], "answer_type": "doc"}
+        cache.put(cache.make_key(1, "年假"), entry)
+        cache.put(cache.make_key(2, "病假"), entry)
+
+        cache.clear()
+
+        assert cache._entries == {}
+        assert cache.get(cache.make_key(1, "年假")) is None
+        assert cache.get(cache.make_key(2, "病假")) is None
+
+    def test_clear_then_put_roundtrip_again(self) -> None:
+        """clear 后缓存可继续 put→get 读回新条目（失效是清空而非销毁）。"""
+        cache = ExactCache(_clock(), ttl_s=300)
+        cache.put(cache.make_key(1, "q"), {"answer": "a", "citations": [], "answer_type": "doc"})
+        cache.clear()
+
+        cache.put(cache.make_key(1, "q"), {"answer": "新", "citations": [], "answer_type": "doc"})
+
+        assert cache.get(cache.make_key(1, "q")) == {
+            "answer": "新",
+            "citations": [],
+            "answer_type": "doc",
+        }
+
+
 class TestDailyCounter:
     def test_allows_limit_then_refuses_without_counting(self) -> None:
         """连吃 limit 次全 True；第 limit+1 次返回 False 且不计数（条目停在 (当日, limit)）。"""

@@ -6,13 +6,15 @@ r"""文档路由（薄控制器）：multipart 上传 / 列表 / 重试 / 确认
 （W1 测试断言用），否则 BackgroundTasks 独立会话执行。列表（admin-only）：
 dept/status/keyword 过滤 + 分页（pageSize 1-100 默认 20，§22.1），created_at
 降序（同刻以 id 降序兜底），响应键名全 camelCase。retry（DOC-11）仅 failed 可
-重跑；confirm 激活待确认文档（is_active=False → True）。
+重跑；confirm 激活待确认文档（is_active=False → True）。两者成功响应前整清问答
+精确缓存（request.app.state.chat_deps.cache.clear()，W3 Task 1）：文档状态变化
+改变可检索事实，陈旧答案不能等 TTL 自然过期（W2 移交②）。
 """
 
 from datetime import date
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, Query, Request, UploadFile
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
@@ -180,9 +182,10 @@ def list_documents(
 
 @router.post("/{doc_id}/retry")
 def retry_document(
-    doc_id: int, user: AdminUser, db: DbSession, background: BackgroundTasks
+    doc_id: int, user: AdminUser, db: DbSession, background: BackgroundTasks, request: Request
 ) -> dict:
-    """失败重试（DOC-11）：仅 failed 可重跑；非测试模式先落 parsing 再交后台接管。"""
+    """失败重试（DOC-11）：仅 failed 可重跑；非测试模式先落 parsing 再交后台接管。
+    成功响应前整清问答精确缓存：重试改变文档可检索事实，TTL 不可依赖（W3 Task 1）。"""
     doc = db.get(Document, doc_id)
     if doc is None:
         raise ApiError(ERR_PARAM_INVALID, _MSG_NOT_FOUND, 404)
@@ -194,11 +197,14 @@ def retry_document(
         doc.status = "parsing"  # 后台接管前先落 parsing：列表即时反馈（DOC-11 状态回 parsing）
         db.commit()
         background.add_task(_process_in_background, doc.id)
+    request.app.state.chat_deps.cache.clear()  # 成功响应前失效：宁可多一次生成不留旧答案
     return {"code": 0, "message": "ok", "data": {"id": doc.id, "status": doc.status}}
 
 
 @router.post("/{doc_id}/confirm")
-def confirm_document(doc_id: int, user: AdminUser, db: DbSession) -> dict:
-    """待确认激活：管理员确认敏感/近似命中文档 → is_active=True（service 负责审计与提交）。"""
+def confirm_document(doc_id: int, user: AdminUser, db: DbSession, request: Request) -> dict:
+    """待确认激活：管理员确认敏感/近似命中文档 → is_active=True（service 负责审计与提交）。
+    成功响应前整清问答精确缓存：激活改变可检索事实，TTL 不可依赖（W3 Task 1）。"""
     doc = ingest_service.confirm_document(db, doc_id, actor_user_id=user.id)
+    request.app.state.chat_deps.cache.clear()  # 成功响应前失效（同 retry，W2 移交②）
     return {"code": 0, "message": "ok", "data": {"id": doc.id, "isActive": doc.is_active}}

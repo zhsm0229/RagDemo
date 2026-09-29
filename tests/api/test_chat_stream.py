@@ -533,3 +533,108 @@ def test_multi_turn_rewrite_hits_qa_on_rewritten_question_and_history_capped(
     rows = _messages(session, _conversation_row(session).id)
     assert [row.role for row in rows] == ["user", "assistant"] * 5  # 五轮各一对完整落库
     assert [row.content for row in rows[::2]] == QUESTIONS
+
+
+# ---------- ⑩ 文档操作缓存失效（W3 Task 1）：retry/confirm 成功响应前整清精确缓存 ----------
+
+
+def _seed_pending_confirm_doc(session: Session, user: User) -> Document:
+    """直插待确认文档行（敏感命中形态：ready + is_active=False）。confirm 仅翻
+    is_active 不触文件，无需真实落盘文件；content_hash 全局唯一，独立取值防撞。"""
+    return _seed_document_row(
+        session,
+        user,
+        title="客服_敏感件_20260901",
+        content_hash=hashlib.sha256(b"pending-confirm-doc").hexdigest(),
+        status="ready",
+        is_active=False,
+    )
+
+
+def _seed_failed_doc(session: Session, user: User) -> Document:
+    """直插失败文档行（status=failed 可重试）。file_path 指向不存在文件：test_mode
+    重跑编排解析必然再失败（process_document 异常兜底落 failed），端点仍 200。"""
+    return _seed_document_row(
+        session,
+        user,
+        title="客服_失败件_20260901",
+        content_hash=hashlib.sha256(b"failed-doc-for-retry").hexdigest(),
+        status="failed",
+        is_active=False,
+    )
+
+
+def _seed_document_row(
+    session: Session, user: User, *, title: str, content_hash: str, status: str, is_active: bool
+) -> Document:
+    """非检索用文档行种子（无 Chunk 不影响召回）：仅承载 retry/confirm 的状态机形态。"""
+    doc = Document(
+        title=title,
+        dept_id=user.dept_id,
+        original_filename=f"{title}.docx",
+        file_path=f"seed/{title}.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=16,
+        content_hash=content_hash,
+        effective_date=date(2026, 9, 1),
+        owner_name="制度责任人",
+        status=status,
+        is_active=is_active,
+        uploaded_by=user.id,
+    )
+    session.add(doc)
+    session.flush()
+    return doc
+
+
+def test_confirm_clears_exact_cache_and_next_question_regenerates(chat_client, session) -> None:
+    """预热精确缓存（同题二问命中，stream_calls=1）→ admin confirm 激活待确认文档 →
+    同题三问不再命中（stream_calls 恢复增长为 2、done.cacheHit=false）：文档状态变化
+    改变可检索事实，TTL 不可依赖（W2 移交②）。"""
+    user = make_user(session, "cacheconfirm", "right-one", role="member")
+    make_user(session, "cacheadmin1", "right-two", role="admin")
+    _seed_rag_chunk(session, user)
+    pending = _seed_pending_confirm_doc(session, user)
+    _override_reranker_high()
+    assert login(chat_client, "cacheconfirm", "right-one").status_code == 200
+    assert post_chat(chat_client, QUESTION).status_code == 200
+    assert post_chat(chat_client, QUESTION).status_code == 200
+    assert app.state.chat_deps.llm.stream_calls == 1  # 预热：第二问命中缓存
+
+    assert login(chat_client, "cacheadmin1", "right-two").status_code == 200  # 切 admin
+    resp = chat_client.post(f"/api/documents/{pending.id}/confirm")
+
+    assert resp.status_code == 200
+    assert resp.json()["data"] == {"id": pending.id, "isActive": True}
+    assert login(chat_client, "cacheconfirm", "right-one").status_code == 200  # 切回提问者
+    third = post_chat(chat_client, QUESTION)
+
+    assert third.status_code == 200
+    assert _parse_sse(third.text)[-1][1]["cacheHit"] is False
+    assert app.state.chat_deps.llm.stream_calls == 2  # 缓存已被整清：第三问重新生成
+
+
+def test_retry_clears_exact_cache_and_next_question_regenerates(chat_client, session) -> None:
+    """预热缓存 → admin retry 重跑失败文档（test_mode 同步编排，文件缺失再失败仍
+    200）→ 同题三问不再命中：失效在成功响应前生效，与编排最终状态无关。"""
+    user = make_user(session, "cacheretry", "right-one", role="member")
+    make_user(session, "cacheadmin2", "right-two", role="admin")
+    _seed_rag_chunk(session, user)
+    failed = _seed_failed_doc(session, user)
+    _override_reranker_high()
+    assert login(chat_client, "cacheretry", "right-one").status_code == 200
+    assert post_chat(chat_client, QUESTION).status_code == 200
+    assert post_chat(chat_client, QUESTION).status_code == 200
+    assert app.state.chat_deps.llm.stream_calls == 1
+
+    assert login(chat_client, "cacheadmin2", "right-two").status_code == 200
+    resp = chat_client.post(f"/api/documents/{failed.id}/retry")
+
+    assert resp.status_code == 200
+    assert resp.json()["data"]["status"] == "failed"  # 编排确实重跑（文件缺失仍失败）
+    assert login(chat_client, "cacheretry", "right-one").status_code == 200  # 切回提问者
+    third = post_chat(chat_client, QUESTION)
+
+    assert third.status_code == 200
+    assert _parse_sse(third.text)[-1][1]["cacheHit"] is False
+    assert app.state.chat_deps.llm.stream_calls == 2  # 缓存已被整清：第三问重新生成
