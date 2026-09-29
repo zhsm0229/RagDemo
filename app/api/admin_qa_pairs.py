@@ -1,10 +1,13 @@
 r"""管理端问答对路由（薄控制器）：Excel 整批导入（F-401）与模板下载（F-403）。
 
 业务全部委托 services/qa_pairs：XlsxBatchError（结构级+行级聚合错误行列表）统一
-转 422/1003，错误行列表直接放 data（standards §21.9）；文件级单一错误（row=0）
-把 reason 提为 message，让"文件无数据/超上限"在提示层可见；部门解析等业务错误
-走 ApiError 经全局异常处理器。导入成功后整清问答精确缓存——新问答对改变可检索
-事实，陈旧答案不能等 TTL 自然过期（同 W3 Task 1 文档 retry/confirm 口径）。
+转 422/1003，错误行列表直接放 data（standards §21.9），行号是 xlsx_io 携带的
+Excel 物理行号；文件级单一错误（row=0）把 reason 提为 message，让"文件无数据/
+超上限"在提示层可见；部门解析等业务错误走 ApiError 经全局异常处理器。上传早拒
+（同 documents 先例）：体积 seek/tell 先拒 + 扩展名/MIME/魔数三重白名单适用
+部分，坏 zip 不再漏到 500 兜底（评审 Important-2）。导入成功后整清问答精确
+缓存——新问答对改变可检索事实，陈旧答案不能等 TTL 自然过期（同 W3 Task 1
+文档 retry/confirm 口径）。
 """
 
 from typing import Annotated
@@ -13,7 +16,7 @@ from fastapi import APIRouter, File, Form, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 
 from app.api.deps import AdminUser, DbSession
-from app.core.errors import ERR_PARAM_INVALID
+from app.core.errors import ERR_PARAM_INVALID, ApiError
 from app.core.llm import Embedder
 from app.services import qa_pairs as qa_pairs_service
 from app.services.xlsx_io import XlsxBatchError
@@ -22,6 +25,29 @@ router = APIRouter(prefix="/admin/qa-pairs", tags=["admin-qa-pairs"])
 
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 _TEMPLATE_FILENAME = "qa_pairs_template.xlsx"
+_MAX_IMPORT_BYTES: int = (
+    50 * 1024 * 1024
+)  # 与文档上传同口径：容纳 5000 行×答案 10000 字的最坏合法载荷
+_MSG_BAD_FORMAT = "文件格式不支持或已损坏"
+
+
+def _read_upload(file: UploadFile) -> bytes:
+    """上传早拒（同 documents._early_reject_oversize 先例）：体积 seek/tell 先拒，
+    读全量后校验三重白名单的适用部分——扩展名 .xlsx、Content-Type（xlsx MIME 或
+    octet-stream 宽容口径）、魔数 PK\\x03\\x04；任一不过 422/1003，返回文件字节流。"""
+    file.file.seek(0, 2)  # SEEK_END
+    if file.file.tell() > _MAX_IMPORT_BYTES:
+        raise ApiError(ERR_PARAM_INVALID, "文件超过 50MB 上限", 422)
+    file.file.seek(0)
+    content = file.file.read()
+    mime = file.content_type or ""
+    if not (file.filename or "").lower().endswith(".xlsx"):
+        raise ApiError(ERR_PARAM_INVALID, _MSG_BAD_FORMAT, 422)
+    if mime not in (_XLSX_MIME, "application/octet-stream", ""):
+        raise ApiError(ERR_PARAM_INVALID, _MSG_BAD_FORMAT, 422)
+    if not content.startswith(b"PK\x03\x04"):
+        raise ApiError(ERR_PARAM_INVALID, _MSG_BAD_FORMAT, 422)
+    return content
 
 
 def _request_embedder(request: Request) -> Embedder:
@@ -60,7 +86,7 @@ def import_qa_pairs(
     """
     try:
         result = qa_pairs_service.import_qa_pairs(
-            db, _request_embedder(request), user.id, file.file.read(), deptCode
+            db, _request_embedder(request), user.id, _read_upload(file), deptCode
         )
     except XlsxBatchError as exc:
         return _batch_rejected(exc)

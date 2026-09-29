@@ -12,8 +12,8 @@ qa.import 与业务写入同事务提交（record_audit 只 flush，commit 归�
 保证 F-204 检索的 dept_id IN (用户部门, all) 过滤语义可用。
 
 行级错误复用 XlsxBatchError 作载体（{row, field, reason} 同形），API 层单一
-catch 出口转 422/1003；行号按"有效数据行序"从 2 起编号（xlsx_io 跳过空行后
-按文件序返回，不携带物理行号，文件中部有空行时编号与物理行号有偏差）。
+catch 出口转 422/1003；行号取 read_rows 携带的 Excel 物理行号（空行跳过后仍
+连续，与用户屏幕所见一致，评审 Important-1）。
 """
 
 import string
@@ -70,7 +70,7 @@ def import_qa_pairs(
     effective_clock = clock if clock is not None else get_clock()
     batch_no = _make_batch_no(effective_clock)
     vectors = _embed_questions(embedder, rows)
-    for row, vector in zip(rows, vectors, strict=True):
+    for (_, row), vector in zip(rows, vectors, strict=True):
         db.add(
             QaPair(
                 dept_id=dept_id,
@@ -95,11 +95,13 @@ def import_qa_pairs(
     return {"imported": len(rows), "batchNo": batch_no}
 
 
-def _row_errors(rows: list[dict[str, str]]) -> list[dict]:
-    """行级业务校验聚合：问题/答案非空与长度上限、状态枚举；一次报全不短路。"""
+def _row_errors(rows: list[tuple[int, dict[str, str]]]) -> list[dict]:
+    """行级业务校验聚合：问题/答案非空与长度上限、状态枚举；一次报全不短路。
+
+    行号用 read_rows 携带的 Excel 物理行号（跳过空行后仍连续）。
+    """
     errors: list[dict] = []
-    for offset, row in enumerate(rows):
-        row_no = offset + 2  # 表头占第 1 行，数据从第 2 行起
+    for row_no, row in rows:
         if not row["问题"]:
             errors.append({"row": row_no, "field": "问题", "reason": "问题不能为空"})
         elif len(row["问题"]) > _QUESTION_MAX:
@@ -127,9 +129,11 @@ def _resolve_dept(db: Session, code: str) -> int:
     return dept.id
 
 
-def _embed_questions(embedder: Embedder, rows: list[dict[str, str]]) -> list[list[float]]:
+def _embed_questions(
+    embedder: Embedder, rows: list[tuple[int, dict[str, str]]]
+) -> list[list[float]]:
     """问题列向量：分批 ≤256 调 embedder，返回顺序与 rows 对齐（答案不向量化）。"""
-    questions = [row["问题"] for row in rows]
+    questions = [row["问题"] for _, row in rows]
     vectors: list[list[float]] = []
     for start in range(0, len(questions), _EMBED_BATCH):
         vectors.extend(embedder.embed(questions[start : start + _EMBED_BATCH]))

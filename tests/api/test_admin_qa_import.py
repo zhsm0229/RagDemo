@@ -234,8 +234,8 @@ def test_模板下载_200附件且可被read_rows读回(qa_client, session):
     assert "attachment" in resp.headers["content-disposition"]
     rows = read_rows(resp.content, ["问题", "答案", "状态"], 50, required={"问题", "答案"})
     assert len(rows) == 3
-    assert all(row["问题"] and row["答案"] for row in rows)
-    assert all(row["状态"] in ("enabled", "disabled") for row in rows)
+    assert all(row["问题"] and row["答案"] for _, row in rows)
+    assert all(row["状态"] in ("enabled", "disabled") for _, row in rows)
 
 
 # ---------- deptCode：指定 service / 非法 422 ----------
@@ -335,3 +335,92 @@ def test_成员角色访问导入与模板_403(qa_client, session):
     assert resp.status_code == 403
     assert resp.json()["code"] == ERR_FORBIDDEN
     assert qa_client.get("/api/admin/qa-pairs/template").status_code == 403
+
+
+# ---------- 修复轮 1 / Important-1：错误行号 = Excel 物理行号 ----------
+
+
+def test_中部空行_错误行号为Excel物理行号(qa_client, session):
+    """文件中部有空行时错误行号必须忠实物理行：空答案行在物理第 4 行就报 row=4。"""
+    admin_login(qa_client, session)
+
+    resp = post_import(
+        qa_client,
+        [["问题一", "答案一", "enabled"], [], ["空答案问题", "", "enabled"]],
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["data"] == [{"row": 4, "field": "答案", "reason": "答案不能为空"}]
+    assert _qa_pair_count(session) == 0
+
+
+def test_中部空行_成功导入跳过空行数据对位正确(qa_client, session):
+    """合法文件中部空行：跳过导入，行字典仍按物理行对位（问题一/问题三）。"""
+    admin_login(qa_client, session)
+
+    resp = post_import(
+        qa_client,
+        [["问题一", "答案一", "enabled"], [], ["问题三", "答案三", "enabled"]],
+    )
+
+    assert resp.status_code == 201
+    assert resp.json()["data"]["imported"] == 2
+    questions = list(session.scalars(select(QaPair.question).order_by(QaPair.id)).all())
+    assert questions == ["问题一", "问题三"]
+
+
+# ---------- 修复轮 1 / Important-2：上传早拒（体积/扩展名/MIME/魔数） ----------
+
+
+def test_坏字节流导入_422而非500兜底(qa_client, session):
+    """非 zip 字节流（损坏/伪装 xlsx）：422/1003 中文原因，不再漏到 500 系统错误。"""
+    admin_login(qa_client, session)
+
+    resp = qa_client.post(
+        "/api/admin/qa-pairs/import",
+        files={"file": ("qa.xlsx", b"this is not a zip archive", XLSX_MIME)},
+    )
+
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["code"] == ERR_PARAM_INVALID
+    assert body["message"] == "文件格式不支持或已损坏"
+    assert _qa_pair_count(session) == 0
+
+
+def test_非xlsx扩展名与MIME类型拒收(qa_client, session):
+    """三重白名单适用部分：扩展名非 .xlsx、Content-Type 越界（非 xlsx/octet-stream）→ 422。"""
+    admin_login(qa_client, session)
+    payload = _xlsx([_HEADERS, ["问题", "答案", "enabled"]])
+
+    bad_ext = qa_client.post(
+        "/api/admin/qa-pairs/import",
+        files={"file": ("qa.doc", payload, XLSX_MIME)},
+    )
+    bad_mime = qa_client.post(
+        "/api/admin/qa-pairs/import",
+        files={"file": ("qa.xlsx", payload, "text/html")},
+    )
+
+    assert bad_ext.status_code == 422
+    assert bad_ext.json()["message"] == "文件格式不支持或已损坏"
+    assert bad_mime.status_code == 422
+    assert bad_mime.json()["message"] == "文件格式不支持或已损坏"
+    assert _qa_pair_count(session) == 0
+
+
+def test_超限文件早拒在读全量之前(qa_client, session, monkeypatch):
+    """体积早拒（同文档上传先例）：read 全量前按 seek/tell 拒收，422/1003。"""
+    from app.api import admin_qa_pairs as qa_api
+
+    monkeypatch.setattr(qa_api, "_MAX_IMPORT_BYTES", 64)
+    admin_login(qa_client, session)
+
+    resp = qa_client.post(
+        "/api/admin/qa-pairs/import",
+        files={"file": ("qa.xlsx", b"PK\x03\x04" + b"0" * 128, XLSX_MIME)},
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["message"] == "文件超过 50MB 上限"
+    assert _qa_pair_count(session) == 0

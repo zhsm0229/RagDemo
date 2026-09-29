@@ -2,7 +2,8 @@ r"""Excel 整批校验基建：问答对导入（Task 3）与评测题导入（T
 
 职责单一（裁决）：read_rows 只做结构级校验与单元格取值——表头行=第 1 行，单元格
 strip 后与 headers 逐字匹配（顺序不限），缺列/多列/重复列/空白表头一律结构级报错
-（row=1，reason 指名哪一列）；数据行号从 2 起；空行跳过、不计行数、不报错；全空
+（row=1，reason 指名哪一列）；数据行号从 2 起（物理行号，跳过空行后仍连续）；空行
+跳过、不计行数、不报错；全空
 文件报"文件无数据"（row=0）；超 max_rows 报"文件超过 N 行上限"（row=0），且先计数
 后解析（read_only 迭代计数，防大文件整体载入的内存放大）。required 仅约束"列出现
 在表头"这一结构事实，**单元格值空否由调用方业务校验**，本模块不感知字段语义。
@@ -22,7 +23,7 @@ class XlsxBatchError(Exception):
     """整批校验失败：聚合全部错误行后统一抛出。
 
     errors 元素形如 {"row": int, "field": str | None, "reason": str}；row 为
-    1 基 Excel 行号（表头=1，数据从 2 起），文件级错误约定 row=0、field=None。
+    1 基 Excel 物理行号（表头=1，数据从 2 起），文件级错误约定 row=0、field=None。
     """
 
     def __init__(self, errors: list[dict]) -> None:
@@ -32,12 +33,15 @@ class XlsxBatchError(Exception):
 
 def read_rows(
     data: bytes, headers: list[str], max_rows: int, *, required: set[str]
-) -> list[dict[str, str]]:
-    """读取 xlsx 字节流为行字典列表（表头名 → strip 后字符串）。
+) -> list[tuple[int, dict[str, str]]]:
+    """读取 xlsx 字节流为（Excel 物理行号, 行字典）列表（表头名 → strip 后字符串）。
 
     校验优先级：结构（表头）→ 行数上限 → 无数据 → 逐行解析。结构错误按
     空白表头 → 缺列（按 headers 序）→ 多余列（按文件列序）→ 重复列（按文件
     列序）→ 缺必填列（按字母序）聚合返回，一次报全，避免用户改一轮传一轮。
+    物理行号即 Excel 1 基行号（表头=1，数据从 2 起），跳过空行后仍连续——错误
+    行号与用户屏幕所见一致（Task 3 评审 Important-1；read_only 下 EmptyCell 无
+    .row 属性，实测 iter_rows 按物理行连续产出含全空行，故用枚举计数器携带）。
     ragged 行（M2 评审记录）：短行尾部补空串，数据行超过表头列数的部分被截断。
     """
     found = _header_names(data)
@@ -135,19 +139,25 @@ def _count_data_rows(data: bytes) -> int:
         wb.close()
 
 
-def _parse_data_rows(data: bytes, found: list[str]) -> list[dict[str, str]]:
-    """第二遍解析：空行跳过；短行补空串保证键齐全；行序即文件序。"""
+def _parse_data_rows(data: bytes, found: list[str]) -> list[tuple[int, dict[str, str]]]:
+    """第二遍解析：空行跳过；短行补空串保证键齐全；行序即文件序。
+
+    物理行号用枚举计数器（跳过表头后锚定首数据行为物理行 2）：read_only 模式
+    iter_rows 对每个物理行连续产出（含全空行，实测），而空行单元为 EmptyCell
+    无 .row 属性（实测），cell.row 不可依赖；计数器不与 ws.max_row 交叉校验——
+    尾部清空残留会让 max_row 大于末数据行，校验只会误伤可导入文件。
+    """
     wb, ws = _open_sheet(data)
     try:
         rows = ws.iter_rows(values_only=True)
         next(rows, None)  # 跳过表头行
-        parsed: list[dict[str, str]] = []
-        for row in rows:
+        parsed: list[tuple[int, dict[str, str]]] = []
+        for physical_row, row in enumerate(rows, start=2):
             cells = [_cell_str(v) for v in row]
             if not any(cells):
                 continue
             cells += [""] * (len(found) - len(cells))
-            parsed.append(dict(zip(found, cells)))
+            parsed.append((physical_row, dict(zip(found, cells))))
         return parsed
     finally:
         wb.close()

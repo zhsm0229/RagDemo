@@ -1,8 +1,9 @@
 r"""xlsx 整批校验基建单元测试（Task 3 问答对导入 / Task 5 评测题导入共用）。
 
 裁决语义固化：read_rows 只做结构级校验（表头逐字匹配、缺/多/重复列）与取值
-（全转 strip 后字符串），必填列只校验"出现在表头"，**值空否由调用方业务校验**；
-行号 1 基（表头=1，数据从 2 起），文件级错误约定 row=0；空行跳过不计行数；
+（全转 strip 后字符串），返回（Excel 物理行号, 行字典）二元组列表——空行跳过
+后物理行号仍连续（评审 Important-1），必填列只校验"出现在表头"，**值空否由
+调用方业务校验**；行号 1 基（表头=1，数据从 2 起），文件级错误约定 row=0；
 超 max_rows 先计数后解析，防大文件内存放大。错误聚合为 XlsxBatchError 一次性
 抛出（services 层纯业务，不 import fastapi），API 层统一转 422/1003。
 """
@@ -57,7 +58,7 @@ def test_read_rows_正常三行读取_表头乱序按名映射():
 
     rows = read_rows(data, HEADERS, max_rows=50, required={"问题", "标准答案"})
 
-    assert rows == [_expected_row(0), _expected_row(1), _expected_row(2)]
+    assert rows == [(2, _expected_row(0)), (3, _expected_row(1)), (4, _expected_row(2))]
 
 
 def test_read_rows_单元格取值_strip空白_None转空串_数字转字符串():
@@ -65,16 +66,26 @@ def test_read_rows_单元格取值_strip空白_None转空串_数字转字符串(
 
     rows = read_rows(data, HEADERS, max_rows=10, required=set())
 
-    assert rows == [{"问题": "带首尾空格", "标准答案": "123", "部门": ""}]
+    assert rows == [(2, {"问题": "带首尾空格", "标准答案": "123", "部门": ""})]
 
 
 def test_read_rows_空行跳过不计行数不报错():
     data = _xlsx([HEADERS, _data_rows(1)[0], [], _data_rows(1)[0]])
 
-    # 物理上第 3 行为空行：跳过；max_rows=2 恰好等于有效数据行数，不触上限
+    # 物理上第 3 行为空行：跳过；max_rows=2 恰好等于有效数据行数，不触上限；
+    # 行号携带 Excel 物理行号：跳过空行后仍连续（2 与 4，评审 Important-1 修复语义）
     rows = read_rows(data, HEADERS, max_rows=2, required=set())
 
-    assert rows == [_expected_row(0), _expected_row(0)]
+    assert rows == [(2, _expected_row(0)), (4, _expected_row(0))]
+
+
+def test_read_rows_中部空行_行号携带Excel物理行号且跳过后连续():
+    data = _xlsx([HEADERS, _data_rows(1)[0], [], [], _data_rows(2)[1]])
+
+    rows = read_rows(data, HEADERS, max_rows=10, required=set())
+
+    # 物理行 2 有数据、3/4 空行、5 有数据：行号必须忠实 2 与 5（与用户屏幕所见一致）
+    assert rows == [(2, _expected_row(0)), (5, _expected_row(1))]
 
 
 # ---------------------------------------------------------------------------
@@ -170,8 +181,8 @@ def test_read_rows_必填列空单元格_原样返回空串不报错_业务校�
     rows = read_rows(data, HEADERS, max_rows=50, required={"问题", "标准答案"})
 
     assert rows == [
-        {"问题": "问题0", "标准答案": "", "部门": "客服"},
-        _expected_row(1),
+        (2, {"问题": "问题0", "标准答案": "", "部门": "客服"}),
+        (3, _expected_row(1)),
     ]
 
 
@@ -208,7 +219,7 @@ def test_read_rows_ragged_短行尾部补空串_长行超出表头列数被截�
     rows = read_rows(data, HEADERS, max_rows=10, required=set())
 
     assert rows == [
-        {"问题": "只有问题", "标准答案": "", "部门": ""},
+        (2, {"问题": "只有问题", "标准答案": "", "部门": ""}),
         # 长行第 4 格「表头之外的内容」超过表头列数，静默截断不出现在结果里
-        {"问题": "问题1", "标准答案": "答案1", "部门": "客服"},
+        (3, {"问题": "问题1", "标准答案": "答案1", "部门": "客服"}),
     ]
