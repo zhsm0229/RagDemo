@@ -364,3 +364,41 @@ def test_feedback_audit_count_bound_to_action(client, session) -> None:
         )
         == 1
     )
+
+
+# ---------- ⑨ F-702 W3 裁决：admin 处理终态不被用户改评重开 ----------
+
+
+def test_repeat_down_preserves_admin_final_badcase_status(client, session) -> None:
+    """admin 已置处理终态（Task 9 管理端点前直改 messages 行模拟）后用户再次 down：
+    badcase_status 保持终态不重开（'已忽略'/'已修语料'），备注/类型照常更新为新值、
+    审计照常落——信息不丢（W2 账本移交③控制器裁决，Task 9 管理界面消费同一语义）。"""
+    _, _, ignored = setup_answer(session, client, "fbfinal1", "right-one")
+    _, _, fixed = setup_answer(session, client, "fbfinal2", "right-two")
+    ignored.badcase_status = "已忽略"  # 模拟 admin 处理终态（Task 9 才出管理端点）
+    fixed.badcase_status = "已修语料"
+    session.flush()
+
+    assert login(client, "fbfinal1", "right-one").status_code == 200  # 切回本人再反馈
+    first = post_feedback(
+        client, ignored.id, feedback="down", category="答案错误", comment="换了个说法"
+    )
+    assert login(client, "fbfinal2", "right-two").status_code == 200
+    second = post_feedback(client, fixed.id, feedback="down", category="其他", comment="补充了细节")
+
+    assert first.status_code == 200 and second.status_code == 200
+    assert first.json()["data"]["badcaseStatus"] == "已忽略"  # 终态不被重开
+    assert first.json()["data"]["feedbackComment"] == "换了个说法"  # 备注照常更新
+    assert second.json()["data"]["badcaseStatus"] == "已修语料"
+    session.expire_all()
+    rows = session.scalars(select(Message).where(Message.id.in_([ignored.id, fixed.id]))).all()
+    by_id = {row.id: row for row in rows}
+    assert (by_id[ignored.id].badcase_status, by_id[ignored.id].feedback_category) == (
+        "已忽略",
+        "答案错误",
+    )
+    assert (by_id[fixed.id].badcase_status, by_id[fixed.id].feedback_comment) == (
+        "已修语料",
+        "补充了细节",
+    )
+    assert [a.detail["category"] for a in feedback_audits(session)] == ["答案错误", "其他"]

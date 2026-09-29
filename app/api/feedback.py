@@ -1,11 +1,12 @@
 r"""消息反馈端点（Task 11，F-208）：POST /api/messages/{id}/feedback —— 点赞/点踩。
 
 点踩是 badcase 治理闭环（F-702/F4）的入口：down 落 feedback/feedback_comment/
-feedback_category 三列并置 badcase_status='待处理' 进治理队列；up（点赞）忽略随附
-备注/类型置 None、不动 badcase_status。改评语义（原型无取消反馈，允许改评）：
-down→up 清空备注与类型，但 badcase_status 保持'待处理'不回退——已进治理队列的
-记录不因改评消失；重复 down 幂等更新为最新值（允许改备注/类型，队列状态重回
-'待处理'）。
+feedback_category 三列，badcase_status 仅在仍为初始态（空或'待处理'）时置'待处理'
+进治理队列；'已修语料'/'已忽略' 是 admin 处理终态，用户再次 down 不重开、备注/
+类型照常更新（W2 账本移交③控制器裁决，Task 9 管理界面消费同一语义）；up（点赞）
+忽略随附备注/类型置 None、不动 badcase_status。改评语义（原型无取消反馈，允许改
+评）：down→up 清空备注与类型，badcase_status 保持原值不回退——已进治理队列的记录
+不因改评消失；重复 down 幂等更新备注/类型为最新值（队列状态仍仅初始态置'待处理'）。
 
 归属校验（IDOR §21.8）：消息 user_id==当前用户 且 role=='assistant' 且
 is_active=true（user 消息与中断占位行不可反馈），违规与不存在一律 404/3003 同文案，
@@ -34,6 +35,7 @@ _MSG_NOT_FOUND = "消息不存在或无权访问"
 _COMMENT_MIN = 1  # §21.5：点踩备注 strip 后 1-500 字
 _COMMENT_MAX = 500
 _BADCASE_PENDING = "待处理"  # F-702 治理队列初始状态（messages.badcase_status 枚举）
+_REOPENABLE_STATES = (None, _BADCASE_PENDING)  # 仅初始态可置/保持；admin 终态不重开（W3 裁决）
 _CATEGORIES = ("答案错误", "引用无关", "拒答不当", "其他")  # F-208 点踩类型枚举
 
 
@@ -88,15 +90,16 @@ def _owned_answer(db: Session, user: User, message_id: int) -> Message:
 
 @router.post("/{message_id}/feedback")
 def leave_feedback(message_id: int, body: FeedbackRequest, user: ReadyUser, db: DbSession) -> dict:
-    """消息反馈（F-208）：down 三列落库并入 badcase 队列（'待处理'）；up 忽略备注/
-    类型。改评不回退：down→up 清备注/类型、badcase_status 保持'待处理'；重复 down
-    幂等更新为最新值。审计 detail 不含 comment 原文；事务边界：反馈与审计同事务
-    commit。"""
+    """消息反馈（F-208）：down 三列落库并入 badcase 队列（仅初始态置'待处理'）；up
+    忽略备注/类型。改评不回退：down→up 清备注/类型、badcase_status 保持原值；重复
+    down 幂等更新备注/类型，admin 终态（'已修语料'/'已忽略'）不被重开（W3 裁决）。
+    审计 detail 不含 comment 原文；事务边界：反馈与审计同事务 commit。"""
     message = _owned_answer(db, user, message_id)
     message.feedback = body.feedback
     message.feedback_comment = body.comment
     message.feedback_category = body.category
-    if body.feedback == "down":  # F-702 治理队列入口；改评（up）不触碰该列不回退
+    if body.feedback == "down" and message.badcase_status in _REOPENABLE_STATES:
+        # F-702 治理队列入口；改评（up）不触碰该列不回退，admin 终态不重开（W3 裁决）
         message.badcase_status = _BADCASE_PENDING
     detail: dict = {"feedback": body.feedback}
     if body.feedback == "down":

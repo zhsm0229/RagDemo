@@ -203,5 +203,5 @@ SSE 事件 DTO 字段表（**逐字引自 standards §3 第 6 条**）：
 |----|------|
 | 鉴权 | ReadyUser（仅本人 assistant 消息且 is_active=true 可反馈；user 消息与中断占位行不可） |
 | 请求体 | `feedback`（枚举 `"up"` / `"down"`）；`category`（down 必填，枚举：答案错误 / 引用无关 / 拒答不当 / 其他）；`comment`（down 必填，strip 后 1-500 字）。up 时二者忽略置 null |
-| 成功响应 | `200`，`data: {id, feedback, feedbackCategory, feedbackComment, badcaseStatus}`。down 落 badcase_status="待处理" 进治理队列（F-702）；改评语义：down→up 清空备注/类型但 badcase_status 不回退，重复 down 幂等更新为最新值 |
+| 成功响应 | `200`，`data: {id, feedback, feedbackCategory, feedbackComment, badcaseStatus}`。down 落三列并把 badcase_status="待处理" 进治理队列（F-702；仅状态为空或"待处理"时置，admin 处理终态"已修语料"/"已忽略"不被用户改评重开）；改评语义：down→up 清空备注/类型但 badcase_status 不回退，重复 down 幂等更新备注/类型 |
 | 错误分支 | `422/1003` 备注长度非法（field=comment）/ 类型不在枚举（field=category）；`404/3003` 消息不存在或无权访问（不存在 / 他人消息 / 非 assistant / 中断占位行同判）；`401/2003`；`403/2004` |
