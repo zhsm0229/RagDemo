@@ -126,25 +126,39 @@ def search_chunks(
 
 
 def rerank_and_fold(
-    reranker: Reranker, query: str, hits: list[DocHit], top_n: int, dedup_sim: float
-) -> list[DocHit]:
+    reranker: Reranker,
+    query: str,
+    hits: list[DocHit],
+    top_n: int,
+    dedup_sim: float,
+    *,
+    return_folded: bool = False,
+) -> list[DocHit] | tuple[list[DocHit], list[DocHit]]:
     """重排 + 折叠（F-1003）：top_n 内两两去重，返回 rerank 分降序保留列表。
 
     rerank 文本 = ``{title_path}\n{content}``（与入库分块文本同构），query 为改写后
     问题；打分后按分降序取 top_n，从高到低遍历：与任一已保留项的 embedding 余弦
     相似度 ≥ dedup_sim 则丢弃当前项。DocHit.similarity 在此覆写为 rerank sigmoid 分
     （拒答阈值口径，standards §4.4）；空候选短路，不发起 rerank 调用。
+
+    return_folded=False（缺省，问答编排路径）：返回保留列表，签名与语义同 Task 5；
+    True（管理端检索测试 RET-03/04）：返回 (保留列表, 折叠丢弃列表)——进 top_n 但被
+    近重复折叠的块带 rerank 分一并交回，供调参视角完整展示（问答编排不受影响）。
     """
     if not hits:
-        return []
+        return ([], []) if return_folded else []
     docs = [f"{hit.title_path}\n{hit.content}" for hit in hits]
     scores = reranker.rerank(query, docs)
     ranked = sorted(zip(hits, scores, strict=True), key=lambda pair: pair[1], reverse=True)
     kept: list[DocHit] = []
+    folded_out: list[DocHit] = []
     for hit, score in ranked[:top_n]:
         if any(_cosine(hit.embedding, kept_hit.embedding) >= dedup_sim for kept_hit in kept):
-            continue  # 与高分已保留项近重复：丢弃当前低分项（F-1003）
+            folded_out.append(replace(hit, similarity=score))  # 与高分已保留项近重复：折叠丢弃
+            continue
         kept.append(replace(hit, similarity=score))
+    if return_folded:
+        return kept, folded_out
     return kept
 
 

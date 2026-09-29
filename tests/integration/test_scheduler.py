@@ -180,13 +180,22 @@ def test_ensure_month_partitions_creates_next_three_months(
 
 
 def test_build_scheduler_registers_cron_jobs_without_starting() -> None:
-    """装配断言：两任务按 cron 注册（每日 02:00 清扫、每月 1 日 02:30 分区）；test_mode 不自启。"""
+    """装配断言：三任务按 cron 注册（每日 02:00 清扫、每日 03:00 提问记录清理、每月 1 日
+    02:30 分区）；test_mode 不自启。"""
     scheduler = build_scheduler(Settings(jwt_secret="scheduler-test", test_mode=True))
     assert scheduler.running is False
     jobs = {job.id: job for job in scheduler.get_jobs()}
-    assert set(jobs) == {"run_due_sweeps", "ensure_month_partitions"}
+    assert set(jobs) == {
+        "run_due_sweeps",
+        "message_retention_cleanup",
+        "ensure_month_partitions",
+    }
     sweeps = {field.name: str(field) for field in jobs["run_due_sweeps"].trigger.fields}
     assert (sweeps["hour"], sweeps["minute"], sweeps["day"]) == ("2", "0", "*")
+    retention = {
+        field.name: str(field) for field in jobs["message_retention_cleanup"].trigger.fields
+    }
+    assert (retention["hour"], retention["minute"], retention["day"]) == ("3", "0", "*")
     parts = {field.name: str(field) for field in jobs["ensure_month_partitions"].trigger.fields}
     assert (parts["day"], parts["hour"], parts["minute"]) == ("1", "2", "30")
 
@@ -198,6 +207,7 @@ def test_build_scheduler_starts_in_normal_mode() -> None:
         assert scheduler.running is True
         assert {job.id for job in scheduler.get_jobs()} == {
             "run_due_sweeps",
+            "message_retention_cleanup",
             "ensure_month_partitions",
         }
     finally:
