@@ -15,6 +15,7 @@ strip 后与 headers 逐字匹配（顺序不限），缺列/多列/重复列/�
 from io import BytesIO
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.worksheet.worksheet import Worksheet
 
 
 class XlsxBatchError(Exception):
@@ -37,6 +38,7 @@ def read_rows(
     校验优先级：结构（表头）→ 行数上限 → 无数据 → 逐行解析。结构错误按
     空白表头 → 缺列（按 headers 序）→ 多余列（按文件列序）→ 重复列（按文件
     列序）→ 缺必填列（按字母序）聚合返回，一次报全，避免用户改一轮传一轮。
+    ragged 行（M2 评审记录）：短行尾部补空串，数据行超过表头列数的部分被截断。
     """
     found = _header_names(data)
     if not found:  # 0 行文件（或表头行整行为空）视同无数据，不走缺列报错
@@ -54,11 +56,11 @@ def read_rows(
     return _parse_data_rows(data, found)
 
 
-def write_template(path_headers: list[str], sample_rows: list[list[str]]) -> bytes:
+def write_template(headers: list[str], sample_rows: list[list[str]]) -> bytes:
     """生成导入模板：新建 workbook，首行写表头，其后写示例行，返回 xlsx 字节流。"""
     wb = Workbook()
     ws = wb.worksheets[0]
-    ws.append(list(path_headers))
+    ws.append(list(headers))
     for row in sample_rows:
         ws.append(list(row))
     buf = BytesIO()
@@ -79,7 +81,7 @@ def _cell_str(value: object) -> str:
     return str(value).strip()
 
 
-def _open_sheet(data: bytes):
+def _open_sheet(data: bytes) -> tuple[Workbook, Worksheet]:
     """每次校验环节独立打开只读工作表，调用方负责 wb.close()（read_only 不落内存）。"""
     wb = load_workbook(BytesIO(data), read_only=True, data_only=True)
     return wb, wb.worksheets[0]

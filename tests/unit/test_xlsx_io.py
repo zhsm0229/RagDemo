@@ -186,7 +186,7 @@ def test_write_template_读回表头与示例行等值():
         ["年假怎么休？", "OA 提前 3 天申请", "HR"],
     ]
 
-    payload = write_template(HEADERS, samples)
+    payload = write_template(headers=HEADERS, sample_rows=samples)  # 关键字锁定 M2 改名后参数
 
     wb = load_workbook(BytesIO(payload), read_only=True, data_only=True)
     try:
@@ -195,3 +195,20 @@ def test_write_template_读回表头与示例行等值():
     finally:
         wb.close()
     assert all_rows == [HEADERS, *samples]
+
+
+# ---------------------------------------------------------------------------
+# ragged 行行为（M2 评审记录固化）：短行补空串、长行静默截断
+# ---------------------------------------------------------------------------
+
+
+def test_read_rows_ragged_短行尾部补空串_长行超出表头列数被截断():
+    data = _xlsx([HEADERS, ["只有问题"], ["问题1", "答案1", "客服", "表头之外的内容"]])
+
+    rows = read_rows(data, HEADERS, max_rows=10, required=set())
+
+    assert rows == [
+        {"问题": "只有问题", "标准答案": "", "部门": ""},
+        # 长行第 4 格「表头之外的内容」超过表头列数，静默截断不出现在结果里
+        {"问题": "问题1", "标准答案": "答案1", "部门": "客服"},
+    ]
