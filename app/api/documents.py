@@ -1,4 +1,4 @@
-r"""文档路由（薄控制器）：multipart 上传 / zip 批量导入 / 列表 / 重试 / 确认，业务全部委托 services。
+r"""文档路由（薄控制器）：multipart 上传 / zip 批量导入 / 文件名建议 / 列表 / 重试 / 确认，业务全部委托 services。
 
 上传（admin-only）：表单元数据（camelCase）→ 合规勾选与部门 code 卡口（422）→
 同步段 create_document（白名单/SHA-256 查重/落盘/登记 parsing，422/409 经全局
@@ -30,7 +30,7 @@ from app.core.storage import LocalFileStorage
 from app.db.base import SessionLocal
 from app.db.models import Department, Document
 from app.services import ingest as ingest_service
-from app.services import zip_import
+from app.services import metadata_suggest, zip_import
 from app.services.ingest import IngestDeps, process_document
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -179,6 +179,29 @@ def import_documents_zip(
         on_accepted,
     )
     return {"code": 0, "message": "ok", "data": data}
+
+
+@router.post("/metadata-suggest")
+def suggest_metadata(
+    file: Annotated[UploadFile, File()],
+    user: AdminUser,
+) -> dict:
+    """元数据自动建议（F-1008，admin-only）：只解析文件名、不读文件内容，返回上传
+    表单预填建议。命名不符返回空建议 {}（不报错、不产出错误建议）；部门仅限库内
+    枚举且限上传人管辖部门——AdminUser 门即管辖闸（试点 admin 管辖全部部门），
+    文件名声明部门不得造成越权注入（§F-1008，详见 services/metadata_suggest）。"""
+    meta = metadata_suggest.parse_filename_metadata(file.filename or "")
+    if meta is None:
+        return {"code": 0, "message": "ok", "data": {}}
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": {
+            "suggestedDeptCode": meta.dept_code,
+            "suggestedTitle": meta.title,
+            "suggestedEffectiveDate": meta.effective_date.isoformat(),
+        },
+    }
 
 
 @router.get("")
