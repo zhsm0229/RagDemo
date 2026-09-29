@@ -20,7 +20,6 @@ class Settings(BaseSettings):
     llm_model: str = ""  # 对话模型名（如 glm-4）
     llm_timeout_s: int = 60
     chat_max_tokens: int = 4096  # 回答生成 max_tokens 上限
-    generation_temperature: float = 0.2  # 与 prompts/manifest.json 同步版本化（§17.4）
     prompt_version: str = "v1"  # 提示词包版本（对应 prompts/ 头注释 # version）
     daily_question_limit: int = 200  # 单用户每日提问上限
     qa_threshold: float = 0.85  # 问答对准入阈值（embedding 余弦相似度 ≥ 此值才走问答对直答；不得与 rerank 分混用，§4.4）

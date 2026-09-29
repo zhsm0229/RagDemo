@@ -18,7 +18,8 @@ def test_defaults_load(monkeypatch):
 
 
 def test_w2_qa_chain_defaults(monkeypatch):
-    """W2 问答链路新键缺省值：与 task-2-brief 接口表逐字一致。"""
+    """W2 问答链路新键缺省值：与 task-2-brief 接口表逐字一致（W3 Task 1 起不含
+    generation_temperature——I-2 修复后 manifest.temperature 为唯一生效源）。"""
     monkeypatch.setenv("JWT_SECRET", "x" * 32)
     s = Settings(_env_file=None)
     assert s.rerank_base_url == "http://localhost:8082"
@@ -36,5 +37,16 @@ def test_w2_qa_chain_defaults(monkeypatch):
     assert s.rerank_top_n == 5
     assert s.chunk_dedup_sim == 0.98
     assert s.hnsw_ef_search == 40
-    assert s.generation_temperature == 0.2
     assert s.prompt_version == "v1"
+
+
+def test_generation_temperature_dropped_and_env_key_ignored(monkeypatch):
+    """W3 Task 1 Step 5：死配置 generation_temperature 已删除（I-2 修复后
+    manifest.temperature 为唯一生效源，字段无消费者）；.env 残留
+    GENERATION_TEMPERATURE 键经 extra="ignore" 不破坏加载。"""
+    monkeypatch.setenv("JWT_SECRET", "x" * 32)
+    monkeypatch.setenv("GENERATION_TEMPERATURE", "0.7")
+
+    s = Settings(_env_file=None)
+
+    assert not hasattr(s, "generation_temperature")
