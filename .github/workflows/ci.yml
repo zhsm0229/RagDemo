@@ -8,6 +8,11 @@
 #
 # 触发：push 到 main + 所有 pull_request（§20.2-2：MR 触发、失败即停；
 # 例外：type 阶段起步期 continue-on-error，见该 job 注释，W2 收紧）。
+#
+# 依赖安装（W2 收口）：凡装项目依赖的 job 一律 setup-uv + `uv sync --locked --extra dev`
+# （uv.lock 入库为唯一依赖事实源；--locked 在 lock 缺失或与 pyproject 漂移时显式报错，
+# 不静默回退 pip）。ruff/mypy/pip-audit 等 dev extras 外的工具按 job 注释叠加安装，
+# 不改锁定依赖。各步骤统一用 `uv run --no-sync <cmd>` 在 .venv 内执行。
 name: ci
 
 on:
@@ -29,12 +34,13 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0（SHA pin）
         with:
           python-version: "3.12"
-      - name: Install ruff
-        run: pip install ruff==0.16.9 # 与本地 .venv 同版本，避免规则漂移
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0（SHA pin）
+      - name: Locked dependency install (uv)
+        run: uv sync --locked --extra dev
       - name: Ruff check
-        run: ruff check app tests
+        run: uv run --no-sync ruff check app tests # 版本由 uv.lock 锁定（0.16.9），与本地 .venv 同源
       - name: Ruff format check (standards §20.2)
-        run: ruff format --check app tests
+        run: uv run --no-sync ruff format --check app tests
 
   # ---------- ② type：mypy 宽松模式，限 rag/services/core ----------
   # 起步期 continue-on-error：mypy 首跑大概率报存量类型问题，§20.2 未强制 type
@@ -47,10 +53,13 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0（SHA pin）
         with:
           python-version: "3.12"
-      - name: Install project + mypy
-        run: pip install -e ".[dev]" mypy
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0（SHA pin）
+      - name: Locked dependency install + mypy
+        run: |
+          uv sync --locked --extra dev
+          uv pip install mypy # mypy 不在 dev extras（起步期宽松门未定版），叠加安装不动锁定依赖
       - name: Mypy (loose)
-        run: mypy --ignore-missing-imports app/rag app/services app/core
+        run: uv run --no-sync mypy --ignore-missing-imports app/rag app/services app/core
 
   # ---------- ③ test：pytest（P0 冒烟 = tests/api + tests/integration 随全量跑） ----------
   # compose 等价：起 pgvector/pgvector:pg15（pg-test 档，5434，healthcheck 门禁）；
@@ -82,16 +91,20 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0（SHA pin）
         with:
           python-version: "3.12"
-          cache: pip
-      - name: Install project (dev extras)
-        run: pip install -e ".[dev]"
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0（SHA pin）
+        with:
+          enable-cache: true # uv 缓存（原 setup-python 的 cache: pip 随之弃用）
+      - name: Locked dependency install (uv)
+        # uv.lock 已入库（user-commits-2.sh 兜底项，chore: commit uv lockfile 已先行提交）；
+        # --locked 下 lock 缺失/漂移即红，明确报错，不静默回退 pip（W2 收口约定）。
+        run: uv sync --locked --extra dev
       - name: Prepare .env from example
         run: cp .env.example .env # 真实值被上方 env 覆盖；.env 本身不入库
       - name: Alembic upgrade head
-        run: alembic upgrade head
+        run: uv run --no-sync alembic upgrade head
       - name: Pytest with coverage (rag/services >= 70%)
         run: >-
-          pytest --cov=app/rag --cov=app/services --cov-fail-under=70
+          uv run --no-sync pytest --cov=app/rag --cov=app/services --cov-fail-under=70
           --cov-report=term-missing --cov-report=xml
       - name: Upload coverage report
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2（SHA pin）
@@ -113,11 +126,17 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0（SHA pin）
         with:
           python-version: "3.12"
-          cache: pip
-      - name: Install project (dev extras)
-        run: pip install -e ".[dev]"
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0（SHA pin）
+        with:
+          enable-cache: true
+      - name: Locked dependency install + audit tooling
+        run: |
+          uv sync --locked --extra dev
+          # pip-audit 不在 dev extras：叠加安装审计工具，项目依赖仍由 uv.lock 锁定；
+          # uv venv 默认不含 pip 而 pip-audit 的环境审计依赖 pip，一并补装。
+          uv pip install pip pip-audit
       - name: pip-audit
-        run: pip-audit --skip-editable # 审计全部已装依赖，跳过本仓库 editable 包自身
+        run: uv run --no-sync pip-audit --skip-editable # 审计全部已装依赖，跳过本仓库 editable 包自身
       - name: gitleaks
         uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9（v2 分支头 commit，SHA pin）
         env:
