@@ -25,17 +25,22 @@ def fake_clock():
 
 
 @pytest.fixture(autouse=True)
-def _llm_endpoint_for_assembly():
+def _llm_endpoint_for_assembly(monkeypatch):
     """W2 起 lifespan 装配 chat_deps：非 test_mode 且 llm_base_url 空 → §6.4 拒启。
 
     API 测试进程统一给占位端点（OpenAICompat 客户端延迟建连，装配不发起任何网络
-    请求，问答用例走 test_mode Stub 不经过它）；环境已设置则不覆盖。"""
+    请求，问答用例走 test_mode Stub 不经过它）；环境已设置则不覆盖。LLM_MODEL 一律
+    钉空：.env 的真实模型名会漏进 settings，断言 stub 落库名的用例（test_chat_stream
+    等）在开发机即红；setenv 后清缓存使 get_settings 重读钉值，monkeypatch 还原。"""
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("LLM_MODEL", "")
+    get_settings.cache_clear()
     saved = os.environ.get("LLM_BASE_URL")
     if saved is not None:
         yield
+        get_settings.cache_clear()
         return
-    from app.core.config import get_settings
-
     os.environ["LLM_BASE_URL"] = "http://llm.unavailable.invalid"
     get_settings.cache_clear()
     yield
