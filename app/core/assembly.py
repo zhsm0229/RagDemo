@@ -53,8 +53,12 @@ def build_reranker(settings: Settings) -> Reranker:
     return TeiReranker(base_url=settings.rerank_base_url, timeout_s=settings.rerank_timeout_s)
 
 
-def build_llm(settings: Settings) -> LLMProvider:
-    """test_mode → StubLLMProvider；否则 OpenAI 兼容真实现，base_url 缺失 fail-fast。"""
+def build_llm(settings: Settings, temperature: float = 0.2) -> LLMProvider:
+    """test_mode → StubLLMProvider；否则 OpenAI 兼容真实现，base_url 缺失 fail-fast。
+
+    temperature 由调用方取 PromptPack.temperature 传入（§17.4 生成参数与模板同版本化，
+    manifest 改温度随装配生效，不再静默失效）；缺省 0.2 与 provider 构造器缺省一致。
+    Stub 分支忽略温度（Stub 不消费生成参数）。"""
     if settings.test_mode:
         return StubLLMProvider()
     if not settings.llm_base_url:
@@ -64,6 +68,7 @@ def build_llm(settings: Settings) -> LLMProvider:
         api_key=settings.llm_api_key,
         model=settings.llm_model,
         timeout_s=settings.llm_timeout_s,
+        temperature=temperature,
     )
 
 

@@ -100,6 +100,19 @@ def test_build_llm_fails_fast_without_base_url_outside_test_mode() -> None:
         build_llm(_settings(llm_base_url=""))
 
 
+def test_build_llm_wires_pack_temperature_into_provider(tmp_path: Path) -> None:
+    """§17.4 生成参数与模板同版本化：非 test_mode 下 provider.temperature == pack.temperature。
+
+    注入包温度 0.7 ≠ provider 构造器缺省 0.2：相等即证明温度是显式装配传入而非缺省兜底
+    （manifest 改温度必须在装配期生效，不允许静默失效）。"""
+    _write_pack(tmp_path)
+    pack = load_prompt_pack(tmp_path)
+    assert pack.temperature == 0.7
+    llm = build_llm(_settings(llm_base_url="http://llm.example/v1"), pack.temperature)
+    assert type(llm) is OpenAICompatLLMProvider
+    assert llm.temperature == pack.temperature
+
+
 # ---------------------------------------------------------------------------
 # load_prompt_pack：目录注入、缺文件 fail-fast、版本锚点、仓库逐字文案
 # ---------------------------------------------------------------------------

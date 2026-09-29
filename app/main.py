@@ -31,8 +31,11 @@ from app.services.scheduler import add_hit_flush_job, build_scheduler
 def _build_chat_deps(settings: Settings) -> ChatDeps:
     """问答链路依赖包装配（Task 9）：test_mode → Stub 三件套，否则 TEI / OpenAI 兼容
     真实现（build_llm 非 test_mode 且 llm_base_url 空即 RuntimeError 拒启，§6.4）。
+    提示词包先装载：温度随模板同版本化（§17.4），pack.temperature 传入 LLM 装配——
+    manifest 改温度在装配期生效，不允许与 provider 缺省值静默脱钩。
     进程内缓存/每日限额/召回计数用 SystemClock 直连：它们是进程级单例，不随测试拨动
     全局可注入时钟而换实例（TTL 与限额口径在进程生命周期内稳定）。"""
+    prompts = load_prompt_pack()
     if settings.test_mode:
         embedder: Embedder = StubEmbedder()
         reranker: Reranker = StubReranker()
@@ -40,7 +43,7 @@ def _build_chat_deps(settings: Settings) -> ChatDeps:
     else:
         embedder = build_embedder(settings)
         reranker = build_reranker(settings)
-        llm = build_llm(settings)
+        llm = build_llm(settings, prompts.temperature)
     clock = SystemClock()
     return ChatDeps(
         embedder=embedder,
@@ -50,7 +53,7 @@ def _build_chat_deps(settings: Settings) -> ChatDeps:
         counter=DailyCounter(clock),
         hit_counter=HitCounter(clock),
         settings=settings,
-        prompts=load_prompt_pack(),
+        prompts=prompts,
     )
 
 
