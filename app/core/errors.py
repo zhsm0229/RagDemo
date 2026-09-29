@@ -32,6 +32,7 @@ ERR_DUPLICATE_DOC: int = 3001  # 上传文件与库内已有文档完全重复�
 ERR_DAILY_LIMITED: int = 3002  # 单用户每日提问次数已达上限（问答端点开流前拒绝，429）
 ERR_NOT_FOUND: int = 3003  # 会话不存在或无权访问（问答端点归属校验，404，IDOR 防线 §21.8）
 ERR_EVAL_STATE: int = 3004  # 评测任务状态冲突：仅 status=done 收口的跑分可人工录分（422）
+ERR_DUPLICATE_USER: int = 3005  # 用户名已存在（F-102 发放账号撞 users_username_key 口径，409）
 
 # 5xxx 系统类
 ERR_INTERNAL: int = 5000  # 兜底系统错误（响应体只给通用提示，堆栈进日志 §16.4）
