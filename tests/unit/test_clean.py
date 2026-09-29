@@ -4,11 +4,13 @@ r"""清洗纯函数测试：规则链逐条正/反参数化，输入输出逐字
 （`…\d+$` / `\.{3,}\s*\d+$` 两种形态）删除、独立页码行删除、水印标记行删除、
 3+ 连续换行折叠为一个空行、首尾全角空白去除。反例均为不含该模式的文本，
 经完整规则链后原样通过（逐字相等）。
+task-6b 修复轮：repeated_short_lines 文档级聚合口径 + clean_text 可选
+known_repeated_lines 参数（只强化计数型页眉规则，缺省行为逐字不变）。
 """
 
 import pytest
 
-from app.rag.clean import RAW_CHARS, clean_text
+from app.rag.clean import RAW_CHARS, clean_text, repeated_short_lines
 
 HEADER = "客服_退货政策"
 LONG_FOOTER = "长" * 31  # 31 字：超出页眉短行阈值（<=30），重复出现也不删
@@ -92,3 +94,25 @@ def test_raw_chars_counts_raw_input_length() -> None:
     """RAW_CHARS 对原始输入计字符数（清洗前），供红线校验复用。"""
     assert RAW_CHARS("正文A\n正文B") == 7
     assert RAW_CHARS("a\n\n\n\nb") == 6
+
+
+def test_repeated_short_lines_document_level_scope() -> None:
+    """聚合口径（供管线跨块复用，与 _drop_repeated_short_lines 同判）：≥3 次且 ≤30 字
+    的非空行入选；仅 1 次、>30 字、空行一律不入集合。"""
+    text = "\n".join(["页眉", "页眉", "页眉", "独一行", "长" * 31, "长" * 31, "长" * 31, ""])
+    assert repeated_short_lines(text) == frozenset({"页眉"})
+
+
+def test_clean_text_known_repeated_lines_drop_below_local_threshold() -> None:
+    """known_repeated_lines 只强化计数型页眉规则：集合内行块内仅 1 次也删；其余规则不受影响。"""
+    raw = "正文A\n客服_退货政策\n目录 ......... 3\n12\n正文B"
+    known = frozenset({"客服_退货政策"})
+    assert clean_text(raw, known_repeated_lines=known) == "正文A\n正文B"  # 页眉+目录+页码全清
+    assert clean_text("正文A\n正文B", known_repeated_lines=known) == "正文A\n正文B"  # 集合外不动
+    assert clean_text(raw) == "正文A\n客服_退货政策\n正文B"  # 缺省不传：块内单次行为不变
+
+
+def test_clean_text_known_repeated_lines_empty_default_unchanged() -> None:
+    """缺省空集合与逐字等价的原规则链行为一致（既有单测兼容性锁定）。"""
+    raw = "正文A\n客服_退货政策\n正文B\n客服_退货政策\n客服_退货政策"
+    assert clean_text(raw) == clean_text(raw, known_repeated_lines=frozenset()) == "正文A\n正文B"

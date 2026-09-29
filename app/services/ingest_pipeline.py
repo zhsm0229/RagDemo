@@ -19,7 +19,7 @@ from app.core.llm import Embedder, UpstreamError
 from app.core.storage import FileStorage
 from app.db.models import Document
 from app.rag.chunker import OutChunk, ParsedDoc, split
-from app.rag.clean import RAW_CHARS, clean_text
+from app.rag.clean import RAW_CHARS, clean_text, repeated_short_lines
 from app.rag.parser import PdfFallbackParser, get_parser
 from app.rag.precheck import (
     GARBLE_THRESHOLD,
@@ -72,8 +72,14 @@ def analyze_document(session: Session, deps: IngestDeps, doc: Document) -> Pipel
         doc.original_filename, content, deps.parser_settings
     )
     raw = "\n".join(block.text for block in parsed.blocks)  # 清洗前全文＝红线分母（§10.3）
+    # 页眉页脚跨块聚合（task-6b 修复轮）：pdf 逐页成块后页眉单块仅 1 次、块内计数
+    # 永不达 >=3，先对全文聚合已知页眉行，逐块清洗时经 known_repeated_lines 并集删除。
+    headers = repeated_short_lines(raw)
     # 清洗只覆写 text（dataclasses.replace）：parse 阶段打上的 Block.page 原样保留（task-6b）
-    cleaned_blocks = [replace(block, text=clean_text(block.text)) for block in parsed.blocks]
+    cleaned_blocks = [
+        replace(block, text=clean_text(block.text, known_repeated_lines=headers))
+        for block in parsed.blocks
+    ]
     cleaned = "\n".join(block.text for block in cleaned_blocks)
     _check_quality(raw, cleaned)
     fingerprint = simhash64(cleaned)

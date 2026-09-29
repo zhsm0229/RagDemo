@@ -17,7 +17,7 @@ hook 挂 conftest 是因为测试模块里的 pytest_terminal_summary 不会触�
 import importlib.util
 import json
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import ModuleType
 from typing import Any, cast
@@ -26,8 +26,8 @@ import pytest
 
 from app.core.config import Settings
 from app.core.errors import ERR_PARSE_FAILED, ApiError
-from app.rag.chunker import Block, ParsedDoc, split
-from app.rag.clean import RAW_CHARS, clean_text
+from app.rag.chunker import ParsedDoc, split
+from app.rag.clean import RAW_CHARS, clean_text, repeated_short_lines
 from app.rag.parser import DocxParser, MinerUParser, Parser, PdfFallbackParser, get_parser
 from app.rag.precheck import GARBLE_THRESHOLD, garbled_ratio
 
@@ -150,7 +150,13 @@ def run_chain(filename: str, content: bytes) -> ChainOutcome:
     parser = get_parser(filename, GOLDEN_SETTINGS)
     parsed = parser.parse(filename, content)
     raw = "\n".join(block.text for block in parsed.blocks)  # 清洗前全文＝红线分母（§10.3）
-    cleaned_blocks = [Block(b.level, b.heading_path, clean_text(b.text)) for b in parsed.blocks]
+    # 页眉页脚跨块聚合与 ingest_pipeline.analyze_document 同口径（task-6b 修复轮）：
+    # 本函数刻意镜像管线而非 import，清洗实现漂移时黄金回归必须变红。
+    headers = repeated_short_lines(raw)
+    cleaned_blocks = [
+        replace(block, text=clean_text(block.text, known_repeated_lines=headers))
+        for block in parsed.blocks
+    ]
     cleaned = "\n".join(block.text for block in cleaned_blocks)
     if len(cleaned) < max(100, RAW_CHARS(raw) * 0.1):
         raise ApiError(ERR_PARSE_FAILED, "疑似扫描件或空文档，有效内容不足", 422)

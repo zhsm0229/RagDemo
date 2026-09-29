@@ -139,7 +139,7 @@ def test_blank_text_block_dropped() -> None:
     """边界：纯空白正文块不产出只有前缀的空块。"""
     blocks = [
         Block(level=1, heading_path=["第1章"], text="   \n　 "),
-        Block(level=2, heading_path=["第2章"], text="正" * 300),
+        Block(level=1, heading_path=["第2章"], text="正" * 300),
     ]
     chunks = split(ParsedDoc(title="员工手册", blocks=blocks))
     assert chunks == [OutChunk(content=f"第2章｜{'正' * 300}", title_path="第2章", position=0)]

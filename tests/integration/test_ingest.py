@@ -36,6 +36,7 @@ from app.services.ingest import (
     expire_due_documents,
     process_document,
 )
+from app.services.ingest_pipeline import analyze_document
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 PDF_MIME = "application/pdf"
@@ -72,6 +73,11 @@ def _docx_bytes(headings: list[tuple[str, list[str]]]) -> bytes:
 
 def _pdf_bytes(pages: list[str]) -> bytes:
     """最小多页 PDF（Helvetica/ASCII，结构同 fixtures/tools/make_sample_pdf，文本可参数化）。"""
+    return _pdf_bytes_lines([[page] for page in pages])
+
+
+def _pdf_bytes_lines(pages: list[list[str]]) -> bytes:
+    """多行多页 PDF：每页多行文本（T* 换行指令，pypdf 按行提取为 \\n 分隔，可过行级清洗）。"""
     count = len(pages)
     kids = " ".join(f"{3 + i} 0 R" for i in range(count))
     objs: list[bytes] = [
@@ -85,8 +91,10 @@ def _pdf_bytes(pages: list[str]) -> bytes:
                 "ascii"
             )
         )
-    for page_text in pages:
-        stream = f"BT /F1 12 Tf 72 720 Td ({page_text}) Tj ET".encode("ascii")
+    for lines in pages:
+        parts = [f"BT /F1 12 Tf 14 TL 72 720 Td ({lines[0]}) Tj"]
+        parts += [f"T* ({line}) Tj" for line in lines[1:]]
+        stream = "\n".join([*parts, "ET"]).encode("ascii")
         objs.append(
             f"<< /Length {len(stream)} >>\nstream\n".encode("ascii") + stream + b"\nendstream"
         )
@@ -505,6 +513,37 @@ def test_mineru_outage_degrades_to_pypdf_annotated(session: Session, tmp_path) -
     assert ready_audit.action == "document.ready"
     assert ready_audit.detail["after"]["degraded"] is True
     assert _chunks(session, doc.id) != []
+
+
+def test_pdf_header_line_aggregated_across_page_blocks(session: Session, tmp_path) -> None:
+    """跨页页眉聚合（task-6b 修复轮）：3 页共享同一 ≤30 字页眉行不得泄漏进任何 chunk；
+    仅在 1 个块出现 1 次的正常短行不得被聚合误删。走完整 analyze_document 管线。"""
+    storage = LocalFileStorage(tmp_path)
+    header = "Quarterly Report Internal"  # 25 字：每页块内仅 1 次，只有跨块聚合才可达 >=3
+    unique_short = "Unique short line ok"  # 20 字：全文仅出现 1 次，聚合后仍不得误删
+    body = "Section policy overview with enough content for red line."
+    pages = [
+        [header, *(f"{body} page {page} item {item}" for item in range(6))] for page in range(1, 4)
+    ]
+    pages[0].insert(1, unique_short)
+    content = _pdf_bytes_lines(pages)
+    doc = create_document(
+        session,
+        storage,
+        session.scalars(select(User).where(User.username == "admin")).one(),
+        _meta(_dept_id(session), "客服_页眉聚合_20260901"),
+        content,
+        "header_report.pdf",
+        PDF_MIME,
+    )
+
+    outcome = analyze_document(session, _make_deps(storage), doc)  # 只读分析：不写库不收口
+
+    assert len(outcome.chunks) == 3  # 每页正文 >300 字各自成块：页眉在每块内仅出现 1 次
+    for chunk in outcome.chunks:  # 跨页页眉：文档级 >=3 次，任何块都不得携带
+        assert header not in chunk.content
+    joined = "\n".join(chunk.content for chunk in outcome.chunks)
+    assert unique_short in joined  # 仅 1 个块出现 1 次的正常短行：聚合口径不误删
 
 
 def test_version_switch_archives_old_active_version(session: Session, tmp_path) -> None:
