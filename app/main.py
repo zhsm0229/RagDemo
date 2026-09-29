@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 
 from app.api import (
+    admin_audit,
     admin_eval,
     admin_overview,
     admin_qa_pairs,
@@ -100,6 +101,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_retrieval_test.router, prefix="/api")
     app.include_router(admin_overview.router, prefix="/api")
     app.include_router(admin_users.router, prefix="/api")
+    app.include_router(admin_audit.router, prefix="/api")
     # 注册顺序即匹配优先级：ApiError → 参数校验 → 兜底 Exception（500 通用错误）
     app.add_exception_handler(errors.ApiError, errors.api_error_handler)
     app.add_exception_handler(RequestValidationError, errors.validation_error_handler)
