@@ -18,6 +18,7 @@ dependencies = [
     "python-multipart",
     "python-docx",
     "pypdf",
+    "openpyxl==3.1.5",
     "pydantic-settings",
     "apscheduler",
     "httpx",
