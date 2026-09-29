@@ -23,7 +23,7 @@ from app.core.errors import (
     ERR_PARAM_INVALID,
 )
 from app.core.llm import DEFAULT_CHAT_CHUNKS, StubEmbedder, StubLLMProvider, StubReranker, sigmoid
-from app.db.models import Chunk, Conversation, Department, Document, Message, User
+from app.db.models import Chunk, Conversation, Department, Document, Message, QaPair, User
 from app.main import app
 from app.rag.prompt import REFUSAL_TEXT
 
@@ -403,3 +403,94 @@ def test_second_identical_question_hits_cache_without_generation(chat_client, se
     assert second_row.answer_type == "rag"  # 取缓存条目内原 answer_type，非 'cache'
     assert (second_row.content, second_row.citations) == (first_row.content, first_row.citations)
     assert (second_row.prompt_tokens, second_row.completion_tokens) == (0, 0)
+
+
+# ---------- ⑨ 多轮改写（Task 9 补测义务）：检索命中基于改写后问题，history 只取 6 条 ----------
+
+QUESTIONS = ["公司年假有多少天", "那病假呢", "补贴怎么算", "调休怎么申请", "年假可以折现吗"]
+REWRITTEN = "改写后的问题"  # 替身对每次改写调用的固定产出
+
+
+class _RecordingRewriteLLM(StubLLMProvider):
+    """记录每次 chat_stream 收到的末条 user 消息：改写与生成共用本入口，按内容区分
+    （改写 prompt 含 [当前问题] 段，生成 prompt 含 <data> 段）。"""
+
+    def __init__(self) -> None:
+        super().__init__(chunks=(REWRITTEN,))
+        self.prompts: list[str] = []
+
+    def chat_stream(self, messages, max_tokens):
+        self.prompts.append(messages[-1]["content"])
+        return super().chat_stream(messages, max_tokens)
+
+
+def _seed_qa_pair(session: Session, user: User) -> QaPair:
+    """问答对种子：embedding=embed(改写文)——只有经多轮改写的问题才可能命中（sim≈1），
+    任何原始追问与它近乎正交（sim≈0 << 0.85 阈值），命中即证明检索键是改写后问题。"""
+    qa = QaPair(
+        dept_id=user.dept_id,
+        question=REWRITTEN,
+        answer="病假按工龄三到十天",
+        embedding=StubEmbedder().embed([REWRITTEN])[0],
+        created_by=user.id,
+    )
+    session.add(qa)
+    session.flush()
+    return qa
+
+
+def _dialogue_lines(rewrite_prompt: str) -> list[str]:
+    """取改写 prompt 的 [对话] 段行（[对话] 与 [当前问题] 两标记之间，逐条历史消息）。"""
+    lines = rewrite_prompt.split("\n")
+    return lines[lines.index("[对话]") + 1 : lines.index("[当前问题]")]
+
+
+def test_multi_turn_rewrite_hits_qa_on_rewritten_question_and_history_capped(
+    chat_client, session
+) -> None:
+    """同会话五连问：第 1 轮无历史不改写走文档检索；第 2 轮追问经改写命中 QA 对
+    （refType=qa、sim≈1，原始追问绝不命中——证检索键是改写后问题）；第 3 轮起命中
+    第 2 轮写入的精确缓存（键=改写后问题，CHAT-05/§17.5），citations 同源且
+    cacheHit=true；第 5 轮改写 prompt 的 [对话] 段恰 6 条（最近 3 轮），第 1 轮已被
+    挤出；五轮各自完整事件序 citations→token→done、每轮一对消息完整落库。"""
+    user = make_user(session, "multiturn", "right-one", role="member")
+    _seed_rag_chunk(session, user)
+    qa = _seed_qa_pair(session, user)
+    _override_reranker_high()
+    recording = _RecordingRewriteLLM()
+    app.state.chat_deps.llm = recording  # 定制 deps：改写恒产出 REWRITTEN（W1 app.state 模式）
+    assert login(chat_client, "multiturn", "right-one").status_code == 200
+
+    responses = [post_chat(chat_client, QUESTIONS[0])]
+    responses += [
+        post_chat(chat_client, question, conversation_id=_conversation_row(session).id)
+        for question in QUESTIONS[1:]
+    ]
+
+    assert all(resp.status_code == 200 for resp in responses)
+    events = [_parse_sse(resp.text) for resp in responses]
+    assert all([name for name, _ in chunk] == ["citations", "token", "done"] for chunk in events)
+    assert events[0][0][1]["items"][0]["refType"] == "doc"  # 第 1 轮原始问题走文档检索
+    qa_citation = events[1][0][1]["items"][0]
+    assert (qa_citation["refType"], qa_citation["refId"]) == ("qa", qa.id)
+    assert qa_citation["score"] == pytest.approx(1.0)  # 与种子 QA 向量完全同向
+    assert events[1][1][1]["content"] == REWRITTEN
+    assert all(chunk[2][1]["cacheHit"] is True for chunk in events[2:])  # 第 3 轮起精确缓存
+    assert all(chunk[0][1]["items"] == [qa_citation] for chunk in events[2:])
+    # llm 调用恰 6 次：4 次改写（第 1 轮无历史短路；缓存命中轮也先改写）+ 2 次生成
+    assert len(recording.prompts) == 6
+    rewrites = [prompt for prompt in recording.prompts if "[当前问题]" in prompt]
+    assert len(rewrites) == 4
+    assert _dialogue_lines(rewrites[0]) == ["用户：公司年假有多少天", f"助手：{REWRITTEN}"]
+    assert _dialogue_lines(rewrites[-1]) == [
+        "用户：那病假呢",
+        f"助手：{REWRITTEN}",
+        "用户：补贴怎么算",
+        f"助手：{REWRITTEN}",
+        "用户：调休怎么申请",
+        f"助手：{REWRITTEN}",
+    ]  # history 只取最近 3 轮（6 条）
+    assert "公司年假有多少天" not in rewrites[-1]  # 第 1 轮已被挤出改写上下文
+    rows = _messages(session, _conversation_row(session).id)
+    assert [row.role for row in rows] == ["user", "assistant"] * 5  # 五轮各一对完整落库
+    assert [row.content for row in rows[::2]] == QUESTIONS
