@@ -13,6 +13,7 @@ import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules, UploadFile } from 'element-plus'
 import { ApiClientError } from '@/api/client'
 import { suggestDocumentMetadata, uploadDocument } from '@/api/documents'
+import { requiredPick, requiredText } from '@/validators'
 import { DEPT_OPTIONS } from './options'
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -28,22 +29,6 @@ const submitting = ref(false)
 const formRef = ref<FormInstance>()
 const form = reactive({ title: '', dept: '', owner: '', effectiveDate: '', expiryDate: '' })
 const comply = ref(false)
-
-// 后端 title/owner 仅约束 ≥1 字（Text 列无上限），前端只拦必填不造上限
-function requiredText(label: string) {
-  return (_rule: unknown, value: unknown, callback: (error?: Error) => void): void => {
-    callback(
-      typeof value === 'string' && value.trim().length > 0
-        ? undefined
-        : new Error(`请输入${label}`),
-    )
-  }
-}
-function requiredPick(label: string) {
-  return (_rule: unknown, value: unknown, callback: (error?: Error) => void): void => {
-    callback(value ? undefined : new Error(`请选择${label}`))
-  }
-}
 
 const rules: FormRules = {
   title: [{ validator: requiredText('标题'), trigger: 'blur' }],

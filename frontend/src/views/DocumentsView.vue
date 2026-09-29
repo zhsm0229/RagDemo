@@ -3,9 +3,9 @@
  * P3 知识库·文档管理（ui-spec §三，RAGFlow 模式 §8.2；对照原型 DocView）：
  * 筛选行（部门/状态/关键字 + 查询/重置同行 §22.1）+ 工具栏（上传/zip 导入/手动刷新）
  * + 表格（标题含版本与降级标注/部门/状态机/责任人/生效日期/操作）+ 分页（10/20/50/100 默认 20 右下）。
- * 状态轮询（§8.4）：列表存在 parsing 行时每 30s 自动刷新，组件卸载清理定时器；
- * 增删操作成功 ElMessage、失败由 client 统一 toast，上传 422/409 在弹窗内联（§22.2）。
- * 操作列无后端契约的控件（删除置灰"暂不支持"、版本历史/重建索引未渲染）见 deviations #25/#27。
+ * 状态轮询（§8.4）：列表存在 parsing 行时每 30s 静默自动刷新（不闪表格 loading），
+ * 组件卸载清理定时器；增删操作成功 ElMessage、失败由 client 统一 toast，上传 422/409 在弹窗内联（§22.2）。
+ * 操作列无后端契约的控件（删除置灰"暂不支持"、版本历史/重建索引未渲染）见 deviations #25。
  */
 import { onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
@@ -36,8 +36,8 @@ const zipVisible = ref(false)
 
 let pollTimer: number | null = null
 
-async function load(): Promise<void> {
-  loading.value = true
+async function load(silent = false): Promise<void> {
+  if (!silent) loading.value = true
   try {
     const data = await listDocuments({
       dept: filters.dept,
@@ -49,20 +49,24 @@ async function load(): Promise<void> {
     items.value = data.items
     total.value = data.total
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
   syncPolling()
 }
 
-/** parsing 行存在才维持 30s 轮询；全部到终态即停（§8.4 三态中的"加载中"由 v-loading 呈现） */
+/** parsing 行存在才维持 30s 轮询；全部到终态即停。轮询走 silent：后台刷新不闪 loading（M-6） */
 function syncPolling(): void {
   const hasParsing = items.value.some((doc) => doc.status === 'parsing')
   if (hasParsing && pollTimer === null) {
-    pollTimer = window.setInterval(() => void load(), POLL_INTERVAL_MS)
+    pollTimer = window.setInterval(() => void load(true), POLL_INTERVAL_MS)
   } else if (!hasParsing && pollTimer !== null) {
     window.clearInterval(pollTimer)
     pollTimer = null
   }
+}
+
+function refresh(): void {
+  void load()
 }
 
 onMounted(() => void load())
@@ -153,7 +157,7 @@ function onZipImported(): void {
       <el-button type="primary" @click="search">查询</el-button>
       <el-button @click="resetFilters">重置</el-button>
       <span class="spacer"></span>
-      <el-button :loading="loading" @click="load">刷新</el-button>
+      <el-button :loading="loading" @click="refresh">刷新</el-button>
       <el-tooltip content="后端任务未就绪" placement="top">
         <span class="tip-host">
           <el-button :disabled="!ZIP_IMPORT_ENABLED" @click="zipVisible = true"

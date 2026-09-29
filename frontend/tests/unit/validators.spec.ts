@@ -12,6 +12,8 @@ import {
   checkUsername,
   confirmValidator,
   questionValidator,
+  requiredPick,
+  requiredText,
   requiredTextValidator,
 } from '@/validators'
 
@@ -120,6 +122,38 @@ describe('必填文本校验（登录/改密仅必填口径，上限随后端字
     const pass = vi.fn()
     requiredTextValidator('用户名', 64)({}, 'admin', pass)
     expect(pass).toHaveBeenCalledWith(undefined)
+  })
+})
+
+describe('无上限必填文本/必选项工厂（文档上传元数据等 Text 列字段）', () => {
+  it('requiredText：空白拒绝带 label 文案，非空白通过且不设长度上限', () => {
+    const fail = vi.fn()
+    requiredText('标题')({}, '', fail)
+    expect(fail).toHaveBeenCalledWith(expect.any(Error))
+    requiredText('标题')({}, '   ', fail)
+    expect(fail).toHaveBeenCalledTimes(2)
+    requiredText('标题')({}, null, fail)
+    expect(fail).toHaveBeenCalledTimes(3)
+
+    const pass = vi.fn()
+    requiredText('标题')({}, ' 客服_退货政策 ', pass)
+    expect(pass).toHaveBeenCalledWith(undefined)
+    requiredText('标题')({}, '长'.repeat(500), pass)
+    expect(pass).toHaveBeenCalledTimes(2)
+  })
+
+  it('requiredPick：未选（空串/null）拒绝带"请选择"文案，任意非空值通过', () => {
+    const fail = vi.fn()
+    requiredPick('部门')({}, '', fail)
+    expect(fail).toHaveBeenCalledWith(expect.any(Error))
+    requiredPick('生效日期')({}, null, fail)
+    expect(fail).toHaveBeenCalledTimes(2)
+
+    const pass = vi.fn()
+    requiredPick('部门')({}, 'hr', pass)
+    expect(pass).toHaveBeenCalledWith(undefined)
+    requiredPick('生效日期')({}, '2026-01-01', pass)
+    expect(pass).toHaveBeenCalledTimes(2)
   })
 })
 

@@ -96,6 +96,26 @@ export function requiredTextValidator(
   return toElementValidator((value) => checkRequiredText(value, label, max))
 }
 
+/**
+ * 无上限必填文本 validator 工厂：后端为 Text 列仅约束 ≥1 字的字段（如文档标题/责任人），
+ * 前端只拦空白不造上限；有明确长度口径的字段仍用 requiredTextValidator(label, max)。
+ */
+export function requiredText(
+  label: string,
+): (rule: unknown, value: unknown, callback: (error?: Error) => void) => void {
+  return toElementValidator((value) => {
+    const text = typeof value === 'string' ? value.trim() : ''
+    return text.length > 0 ? true : `请输入${label}`
+  })
+}
+
+/** 下拉/日期等必选项 validator 工厂：未选（''/null/undefined）即不通过，文案"请选择{label}" */
+export function requiredPick(
+  label: string,
+): (rule: unknown, value: unknown, callback: (error?: Error) => void) => void {
+  return toElementValidator((value) => (value ? true : `请选择${label}`))
+}
+
 /** 确认字段一致 validator 工厂：expected 经 getter 实时取（如 () => form.new） */
 export function confirmValidator(
   getExpected: () => unknown,
