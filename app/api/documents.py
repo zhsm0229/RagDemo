@@ -1,14 +1,17 @@
-r"""文档路由（薄控制器）：multipart 上传 / 列表 / 重试 / 确认，业务全部委托 services/ingest。
+r"""文档路由（薄控制器）：multipart 上传 / zip 批量导入 / 列表 / 重试 / 确认，业务全部委托 services。
 
 上传（admin-only）：表单元数据（camelCase）→ 合规勾选与部门 code 卡口（422）→
 同步段 create_document（白名单/SHA-256 查重/落盘/登记 parsing，422/409 经全局
 异常处理器）→ 异步段编排：settings.test_mode=True 时同步执行 process_document
-（W1 测试断言用），否则 BackgroundTasks 独立会话执行。列表（admin-only）：
-dept/status/keyword 过滤 + 分页（pageSize 1-100 默认 20，§22.1），created_at
-降序（同刻以 id 降序兜底），响应键名全 camelCase。retry（DOC-11）仅 failed 可
-重跑；confirm 激活待确认文档（is_active=False → True）。两者成功响应前整清问答
-精确缓存（request.app.state.chat_deps.cache.clear()，W3 Task 1）：文档状态变化
-改变可检索事实，陈旧答案不能等 TTL 自然过期（W2 移交②）。
+（W1 测试断言用），否则 BackgroundTasks 独立会话执行。zip 批量导入（F-1007，
+admin-only）：安全预扫描（§6.3）与逐条目元数据解析在 services/zip_import，
+本层只接线调度回调——test_mode 同步解析，否则逐条挂 BackgroundTasks（依添加
+顺序串行，并发=1 与单文件共用餐票）。列表（admin-only）：dept/status/keyword
+过滤 + 分页（pageSize 1-100 默认 20，§22.1），created_at 降序（同刻以 id 降序
+兜底），响应键名全 camelCase。retry（DOC-11）仅 failed 可重跑；confirm 激活
+待确认文档（is_active=False → True）。两者成功响应前整清问答精确缓存
+（request.app.state.chat_deps.cache.clear()，W3 Task 1）：文档状态变化改变可
+检索事实，陈旧答案不能等 TTL 自然过期（W2 移交②）。
 """
 
 from datetime import date
@@ -27,6 +30,7 @@ from app.core.storage import LocalFileStorage
 from app.db.base import SessionLocal
 from app.db.models import Department, Document
 from app.services import ingest as ingest_service
+from app.services import zip_import
 from app.services.ingest import IngestDeps, process_document
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -144,6 +148,37 @@ def upload_document(
     else:
         background.add_task(_process_in_background, doc.id)
     return {"code": 0, "message": "ok", "data": {"id": doc.id, "status": doc.status}}
+
+
+@router.post("/import-zip", status_code=202)
+def import_documents_zip(
+    file: Annotated[UploadFile, File()],
+    user: AdminUser,
+    db: DbSession,
+    background: BackgroundTasks,
+) -> dict:
+    """zip 批量导入（F-1007，admin-only）：202 {results, accepted, rejected, skipped}。
+
+    合规确认（§7.4）：zip 导入是管理端管理员的显式批量操作，视同已勾选合规确认，
+    不再要表单字段。安全上限与元数据解析在 services/zip_import（§6.3），本层只
+    接线调度回调：test_mode 同步解析（响应可断言终态，同单文件口径），否则逐条
+    挂 BackgroundTasks——依添加顺序串行执行（并发=1，与单文件共用既有编排）。
+    """
+
+    def on_accepted(doc_id: int) -> None:
+        if get_settings().test_mode:
+            process_document(db, _build_deps(), doc_id)
+        else:
+            background.add_task(_process_in_background, doc_id)
+
+    data = zip_import.import_zip(
+        db,
+        LocalFileStorage(get_settings().storage_dir),
+        user,
+        file.file,
+        on_accepted,
+    )
+    return {"code": 0, "message": "ok", "data": data}
 
 
 @router.get("")

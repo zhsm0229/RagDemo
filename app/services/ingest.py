@@ -167,10 +167,16 @@ def _audit(
     record_audit(session, actor, action, "document", doc_id, detail, clock=clock)
 
 
+def sync_reject_reason(reason: str | None) -> str:
+    """check_sync 失败码 → 面向用户的中文原因：upload 的 422 消息与 zip 批量导入的
+    条目级 rejected 原因共用本映射（单一事实来源，禁止两处各写一份文案）。"""
+    return _SYNC_REJECTS.get(reason or "", "文件未通过同步预检")
+
+
 def _sync_rejected(reason: str | None) -> ApiError:
     """check_sync 失败码 → ApiError：超限走 1003，其余格式类走 1001，一律 422。"""
     code = ERR_PARAM_INVALID if reason == "too_large" else ERR_UNSUPPORTED_FORMAT
-    return ApiError(code, _SYNC_REJECTS.get(reason or "", "文件未通过同步预检"), 422)
+    return ApiError(code, sync_reject_reason(reason), 422)
 
 
 def _reject_duplicate(session: Session, sha256: str) -> None:
