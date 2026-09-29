@@ -178,6 +178,48 @@ def test_chat_stream_truncates_total_to_max_tokens() -> None:
 
 
 # ---------------------------------------------------------------------------
+# last_usage 实例属性（task-4-brief 与 OpenAI 兼容真实现同口径）：正常耗尽后置
+# (输入字符总数, 产出字符总数) 估算；fail/broken 路径不置值（保持 None）
+# ---------------------------------------------------------------------------
+
+
+def test_chat_stream_last_usage_is_none_before_any_stream() -> None:
+    assert StubLLMProvider().last_usage is None  # 初始为 None：尚未发生任何流式调用
+
+
+def test_chat_stream_last_usage_set_after_normal_exhaustion() -> None:
+    provider = StubLLMProvider(chunks=["aaaa", "bbb"])
+    messages = [
+        {"role": "user", "content": "12345"},
+        {"role": "assistant", "content": "67"},
+    ]
+    pieces = list(provider.chat_stream(messages, max_tokens=512))
+    assert pieces == ["aaaa", "bbb"]
+    assert provider.last_usage == (7, 7)  # (输入字符总数 5+2, 产出字符总数 4+3)
+
+
+def test_chat_stream_last_usage_counts_truncated_output() -> None:
+    provider = StubLLMProvider(chunks=["aaaaa", "bbbbb", "ccccc"])
+    text = "".join(provider.chat_stream(_MESSAGES, max_tokens=8))
+    assert text == "aaaaabbb"
+    assert provider.last_usage == (len(_MESSAGES[0]["content"]), 8)  # 产出按截断后计
+
+
+def test_chat_stream_last_usage_none_on_fail_and_broken_paths() -> None:
+    fail = StubLLMProvider(fail_times=1)
+    with pytest.raises(UpstreamError):
+        fail.chat_stream(_MESSAGES, max_tokens=512)
+    assert fail.last_usage is None  # fail 路径不置值
+
+    broken = StubLLMProvider(break_after=1)
+    iterator = broken.chat_stream(_MESSAGES, max_tokens=512)
+    with pytest.raises(UpstreamError):
+        while True:
+            next(iterator)
+    assert broken.last_usage is None  # broken 路径不置值
+
+
+# ---------------------------------------------------------------------------
 # hang_s 挂起注入：monkeypatch 短 sleep 验证挂起路径（不真睡，避免测试变慢）
 # ---------------------------------------------------------------------------
 

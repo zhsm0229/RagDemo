@@ -149,7 +149,9 @@ class StubReranker:
 
 class StubLLMProvider:
     """确定性假 LLM：固定文案分段产出；fail_times 调用即抛（未产出段），
-    break_after=N 产出 N 段后抛 UpstreamError(broken=True)，总量截到 max_tokens 字符。"""
+    break_after=N 产出 N 段后抛 UpstreamError(broken=True)，总量截到 max_tokens 字符。
+    last_usage 实例属性与 OpenAI 兼容真实现同口径：仅流正常耗尽后置
+    (输入字符总数, 产出字符总数) 估算，fail/broken 路径保持 None。"""
 
     def __init__(
         self,
@@ -164,24 +166,30 @@ class StubLLMProvider:
         self.break_after: int | None = break_after
         self.hang_events: list[float] = []
         self.stream_calls: int = 0
+        self.last_usage: tuple[int, int] | None = None
 
     def chat_stream(self, messages: Sequence[Mapping[str, str]], max_tokens: int) -> Iterator[str]:
         """挂起/失败发生在取迭代器时（未产出任何段）；断流发生在迭代中途（已产出部分段）。"""
         self.stream_calls += 1
+        self.last_usage = None  # 任一非正常耗尽路径（fail/broken）不残留上次估算
         _record_and_sleep(self.hang_s, self.hang_events)
         if self.fail_times > 0:
             self.fail_times -= 1
             raise UpstreamError(f"stub chat_stream forced failure (call #{self.stream_calls})")
-        return self._stream(max_tokens)
+        return self._stream(messages, max_tokens)
 
-    def _stream(self, max_tokens: int) -> Iterator[str]:
+    def _stream(self, messages: Sequence[Mapping[str, str]], max_tokens: int) -> Iterator[str]:
+        input_chars = sum(len(message["content"]) for message in messages)
         remaining = max_tokens
+        emitted = 0
         for produced, chunk in enumerate(self.chunks):
             # produced 恰为当前 chunk 之前已产出的段数：break_after=N 产出 N 段后断裂
             if self.break_after is not None and produced >= self.break_after:
                 raise UpstreamError(f"stub stream broken after {produced} chunks", broken=True)
             if remaining <= 0:
-                return
+                break  # max_tokens 耗尽：同为正常耗尽出口
             piece = chunk[:remaining]
             remaining -= len(piece)
+            emitted += len(piece)
             yield piece
+        self.last_usage = (input_chars, emitted)
