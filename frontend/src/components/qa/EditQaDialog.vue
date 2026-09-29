@@ -1,14 +1,16 @@
 <script setup lang="ts">
 /**
  * 编辑问答对对话框（QA-06，对照原型 edit 弹窗）：问题（1-2000）/ 答案（1-10000）
- * 必填校验同后端导入规则（§21.5），maxlength + show-word-limit 即时限长；
- * PUT 全文提交，422 校验失败内联展示且弹窗不关（§22.2），成功 emit saved 由父级刷新。
+ * 必填校验同后端导入规则（§21.5，validators 统一工厂收敛 §21.3），
+ * maxlength + show-word-limit 即时限长；PUT 全文提交，422 校验失败内联展示且
+ * 弹窗不关（§22.2），成功 emit saved 由父级刷新。
  */
 import { reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { ApiClientError } from '@/api/client'
 import { updateQaPair, type QaPairItem } from '@/api/qaPairs'
+import { requiredTextValidator } from '@/validators'
 
 const props = defineProps<{ visible: boolean; qa: QaPairItem | null }>()
 const emit = defineEmits<{
@@ -21,19 +23,9 @@ const form = reactive({ question: '', answer: '' })
 const formErr = ref('')
 const submitting = ref(false)
 
-/** 与后端同口径：strip 后非空 + 上限（maxlength 已即时拦超长，此处兜底） */
-function requiredText(label: string, max: number) {
-  return (_rule: unknown, value: unknown, callback: (error?: Error) => void): void => {
-    const text = typeof value === 'string' ? value.trim() : ''
-    if (text.length < 1) callback(new Error(`请输入${label}`))
-    else if (text.length > max) callback(new Error(`${label}长度须在 1-${max} 字之间`))
-    else callback()
-  }
-}
-
 const rules: FormRules = {
-  question: [{ validator: requiredText('问题', 2000), trigger: 'blur' }],
-  answer: [{ validator: requiredText('答案', 10000), trigger: 'blur' }],
+  question: [{ validator: requiredTextValidator('问题', 2000), trigger: 'blur' }],
+  answer: [{ validator: requiredTextValidator('答案', 10000), trigger: 'blur' }],
 }
 
 watch(
