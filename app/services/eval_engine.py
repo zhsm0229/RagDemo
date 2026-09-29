@@ -28,23 +28,19 @@ from time import perf_counter
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.core.assembly import PromptPack
 from app.core.clock import get_clock
-from app.core.config import Settings
 from app.core.llm import UpstreamError
 from app.db.base import SessionLocal
 from app.db.models import Conversation, Department, EvalQuestion, EvalRun, Message
 from app.rag.prompt import REFUSAL_TEXT
 from app.services.chat import ChatDeps, TurnPlan, prepare_turn
 from app.services.chat_cache import ExactCache
-from app.services.eval_service import REJECT_MARK
+from app.services.eval_judge import _CORRECT, _PENDING, _STUB_MODEL, _auto_judge, _config_snapshot
 
 logger = logging.getLogger(__name__)
 
-_STUB_MODEL = "stub"  # settings.llm_model 为空（test_mode Stub 无模型名）时的落库回退名
 _ALL_DEPT_CODE = "all"  # 全员部门 code（F-502：检索范围恒为 [视角部门, 全员]）
 _ERROR_MAX_CHARS = 500  # detail.error 截断：留根因不吞日志，防异常串撑爆 detail
-_CORRECT, _WRONG, _PENDING = "correct", "wrong", "pending"
 
 
 @dataclass
@@ -214,8 +210,19 @@ def _run_one(
     model = deps.settings.llm_model or _STUB_MODEL
     latency_ms = int((perf_counter() - start) * 1000)
     db.add(_assistant_message(conversation, user_id, dept_id, turn, model, latency_ms))
+    _bypass_cache_put(deps, plan, turn, model)
+    item["answerType"] = turn.answer_type
+    item["answer"] = turn.content
+    item["citations"] = turn.citations
+    item["autoJudgment"] = _auto_judge(question, turn.content)
+    return item
+
+
+def _bypass_cache_put(deps: ChatDeps, plan: TurnPlan, turn: _TurnAnswer, model: str) -> None:
+    """qa/rag 生成结果旁路写入随跑弃置缓存实例（EVAL-02）：主缓存零污染。refuse/cache
+    不回填——refuse 无可缓存产物，cache 条目本就取自缓存。"""
     if plan.kind in ("qa", "rag") and plan.cache_key is not None:
-        deps.cache.put(  # 旁路：put 进随跑弃置实例，主缓存零污染（EVAL-02）
+        deps.cache.put(
             plan.cache_key,
             {
                 "answer": turn.content,
@@ -224,11 +231,6 @@ def _run_one(
                 "model": model,
             },
         )
-    item["answerType"] = turn.answer_type
-    item["answer"] = turn.content
-    item["citations"] = turn.citations
-    item["autoJudgment"] = _auto_judge(question, turn.content)
-    return item
 
 
 def _collect_answer(deps: ChatDeps, plan: TurnPlan) -> _TurnAnswer:
@@ -245,28 +247,6 @@ def _collect_answer(deps: ChatDeps, plan: TurnPlan) -> _TurnAnswer:
         )
     answer = "".join(deps.llm.chat_stream(plan.llm_messages, deps.settings.chat_max_tokens))
     return _TurnAnswer(answer, plan.citations, plan.kind, getattr(deps.llm, "last_usage", None))
-
-
-def _auto_judge(question: EvalQuestion, answer: str) -> str:
-    """判定协议第 3 条：拒答类按话术精确匹配自动判；其余 pending（人工复核）。"""
-    if question.expected_answer == REJECT_MARK or question.qtype == "cross_reject":
-        return _CORRECT if answer == REFUSAL_TEXT else _WRONG
-    return _PENDING
-
-
-def _config_snapshot(settings: Settings, prompts: PromptPack) -> dict:
-    """收口 config 快照 9 字段：阈值/模型/提示词版本/温度，防跨跑对比被污染。"""
-    return {
-        "model": settings.llm_model or _STUB_MODEL,
-        "promptVersion": settings.prompt_version,
-        "qaThreshold": settings.qa_threshold,
-        "refuseThreshold": settings.refuse_threshold,
-        "efSearch": settings.hnsw_ef_search,
-        "topK": settings.retriever_top_k,
-        "topN": settings.rerank_top_n,
-        "temperature": prompts.temperature,
-        "manifestVersion": prompts.version,
-    }
 
 
 def _mark_failed(db: Session, run_id: int, exc: Exception) -> None:
