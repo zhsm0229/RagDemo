@@ -1,0 +1,217 @@
+# =============================================================================
+# RAGFlow 对照基线环境（决策 15：与主栈同机、错峰启停）
+# =============================================================================
+# 用途与范围：
+#   为检索准确率评测提供 RAGFlow 开源基线（docs/project-brief.md 决策 11/15）。
+#   仅内测期存在，不进生产栈（standards §12.2）。与主栈（根目录 docker-compose.yml）
+#   通过独立 compose project（name: ragflow-baseline）、独立网络、baseline-* 卷
+#   完全隔离；禁止把本文件并入主栈部署。
+#
+# 【合规红线 · §7.6 出网白名单】
+#   禁止为 RAGFlow 配置任何云 API key（OpenAI/通义/智谱等）灌真实语料——
+#   否则构成第二条内容出网通道。基线只允许两种形态：
+#     a) full 镜像内置本地 embedding 模型（本文件默认形态，运行期离线可用）；
+#     b) 在基线界面配置内网模型端点（如主栈 TEI / 内网 LLM，经 host.docker.internal）。
+#   语料只允许脱敏/合成数据。违反 = 合规红线，评审不通过。
+#
+# 错峰启停（§12.5，主机 4 核 16G）：
+#   本文件五服务资源上限合计约 11.75G / 4.5C（CPU 分时复用可接受，内存不超卖）；
+#   主栈满配上限 10C17G。基线重负载（批量导入解析、embedding）期间主栈必须
+#   停止或仅保留 pg；启停顺序与观察点见 docs/runbook.md 第二节。
+#
+# 镜像审批注记（§12.1 / §12.8）：
+#   全部镜像钉确切版本 tag、禁 latest（选型依据：对齐 infiniflow/ragflow
+#   v0.19.1 官方 docker-compose-base.yml 的依赖版本）。部署机首跑时人工核对
+#   digest 并登记 docs/runbook.md「镜像 digest 登记表」（双人复核）；换 tag
+#   属变更，须重新登记后再上线。
+#
+# 端口（§12.2）：仅发布 9380 -> 容器 80（RAGFlow 内置 nginx，Web UI 与同源 API
+#   的唯一入口）。主栈保留宿主 80。容器 9380（RAGFlow 原生 API 端口）与
+#   9200/3306/9000/9001/6379 一律仅 compose 内网，禁止发布；需要 API 直连时
+#   在部署机本机访问或走 ssh 隧道。
+#
+# 凭据说明（§12.7 为什么这样写）：
+#   ${RAGFLOW_*:-默认值} 形式优先读部署机环境变量 / deploy/.env（git 已忽略），
+#   默认值仅供本地 config 校验与一键启动使用——这些凭据只存在于 compose 内网
+#   （相关端口一律不发布），非生产密钥，与主栈 dev 先例同级别；禁止把任何真实
+#   云 API key 写进本文件或 deploy/.env。
+# =============================================================================
+name: ragflow-baseline
+
+services:
+  es01:
+    # 文档引擎（DOC_ENGINE=elasticsearch，RAGFlow v0.19.1 默认）；对齐官方
+    # docker-compose-base.yml 的 STACK_VERSION=8.11.3，用 elastic 官方仓库全限定名
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.3
+    container_name: baseline-es01
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms2g -Xmx2g
+      # 小盘保护：磁盘水位 5gb/3gb/2gb（对齐官方），防索引写满
+      - cluster.routing.allocation.disk.threshold_enabled=true
+      - cluster.routing.allocation.disk.watermark.low=5gb
+      - cluster.routing.allocation.disk.watermark.high=3gb
+      - cluster.routing.allocation.disk.watermark.flood_stage=2gb
+      - TZ=Asia/Shanghai
+    volumes:
+      - baseline-es-data:/usr/share/elasticsearch/data
+    networks:
+      - baseline-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200 >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 120
+    deploy:
+      resources:
+        limits:
+          cpus: "1.50"
+          memory: 4g
+
+  mysql:
+    # RAGFlow 元数据（知识库/文档/对话配置），镜像 tag 对齐官方 v0.19.1
+    image: mysql:8.0.39
+    container_name: baseline-mysql
+    command:
+      - --max_connections=1000
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+      # binlog 仅保留 7 天，防小盘被日志占满（对齐官方）
+      - --binlog_expire_logs_seconds=604800
+    environment:
+      MYSQL_ROOT_PASSWORD: ${RAGFLOW_MYSQL_PASSWORD:-ragflow_base}
+      MYSQL_DATABASE: rag_flow
+      TZ: Asia/Shanghai
+    volumes:
+      - baseline-mysql-data:/var/lib/mysql
+    networks:
+      - baseline-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-uroot", "-p${RAGFLOW_MYSQL_PASSWORD:-ragflow_base}"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 1g
+
+  minio:
+    # RAGFlow 对象存储（原文文件），镜像 tag 对齐官方 v0.19.1
+    image: quay.io/minio/minio:RELEASE.2023-12-20T01-00-02Z
+    container_name: baseline-minio
+    command: server --console-address ":9001" /data
+    environment:
+      MINIO_ROOT_USER: ${RAGFLOW_MINIO_USER:-ragflow_base}
+      MINIO_ROOT_PASSWORD: ${RAGFLOW_MINIO_PASSWORD:-ragflow_base_pass}
+      TZ: Asia/Shanghai
+    volumes:
+      - baseline-minio-data:/data
+    networks:
+      - baseline-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 512m
+
+  valkey:
+    # RAGFlow 任务队列/缓存（官方用 valkey 替代 redis，命令兼容）
+    image: valkey/valkey:8
+    container_name: baseline-valkey
+    command: redis-server --requirepass ${RAGFLOW_REDIS_PASSWORD:-ragflow_base} --maxmemory 128mb --maxmemory-policy allkeys-lru
+    volumes:
+      - baseline-valkey-data:/data
+    networks:
+      - baseline-net
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a ${RAGFLOW_REDIS_PASSWORD:-ragflow_base} ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256m
+
+  ragflow:
+    # full 变体内置本地 embedding 模型：基线运行期零外网依赖，天然满足 §7.6；
+    # 若评审决定改用 -slim 变体，必须同时在基线界面配置内网 embedding 端点
+    image: ${RAGFLOW_IMAGE:-infiniflow/ragflow:v0.19.1}
+    container_name: baseline-ragflow
+    depends_on:
+      es01:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    ports:
+      # 唯一对外端口（§12.2）：宿主 9380 -> 容器 80（内置 nginx，Web UI + 同源 API）；
+      # 容器 9380 原生 API 端口不发布
+      - "9380:80"
+    environment:
+      TZ: Asia/Shanghai
+      DOC_ENGINE: elasticsearch
+      ES_HOST: es01
+      ES_PORT: "9200"
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: root
+      MYSQL_PASSWORD: ${RAGFLOW_MYSQL_PASSWORD:-ragflow_base}
+      MYSQL_DATABASE: rag_flow
+      MINIO_HOST: minio
+      MINIO_PORT: "9000"
+      MINIO_USER: ${RAGFLOW_MINIO_USER:-ragflow_base}
+      MINIO_PASSWORD: ${RAGFLOW_MINIO_PASSWORD:-ragflow_base_pass}
+      REDIS_HOST: valkey
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${RAGFLOW_REDIS_PASSWORD:-ragflow_base}
+    # 内网模型可经 host.docker.internal 访问宿主侧服务（§7.6 形态 b）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - baseline-ragflow-logs:/ragflow/logs
+    networks:
+      - baseline-net
+    restart: on-failure
+    healthcheck:
+      # 用 python3 探测 nginx 入口（不假设镜像含 curl）；ragflow 启动含建库/连
+      # 依赖，start_period 放宽避免误判 unhealthy
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request as u; u.urlopen('http://127.0.0.1:80/', timeout=5)\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.00"
+          memory: 6g
+
+networks:
+  baseline-net:
+    name: baseline-net
+
+volumes:
+  baseline-es-data:
+    name: baseline-es-data
+  baseline-mysql-data:
+    name: baseline-mysql-data
+  baseline-minio-data:
+    name: baseline-minio-data
+  baseline-valkey-data:
+    name: baseline-valkey-data
+  baseline-ragflow-logs:
+    name: baseline-ragflow-logs
