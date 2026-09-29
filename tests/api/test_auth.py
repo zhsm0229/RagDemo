@@ -104,6 +104,32 @@ def test_five_failures_lock_account_and_write_audit(client, session, fake_clock)
     assert audits[0].detail["after"]["failedAttempts"] == 5
 
 
+# ---------- Rider T7：锁定 401 响应体携带 lockedUntil ----------
+
+
+def test_locked_login_response_carries_locked_until(client, session, fake_clock) -> None:
+    """锁定 2002 响应：data.lockedUntil 为 ISO 时刻且等于库内锁定截止（第 5 次触发与
+    窗口内正确密码重试两处抛出点均携带），供前端倒计时消费（T7 评审移交）。"""
+    from datetime import datetime
+
+    user = make_user(session, "frank", "right-one")
+    for _ in range(4):
+        assert login(client, "frank", "wrong-pass").json()["code"] == 2001
+    expected = (fake_clock.now() + timedelta(minutes=15)).isoformat()
+    fifth = login(client, "frank", "wrong-pass")
+    assert fifth.status_code == 401
+    assert fifth.json()["code"] == 2002
+    assert fifth.json()["data"]["lockedUntil"] == expected
+
+    session.refresh(user)
+    denied = login(client, "frank", "right-one")  # 锁定窗口内正确密码同样拒绝
+    assert denied.status_code == 401
+    assert denied.json()["code"] == 2002
+    body_until = denied.json()["data"]["lockedUntil"]
+    assert body_until == user.locked_until.isoformat()
+    assert datetime.fromisoformat(body_until) == user.locked_until  # ISO 可解析且精确相等
+
+
 # ---------- 用例表 4：成功登录清零计数 ----------
 
 

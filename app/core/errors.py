@@ -43,13 +43,17 @@ ERR_LLM_UNAVAILABLE: int = (
 
 class ApiError(Exception):
     """业务错误：code 为稳定错误码（见模块 docstring 枚举约定），message 为面向
-    用户的中文提示（技术细节进日志不进界面），http_status 为响应状态码。"""
+    用户的中文提示（技术细节进日志不进界面），http_status 为响应状态码；data 为
+    可选附加数据（如锁定截止时刻），经统一响应体透传，缺省 None 不改响应形状。"""
 
-    def __init__(self, code: int, message: str, http_status: int = 400) -> None:
+    def __init__(
+        self, code: int, message: str, http_status: int = 400, data: object | None = None
+    ) -> None:
         super().__init__(message)
         self.code: int = code
         self.message: str = message
         self.http_status: int = http_status
+        self.data: object | None = data
 
 
 def _envelope(code: int, message: str, data: object = None) -> dict:
@@ -58,8 +62,10 @@ def _envelope(code: int, message: str, data: object = None) -> dict:
 
 
 def api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
-    """ApiError → {code, message, data} 统一响应体，状态码取异常携带值。"""
-    return JSONResponse(status_code=exc.http_status, content=_envelope(exc.code, exc.message))
+    """ApiError → {code, message, data} 统一响应体，状态码取异常携带值，data 透传。"""
+    return JSONResponse(
+        status_code=exc.http_status, content=_envelope(exc.code, exc.message, exc.data)
+    )
 
 
 def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:

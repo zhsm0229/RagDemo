@@ -124,7 +124,7 @@ def login(
         verify_password(password, _DUMMY_HASH)  # AUTH-08：结果必为假，只为拉平验密耗时
         raise ApiError(ERR_INVALID_CREDENTIALS, _MSG_BAD_CREDENTIALS, 401)
     if user.locked_until is not None and user.locked_until > now:
-        raise ApiError(ERR_ACCOUNT_LOCKED, _MSG_LOCKED, 401)
+        raise ApiError(ERR_ACCOUNT_LOCKED, _MSG_LOCKED, 401, data=_locked_payload(user))
     if not verify_password(password, user.password_hash):
         _register_failure(session, user, ip, max_attempts, now, effective_clock)
     user.failed_attempts = 0
@@ -178,6 +178,12 @@ def change_password(
     return user
 
 
+def _locked_payload(user: User) -> dict:
+    """Rider T7（评审移交）：锁定 401 的 data 载荷——lockedUntil 为 ISO 时刻，
+    前端据此渲染锁定倒计时；两个 2002 抛出点（触发锁定/窗口内重试）共用。"""
+    return {"lockedUntil": user.locked_until.isoformat()}
+
+
 def _register_failure(
     session: Session,
     user: User,
@@ -208,7 +214,10 @@ def _register_failure(
         )
         session.commit()
         raise ApiError(
-            ERR_ACCOUNT_LOCKED, f"密码连续错误 {max_attempts} 次，账号已锁定 15 分钟", 401
+            ERR_ACCOUNT_LOCKED,
+            f"密码连续错误 {max_attempts} 次，账号已锁定 15 分钟",
+            401,
+            data=_locked_payload(user),
         )
     session.commit()
     remaining = max_attempts - 1 - user.failed_attempts
