@@ -10,7 +10,16 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 
-from app.api import admin_eval, admin_qa_pairs, auth, chat, conversations, documents, feedback
+from app.api import (
+    admin_eval,
+    admin_qa_pairs,
+    admin_views,
+    auth,
+    chat,
+    conversations,
+    documents,
+    feedback,
+)
 from app.core import errors
 from app.core.assembly import build_embedder, build_llm, build_reranker, load_prompt_pack
 from app.core.clock import SystemClock
@@ -83,6 +92,7 @@ def create_app() -> FastAPI:
     app.include_router(chat.router, prefix="/api")
     app.include_router(conversations.router, prefix="/api")
     app.include_router(feedback.router, prefix="/api")
+    app.include_router(admin_views.router, prefix="/api")
     # 注册顺序即匹配优先级：ApiError → 参数校验 → 兜底 Exception（500 通用错误）
     app.add_exception_handler(errors.ApiError, errors.api_error_handler)
     app.add_exception_handler(RequestValidationError, errors.validation_error_handler)
