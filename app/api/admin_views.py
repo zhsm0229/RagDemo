@@ -3,16 +3,17 @@ r"""管理后台路由（M7 起）：/api/admin/*——admin 专属查询/处理
 本文件是管理端路由唯一挂载点（Task 9 badcase / Task 10 检索测试 / Task 11 运营
 概览陆续加入本 router，保持单文件 ≤300 行，超出时按域拆子 router）。全部端点过
 AdminUser 门（依赖链：登录 → 首登改密 → 角色，401/2003、403/2004，§5.5）；提问
-记录（F-701）以 user 消息行为单位且恒滤 is_eval（W3 约束：评测数据不污染运营
-查询）。查询与配对逻辑在 services.admin_views，本层只做参数接收与 DTO 组装
-（§1.2 分层）；DTO 键全 camelCase（§3.4），列表 {items,total,page,pageSize}
-（§3.5），响应体 {code,message,data}。
+记录（F-701）与 badcase 队列（F-702）恒滤 is_eval（W3 约束：评测数据不污染运营
+查询）。查询与配对逻辑在 services.admin_views / services.badcase_views，本层只做
+参数接收与 DTO 组装（§1.2 分层）；DTO 键全 camelCase（§3.4），列表
+{items,total,page,pageSize}（§3.5），响应体 {code,message,data}。
 """
 
 import datetime as dt
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Query
+from pydantic import BaseModel
 
 from app.api.deps import AdminUser, DbSession
 from app.core.errors import ERR_NOT_FOUND, ApiError
@@ -24,10 +25,17 @@ from app.services.admin_views import (
     get_question_detail,
     list_question_records,
 )
+from app.services.badcase_views import (
+    BadcaseFilters,
+    BadcaseRecord,
+    list_badcases,
+    update_badcase,
+)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 _MSG_NOT_FOUND = "提问记录不存在"  # 非 user 行 / 评测消息 / 不存在 id 同文案（不给探测空间）
+_BADCASE_NOT_FOUND = "点踩记录不存在"  # 不存在 / 非 down / 评测点踩同文案（不给探测空间）
 
 
 def _record_payload(record: QuestionRecord) -> dict:
@@ -127,3 +135,77 @@ def get_message_detail(message_id: int, user: AdminUser, db: DbSession) -> dict:
     if detail is None:
         raise ApiError(ERR_NOT_FOUND, _MSG_NOT_FOUND, 404)
     return {"code": 0, "message": "ok", "data": _detail_payload(detail)}
+
+
+class BadcasePatchRequest(BaseModel):
+    """PATCH /api/admin/badcases/{message_id} 请求体：处置只收两个 admin 终态
+    （'待处理' 仅由 W2 点踩入口产生，不提供重开回退；枚举外 422 字段级指名
+    badcaseStatus）；note 为 admin 处理备注，只入审计不入 messages（W3 计划钉死）。"""
+
+    badcaseStatus: Literal["已修语料", "已忽略"]
+    note: str | None = None
+
+
+def _badcase_payload(record: BadcaseRecord) -> dict:
+    """队列项 DTO（§3.4 camelCase）：questionPreview 已在 service 截 50 字。"""
+    return {
+        "messageId": record.message_id,
+        "createdAt": record.created_at.isoformat(),
+        "deptCode": record.dept_code,
+        "questionPreview": record.question_preview,
+        "category": record.category,
+        "comment": record.comment,
+        "badcaseStatus": record.badcase_status,
+    }
+
+
+@router.get("/badcases")
+def list_badcase_queue(
+    user: AdminUser,
+    db: DbSession,
+    deptId: Annotated[int | None, Query(ge=1)] = None,
+    badcaseStatus: Annotated[str | None, Query()] = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    pageSize: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> dict:
+    """badcase 队列（F-702）：feedback='down' AND is_eval=false 的消息 DESC（同刻
+    id 降序兜底），一条回答一条记录不重复；badcaseStatus 缺省不过滤（brief 钉死：
+    '待处理' 由前端传，默认视图由前端带参）；item 携 questionPreview（截 50 字）
+    与用户点踩 category/comment。"""
+    total, records = list_badcases(
+        db,
+        BadcaseFilters(
+            dept_id=deptId,
+            badcase_status=badcaseStatus,
+            page=page,
+            page_size=pageSize,
+        ),
+    )
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": {
+            "items": [_badcase_payload(record) for record in records],
+            "total": total,
+            "page": page,
+            "pageSize": pageSize,
+        },
+    }
+
+
+@router.patch("/badcases/{message_id}")
+def patch_badcase(
+    message_id: int, body: BadcasePatchRequest, user: AdminUser, db: DbSession
+) -> dict:
+    """badcase 处置（F-702）：badcase_status 迁移至 admin 终态（枚举外 422 字段
+    级）；note 入审计 detail 不入 messages；审计 badcase.update {messageId,from,
+    to,note} 与状态更新同事务落库（services 层 commit）。寻址宇宙 = 队列口径
+    （down 且非评测），宇宙外 404/3003 同文案（不给探测空间）。"""
+    updated = update_badcase(db, message_id, user.id, body.badcaseStatus, body.note)
+    if updated is None:
+        raise ApiError(ERR_NOT_FOUND, _BADCASE_NOT_FOUND, 404)
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": {"messageId": updated, "badcaseStatus": body.badcaseStatus},
+    }
