@@ -77,13 +77,18 @@ def match_qa(
 ) -> QaHit | None:
     """最高分问答对且相似度 ≥ threshold 才命中；否则 None。
 
-    SQL 带 status='enabled' 过滤（QA-05）与 dept_id IN 绑定参数（F-502），按余弦
+    SQL 带 status='enabled'（QA-05）与 is_active（QA-07 软删双闸：删除端点置
+    is_active=false 即退出检索）过滤，及 dept_id IN 绑定参数（F-502），按余弦
     距离升序取第一名；similarity = 1 − 余弦距离（embedding 余弦相似度，qa 阈值口径）。
     """
     distance = QaPair.embedding.cosine_distance(query_vec)
     row = db.execute(
         select(QaPair.id, QaPair.question, QaPair.answer, distance)
-        .where(QaPair.status == "enabled", QaPair.dept_id.in_(dept_ids))
+        .where(
+            QaPair.status == "enabled",
+            QaPair.is_active.is_(True),
+            QaPair.dept_id.in_(dept_ids),
+        )
         .order_by(distance)
         .limit(1)
     ).first()

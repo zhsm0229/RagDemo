@@ -1,19 +1,23 @@
-r"""管理端问答对路由（薄控制器）：Excel 整批导入（F-401）与模板下载（F-403）。
+r"""管理端问答对路由（薄控制器）：导入/模板（F-401/F-403）与管理面（F-402/QA-06/07）。
 
 业务全部委托 services/qa_pairs：XlsxBatchError（结构级+行级聚合错误行列表）统一
 转 422/1003，错误行列表直接放 data（standards §21.9），行号是 xlsx_io 携带的
 Excel 物理行号；文件级单一错误（row=0）把 reason 提为 message，让"文件无数据/
 超上限"在提示层可见；部门解析等业务错误走 ApiError 经全局异常处理器。上传早拒
 （同 documents 先例）：体积 seek/tell 先拒 + 扩展名/MIME/魔数三重白名单适用
-部分，坏 zip 不再漏到 500 兜底（评审 Important-2）。导入成功后整清问答精确
-缓存——新问答对改变可检索事实，陈旧答案不能等 TTL 自然过期（同 W3 Task 1
-文档 retry/confirm 口径）。
+部分，坏 zip 不再漏到 500 兜底（评审 Important-2）。
+
+管理面四端点（列表/停用/编辑/软删）成功响应前整清问答精确缓存——问答对的增删
+改与停用都改变可检索事实，陈旧答案不能等 TTL 自然过期（同 W3 Task 1 文档
+retry/confirm 口径）；编辑重嵌取 chat_deps 同一 embedder（与检索同指纹空间，
+禁止另建）。
 """
 
 from typing import Annotated
 
-from fastapi import APIRouter, File, Form, Request, Response, UploadFile
+from fastapi import APIRouter, File, Form, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from app.api.deps import AdminUser, DbSession
 from app.core.errors import ERR_PARAM_INVALID, ApiError
@@ -29,6 +33,19 @@ _MAX_IMPORT_BYTES: int = (
     50 * 1024 * 1024
 )  # 与文档上传同口径：容纳 5000 行×答案 10000 字的最坏合法载荷
 _MSG_BAD_FORMAT = "文件格式不支持或已损坏"
+
+
+class ToggleStatusBody(BaseModel):
+    """PATCH /status 请求体：enabled=启用（参与检索）/ disabled=停用（不参与）。"""
+
+    status: str
+
+
+class EditQaPairBody(BaseModel):
+    """PUT 请求体（QA-06）：问题与答案全文，校验在 service（同导入规则，中文 422）。"""
+
+    question: str
+    answer: str
 
 
 def _read_upload(file: UploadFile) -> bytes:
@@ -102,3 +119,58 @@ def download_template(user: AdminUser) -> Response:
         media_type=_XLSX_MIME,
         headers={"Content-Disposition": f'attachment; filename="{_TEMPLATE_FILENAME}"'},
     )
+
+
+@router.get("")
+def list_qa_pairs(
+    user: AdminUser,
+    db: DbSession,
+    deptId: Annotated[int | None, Query()] = None,
+    status: Annotated[str | None, Query()] = None,
+    keyword: Annotated[str | None, Query()] = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    pageSize: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> dict:
+    """管理列表（F-402）：deptId/status/keyword 过滤 + 分页，created_at 降序；keyword
+    对问题/答案 ILIKE 且通配符已转义（§22）；软删行不出现（QA-07）。"""
+    data = qa_pairs_service.list_qa_pairs(
+        db, dept_id=deptId, status=status, keyword=keyword, page=page, page_size=pageSize
+    )
+    return {"code": 0, "message": "ok", "data": data}
+
+
+@router.patch("/{qa_id}/status")
+def toggle_qa_pair(
+    qa_id: int, body: ToggleStatusBody, user: AdminUser, db: DbSession, request: Request
+) -> dict:
+    """停用/启用（QA-05）：service 审计 qa.toggle {from,to} 并提交；成功响应前整清
+    精确缓存——停用改变可检索事实，陈旧答案不能等 TTL 自然过期。"""
+    pair = qa_pairs_service.toggle_qa_pair(db, qa_id, body.status, user.id)
+    request.app.state.chat_deps.cache.clear()  # 成功响应前失效：宁可多一次生成不留旧答案
+    return {"code": 0, "message": "ok", "data": {"id": pair.id, "status": pair.status}}
+
+
+@router.put("/{qa_id}")
+def update_qa_pair(
+    qa_id: int, body: EditQaPairBody, request: Request, user: AdminUser, db: DbSession
+) -> dict:
+    """编辑（QA-06）：同导入规则校验 → 单条重嵌问题（chat_deps 同一 embedder）→
+    审计 qa.update {before/after 摘要} → 提交；成功响应前整清缓存，新答案立即生效。"""
+    pair = qa_pairs_service.update_qa_pair(
+        db, _request_embedder(request), qa_id, body.question, body.answer, user.id
+    )
+    request.app.state.chat_deps.cache.clear()  # 成功响应前失效：新答案立即生效（QA-06）
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": {"id": pair.id, "question": pair.question, "answer": pair.answer},
+    }
+
+
+@router.delete("/{qa_id}")
+def delete_qa_pair(qa_id: int, user: AdminUser, db: DbSession, request: Request) -> dict:
+    """软删（QA-07）：service 置 is_active=false（行保留可追溯）并审计 qa.delete；
+    成功响应前整清缓存——删除改变可检索事实，陈旧答案不能等 TTL 自然过期。"""
+    pair = qa_pairs_service.delete_qa_pair(db, qa_id, user.id)
+    request.app.state.chat_deps.cache.clear()  # 成功响应前失效：宁可多一次生成不留旧答案
+    return {"code": 0, "message": "ok", "data": {"id": pair.id, "isActive": pair.is_active}}

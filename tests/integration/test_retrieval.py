@@ -260,6 +260,20 @@ def test_match_qa_ignores_disabled_cross_dept_and_below_threshold(session: Sessi
     )
 
 
+def test_match_qa_ignores_soft_deleted_pair(session: Session) -> None:
+    """软删（is_active=false，QA-07）：status 仍为 enabled 也不命中——status+is_active
+    双闸，删除端点置软删位后问答对即刻退出检索（行保留库内可追溯）。"""
+    embedder = StubEmbedder()
+    ids = _dept_ids(session)
+    qa = _add_qa(session, ids["service"], _admin_id(session), "软删问题文本", "软删答案", embedder)
+    qa.is_active = False  # 模拟 DELETE 端点软删效果：仅动 is_active，status 不变
+    session.flush()
+    assert qa.status == "enabled"  # 前提：本用例只验证 is_active 一道闸
+
+    service_view = [ids["service"], ids["all"]]
+    assert match_qa(session, embedder.embed(["软删问题文本"])[0], service_view, 0.85) is None
+
+
 # ---------------------------------------------------------------------------
 # ④ 重排折叠：近重复折叠（RET-05/F-1003）+ top_n 截断 + 字段读回
 # ---------------------------------------------------------------------------
