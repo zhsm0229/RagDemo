@@ -1,8 +1,8 @@
-# RagDemo 接口文档（W1 - W3）
+# RagDemo 接口文档（W1 - W4）
 
 > 依据 `docs/standards.md` §3（API 接口规范）编写，随代码演进（§19.1 文档随代码）。
-> 覆盖 `app/api/` 当前全部路由：auth 4 个、documents 4 个、chat 1 个、conversations 4 个、messages（feedback）1 个、admin 管理端 20 个，共 34 个端点。
-> 最后更新：W3 收口（Task 14）。
+> 覆盖 `app/api/` 当前全部路由：auth 4 个、documents 4 个、chat 1 个、conversations 4 个、messages（feedback）1 个、admin 管理端 21 个，共 35 个端点。
+> 最后更新：W4（Task 5 追加评测阈值扫描端点）。
 
 ## 1. 通用约定
 
@@ -58,7 +58,7 @@ POST SSE 须用 fetch + ReadableStream 消费（无 EventSource 自动重连）�
 | 3001 | 409 | 上传文件与库内已有文档完全重复。**一码双文案**：同步查重命中（F-1001）带已有文档 ID——"文件与已有文档完全重复（已有文档 ID N），如需更新请上传新版本"；并发撞唯一索引（DOC-06）为通用文案——"文件与已有文档重复，请勿重复上传" | POST /api/documents |
 | 3002 | 429 | 单用户每日提问次数已达上限（问答端点开流前拒绝） | POST /api/chat/stream |
 | 3003 | 404 | 会话/消息不存在或无权访问（归属校验 IDOR 防线，§21.8；不区分"不存在"与"无权"）。W3 管理端寻址失败同码：提问记录不存在 / 点踩记录不存在 / 评测任务不存在 | chat / conversations / feedback / admin 治理与评测端点 |
-| 3004 | 422 | 评测任务状态冲突：仅 status=done 收口的跑分可人工录分（running 时后台正逐题写 detail，failed 明细不完整） | POST /api/admin/eval-runs/{id}/judgments |
+| 3004 | 422 | 评测任务状态冲突：仅 status=done 收口的跑分可人工录分 / 阈值扫描（running 时后台正逐题写 detail，failed 明细不完整；扫描另有"无可重放题目"分支，见 4.2.8） | POST /api/admin/eval-runs/{id}/judgments、POST /api/admin/eval-runs/{id}/threshold-scan |
 | 5000 | 500 | 兜底系统错误（响应体只给通用提示"系统繁忙，请稍后重试"，堆栈进日志） | 全部端点 |
 | 5001 | —（SSE） | 生成服务暂时不可用（仅经 SSE `error` 事件下发，`retryable=true`，话术对外脱敏） | POST /api/chat/stream |
 
@@ -319,6 +319,15 @@ W3 全部 20 个端点均为 **AdminUser 门**（依赖链：登录 → 首登�
 |----|------|
 | 成功响应 | `200`，`data: {config, status, totals, byDept, byQtype}`：`totals: {total, correct, accuracy, pendingCount}`（从 detail 明细聚合而非直读列，与录分口径自洽）；`byDept: [{deptCode, total, accuracy}]`（按题面部门，字典序）；`byQtype: [{qtype, total, accuracy}]`（字典序）；组内 accuracy = 组内加权 correct / 组内 total。running / failed 也可出报告（部分明细 + 真实状态，不做状态闸） |
 | 错误分支 | `404/3003` 任务不存在 |
+
+#### 4.2.8 POST /api/admin/eval-runs/{id}/threshold-scan — 阈值扫描向导（F-1012 简化版）
+
+| 项 | 说明 |
+|----|------|
+| 请求体 | 无。对该 run 已收口的 detail 快照**离线重放**（不调 LLM、不触检索、不改线上阈值），纯内存毫秒级，同步返回（非后台任务） |
+| 重放口径 | 仅重放明细中非 error 且最终判定非 pending（人工 judgment 优先否则 autoJudgment，同 report 口径）的题：refuse 题（citations 为空、无 doc 分）每档都判"拒答"；rag 题取 citations 中 doc 块最大 rerank 分对照档位，score < 阈值判"拒答"（与线上 refuse 分支同序）；qa 题不参与拒答曲线（scope.qaTotal 计数注明），仅参与 qa 曲线——refType=qa 的余弦分 ≥ 阈值即命中（与 match_qa 同序）。拒答档位 0.40-0.70 步长 0.05（7 档）、qa 档位 0.75-0.95 步长 0.05（5 档）。逐档 accuracy 折算：拒答期望题（`[拒答]`/cross_reject）判"拒答"=1、判"回答"=0；非拒答题判"拒答"=0、判"回答"=final_judgment 折算（人工优先，correct 1 / partial 0.5 / wrong 0） |
+| 成功响应 | `200`，`data: {refuseCurve, qaCurve, recommended, scannedAt, scope}`。`refuseCurve: [{threshold, accuracy, refuseRate}]`×7（分母 = refuse/rag 参与题数）；`qaCurve: [{threshold, hitRate}]`×5——**仅 qa 题档位敏感度**：detail 快照未存 rag 题曾见的 qa 匹配分，不含"降档会把 rag 题误引入 qa 通道"的反证数据，局限在 `scope.note` 注明；`recommended: {refuseThreshold, qaThreshold}`——accuracy（qa 侧为 hitRate）最高的档、**并列取更低阈值**（同等得分下更倾向回答/更宽容），该侧无参与者为 null；`scannedAt` ISO 时刻；`scope: {refuseTotal, qaTotal, pendingSkipped, errorSkipped, note}` 分区计数与口径局限说明。结果同时存入该 run 的 `detail.thresholdScan`（F-1012 可追溯，重复扫描覆盖），审计 `eval.threshold_scan {runId}` 与写入同事务 |
+| 错误分支 | `404/3003` 任务不存在；`422/3004` 非 done 状态（message"评测任务未完成，暂不能扫描阈值"）、或明细全部待人工评判/执行失败（message 指名"无可重放题目"） |
 
 ### 4.3 提问记录与 badcase 治理（M7，/api/admin/messages、/api/admin/badcases）
 

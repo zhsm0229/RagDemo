@@ -1,5 +1,6 @@
 r"""管理端评测路由（薄控制器）：题库 Excel 导入（F-601）+ 模板下载 + 跑分（F-602）
-+ 人工评判录分（F-602/F-603 评判提交）+ 分组报告（F-603）。
++ 人工评判录分（F-602/F-603 评判提交）+ 分组报告（F-603）+ 阈值扫描向导（F-1012
+简化版）。
 
 业务全部委托 services 层：导入走 eval_service（XlsxBatchError 统一转 422/1003，错误
 行列表直接放 data（standards §21.9），行号是 xlsx_io 携带的 Excel 物理行号；文件级
@@ -25,7 +26,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import AdminUser, DbSession
 from app.core.errors import ERR_NOT_FOUND, ERR_PARAM_INVALID, ApiError
 from app.db.models import Department, EvalRun
-from app.services import eval_engine, eval_report, eval_service
+from app.services import eval_engine, eval_report, eval_scan, eval_service
 from app.services.eval_service import RUN_NOT_FOUND_MSG
 from app.services.xlsx_io import XlsxBatchError
 
@@ -272,3 +273,17 @@ def get_eval_report(run_id: int, user: AdminUser, db: DbSession) -> dict:
     if run is None:
         raise ApiError(ERR_NOT_FOUND, RUN_NOT_FOUND_MSG, 404)
     return {"code": 0, "message": "ok", "data": eval_report.build_report(db, run)}
+
+
+@runs_router.post("/{run_id}/threshold-scan")
+def scan_eval_thresholds(run_id: int, user: AdminUser, db: DbSession) -> dict:
+    """阈值扫描向导（F-1012 简化版）：对 done 跑分的 detail 快照离线重放各阈值档
+    的命中/拒答，同步返回曲线+推荐（纯内存毫秒级，非后台任务），并存入
+    detail.thresholdScan 可追溯；重放口径/推荐规则见 eval_scan 模块 docstring。
+    404/3003 不存在；422/3004 非 done 或无可重放题目；审计 eval.threshold_scan。
+    """
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": eval_scan.run_threshold_scan(db, run_id, user.id),
+    }
