@@ -118,6 +118,8 @@ def _answer_pair(question: Any) -> Lateral:
         .where(
             answer.conversation_id == question.conversation_id,
             answer.role == "assistant",
+            # 防御性：评测现走独立会话，防未来评测复用真实会话时评测回答错配进运营配对
+            answer.is_eval.is_(False),
             answer.id > question.id,
         )
         .order_by(answer.id.asc())

@@ -13,7 +13,7 @@ import datetime as dt
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from app.api.deps import AdminUser, DbSession
 from app.core.errors import ERR_NOT_FOUND, ApiError
@@ -137,13 +137,43 @@ def get_message_detail(message_id: int, user: AdminUser, db: DbSession) -> dict:
     return {"code": 0, "message": "ok", "data": _detail_payload(detail)}
 
 
+_NOTE_MIN = 1  # §21.5：处理理由 strip 后 1-500 字（与 W2 点踩备注 comment 同一口径）
+_NOTE_MAX = 500
+
+
+class BadcaseFieldError(ValueError):
+    """note 跨字段校验失败：携带 field 供 422 处理器映射字段名（同 feedback.py 的
+    CHAT-09 机制：model_validator 的 loc 为空，字段名经 ctx.error.field 带出）。"""
+
+    def __init__(self, field: str, message: str) -> None:
+        super().__init__(message)
+        self.field = field
+
+
 class BadcasePatchRequest(BaseModel):
     """PATCH /api/admin/badcases/{message_id} 请求体：处置只收两个 admin 终态
     （'待处理' 仅由 W2 点踩入口产生，不提供重开回退；枚举外 422 字段级指名
-    badcaseStatus）；note 为 admin 处理备注，只入审计不入 messages（W3 计划钉死）。"""
+    badcaseStatus）；note 只入审计不入 messages，规则随冻结基线 ADM-03（规格
+    优先于计划，评审修复轮 1 裁决）：'已忽略' 必填理由、'已修语料' 可选，给了则
+    strip 后 1-500。"""
 
     badcaseStatus: Literal["已修语料", "已忽略"]
     note: str | None = None
+
+    @model_validator(mode="after")
+    def _normalize(self) -> "BadcasePatchRequest":
+        """'已忽略' → note strip 后 1-500 必填（ADM-03：忽略必填理由，全空白等同
+        未填）；'已修语料' → note 可选，给了同样校验 1-500；strip 后回写（落审计
+        的是整洁文本）。"""
+        if self.note is None:
+            if self.badcaseStatus == "已忽略":
+                raise BadcaseFieldError("note", "忽略必须填写处理理由")
+            return self
+        note = self.note.strip()
+        if not _NOTE_MIN <= len(note) <= _NOTE_MAX:
+            raise BadcaseFieldError("note", f"处理理由长度须在 {_NOTE_MIN}-{_NOTE_MAX} 字之间")
+        self.note = note
+        return self
 
 
 def _badcase_payload(record: BadcaseRecord) -> dict:

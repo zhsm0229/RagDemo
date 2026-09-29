@@ -6,7 +6,8 @@ r"""管理端 badcase 治理 API 测试（Task 9，F-702，brief ①-④ + W3 �
 API 缺省不过滤）；questionPreview 恰截 50 字；DTO 键集合全等、列表
 {items,total,page,pageSize}（§3.5）；PATCH 仅 down 且非评测消息可寻址（不存在/
 点赞/评测点踩 → 404/3003 同文案），处置枚举外 → 422/1003 字段级指名
-badcaseStatus；note 只入审计不入 messages（W3 计划钉死），审计
+badcaseStatus；note 只入审计不入 messages，规则随冻结基线 ADM-03（规格优先于
+计划）：'已忽略' 必填理由、'已修语料' 可选，给了则 strip 后 1-500；审计
 action='badcase.update'、detail={messageId,from,to,note} 逐字段读回；与 Task 1
 裁决联动（API 级端到端）：admin 置'已忽略'后用户再 down → 状态保持'已忽略'但
 category/comment 更新并在队列可见。member 403/2004、未登录 401/2003（§5.5）。
@@ -264,14 +265,15 @@ def test_list_down_queue_filters_uniqueness_and_fields(client, session) -> None:
     assert _ids(client, {"deptId": d.bob.dept_id, "badcaseStatus": "待处理"}) == [d.b2.id]
 
 
-# ---------- ② PATCH 处置：状态落库读回 + 审计含 note + 队列随迁；note 可选 ----------
+# ---------- ② PATCH 处置：状态落库读回 + 审计含 note + 队列随迁；忽略必填理由 ----------
 
 
 def test_patch_updates_status_audit_note_readback(client, session) -> None:
     """② PATCH '已修语料'+note：响应 data 读回；messages 行 badcase_status 迁移且
-    反馈三列不动（note 只入审计不入 messages——W3 计划钉死）；审计 action/
-    object/detail {messageId,from,to,note} 逐字段读回；队列筛选随状态迁移。
-    note 缺省 PATCH → 审计 note=null（可选契约）。"""
+    反馈三列不动（note 只入审计不入 messages）；审计 action/object/detail
+    {messageId,from,to,note} 逐字段读回；队列筛选随状态迁移。'已忽略' 无 note →
+    422/1003 字段级指名 note（ADM-03 冻结基线：忽略必填理由，规格优先于计划），
+    带 note → 200 且审计含 note。"""
     d = _seed_dataset(session)
     assert login(client, "admin_b9", "right-one").status_code == 200
 
@@ -312,8 +314,21 @@ def test_patch_updates_status_audit_note_readback(client, session) -> None:
     assert _ids(client, {"badcaseStatus": "已修语料"}) == [d.b3.id, d.b1.id]
 
     ignore = client.patch(f"/api/admin/badcases/{d.b2.id}", json={"badcaseStatus": "已忽略"})
-    assert ignore.status_code == 200
-    assert ignore.json()["data"] == {"messageId": d.b2.id, "badcaseStatus": "已忽略"}
+    assert ignore.status_code == 422  # ADM-03：忽略必填理由（评审修复轮 1 裁决）
+    ignore_body = ignore.json()
+    assert ignore_body["code"] == ERR_PARAM_INVALID
+    assert {entry["field"] for entry in ignore_body["data"]} == {"note"}
+    session.expire_all()
+    row_b2 = session.scalars(select(Message).where(Message.id == d.b2.id)).one()
+    assert row_b2.badcase_status == "待处理"  # 校验失败零写入
+    assert badcase_audits(session) == audits  # 审计仍只有已修语料一条
+
+    ignored = client.patch(
+        f"/api/admin/badcases/{d.b2.id}",
+        json={"badcaseStatus": "已忽略", "note": "产品已知问题，下版本修复"},
+    )
+    assert ignored.status_code == 200
+    assert ignored.json()["data"] == {"messageId": d.b2.id, "badcaseStatus": "已忽略"}
     session.expire_all()
     audits = badcase_audits(session)
     assert len(audits) == 2
@@ -321,7 +336,53 @@ def test_patch_updates_status_audit_note_readback(client, session) -> None:
         "messageId": d.b2.id,
         "from": "待处理",
         "to": "已忽略",
+        "note": "产品已知问题，下版本修复",
+    }
+
+
+# ---------- ②-b note 边界与可选分支：已忽略必填 1-500、已修语料可选 ≤500 ----------
+
+
+def test_patch_note_boundaries_ignore_requires_and_fixed_optional(client, session) -> None:
+    """②-b ADM-03 分支全覆盖：'已忽略' + 超 500 字 / 全空白（strip 后空）note →
+    422/1003 指名 note；'已修语料' + 超 500 字 note → 422（给了也 ≤500）；无 note →
+    200 且审计 note=null（可选）；恰 500 字 note → 200 且审计原文读回（§21.5 边界）。"""
+    d = _seed_dataset(session)
+    assert login(client, "admin_b9", "right-one").status_code == 200
+
+    for payload in (
+        {"badcaseStatus": "已忽略", "note": "边" * 501},  # 超长
+        {"badcaseStatus": "已忽略", "note": "  \n\t "},  # strip 后空：等同未填理由
+        {"badcaseStatus": "已修语料", "note": "边" * 501},  # 可选但给了须 ≤500
+    ):
+        resp = client.patch(f"/api/admin/badcases/{d.b1.id}", json=payload)
+        assert resp.status_code == 422, payload
+        body = resp.json()
+        assert body["code"] == ERR_PARAM_INVALID
+        assert {entry["field"] for entry in body["data"]} == {"note"}
+    assert badcase_audits(session) == []  # 校验失败零审计
+
+    optional = client.patch(f"/api/admin/badcases/{d.b1.id}", json={"badcaseStatus": "已修语料"})
+    assert optional.status_code == 200
+    boundary = client.patch(
+        f"/api/admin/badcases/{d.b2.id}", json={"badcaseStatus": "已修语料", "note": "边" * 500}
+    )
+    assert boundary.status_code == 200
+
+    session.expire_all()
+    audits = badcase_audits(session)
+    assert len(audits) == 2
+    assert audits[0].detail == {  # 无 note：'已修语料' 下可选，审计 note=null
+        "messageId": d.b1.id,
+        "from": "待处理",
+        "to": "已修语料",
         "note": None,
+    }
+    assert audits[1].detail == {
+        "messageId": d.b2.id,
+        "from": "待处理",
+        "to": "已修语料",
+        "note": "边" * 500,
     }
 
 
