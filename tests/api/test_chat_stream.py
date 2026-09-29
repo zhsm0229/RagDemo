@@ -199,6 +199,45 @@ def test_first_question_sets_conversation_title_truncated(chat_client, session) 
     assert (conversation.user_id, conversation.dept_id) == (user.id, user.dept_id)  # 归属提问者
 
 
+# ---------- ②b 复用会话首问改题：默认题补填 question[:20]，二轮不再改（W3 Task 1） ----------
+
+
+def test_reused_conversation_retitle_from_first_question(chat_client, session) -> None:
+    """复用 POST /api/conversations 所建会话（title=DB 默认"新会话"）发起首轮提问：
+    事务①补题 question[:20]（长问题截断），读回验证。"""
+    make_user(session, "reusetitle", "right-one", role="member")
+    assert login(chat_client, "reusetitle", "right-one").status_code == 200
+    created = chat_client.post("/api/conversations")
+    assert created.status_code == 200
+    conversation_id = created.json()["data"]["id"]
+    question = "请告诉我公司年假的具体天数规定和申请流程说明"
+
+    resp = post_chat(chat_client, question, conversation_id=conversation_id)
+
+    assert resp.status_code == 200
+    assert [name for name, _ in _parse_sse(resp.text)] == ["citations", "token", "done"]
+    conversation = _conversation_row(session)
+    assert conversation.id == conversation_id
+    assert conversation.title == question[:20]
+
+
+def test_second_question_does_not_retitle_reused_conversation(chat_client, session) -> None:
+    """二轮提问不再改题：首轮已把默认题补成首问前 20 字，二轮问题不同也不覆盖。"""
+    make_user(session, "reusetitle2", "right-one", role="member")
+    assert login(chat_client, "reusetitle2", "right-one").status_code == 200
+    created = chat_client.post("/api/conversations")
+    conversation_id = created.json()["data"]["id"]
+    first_question = "公司年假有多少天"
+
+    first = post_chat(chat_client, first_question, conversation_id=conversation_id)
+    assert first.status_code == 200
+    second = post_chat(chat_client, "那病假怎么算", conversation_id=conversation_id)
+
+    assert second.status_code == 200
+    conversation = _conversation_row(session)
+    assert conversation.title == first_question[:20]  # 保持首轮命题，未被二轮覆盖
+
+
 # ---------- ③ 拒答序：citations(items=[])→token(精确话术)→done(refused=true) ----------
 
 

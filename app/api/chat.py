@@ -2,7 +2,8 @@ r"""SSE 问答流端点（Task 9）：POST /api/chat/stream —— 薄控制器 
 
 时序（brief 钉死）：①参数校验（strip 后 1-2000，422/1003 字段级）→ ②每日限额
 （counter.try_consume 每请求恰一次，改写/生成等内部调用不计数；429/3002 未开流普通
-JSON）→ ③会话归属（conversationId 空新建，否则校验本人且 is_active，404/3003）→
+JSON）→ ③会话归属（conversationId 空新建，否则校验本人且 is_active，404/3003；
+复用会话若仍是默认题"新会话"/空以首问补题，二轮起已命题不再改，W3 Task 1）→
 ④事务①：user 消息 + assistant 占位行（content=''，nextval 发号）+ 首问标题 +
 updated_at，commit 拿双 id 再开流 → ⑤history（最近 3 轮严格轮次对）+ prepare_turn →
 ⑥StreamingResponse：事件编排与收尾落库在 services/chat_stream（citations 恒先于
@@ -65,19 +66,27 @@ def _format_stream(events: Iterator[tuple]) -> Iterator[str]:
         yield f"event: {name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+_DEFAULT_TITLES = ("新会话", "")  # DB server_default 与历史空标题：复用会话首问补题的触发值
+
+
 def _resolve_conversation(
     db: Session, user: User, conversation_id: int | None, question: str
 ) -> Conversation:
     """conversationId 空 → 新建会话（首问标题=question[:20]）；否则校验归属本人且
     is_active（共享 services.chat.resolve_owned_conversation，Task 10 会话管理端点
     同用同语义）：404/3003 不区分"不存在"与"无权"，不给探测空间，IDOR §21.8。
-    部门过滤豁免说明：个人会话仅属一人，user_id 归属校验严格强于 dept 过滤。"""
+    复用会话若仍是默认题（"新会话"/空）以首问补题（W3 Task 1 改题语义）：ORM 变更
+    随事务①一并提交，二轮起标题已非默认值不再改题。部门过滤豁免说明：个人会话仅属
+    一人，user_id 归属校验严格强于 dept 过滤。"""
     if conversation_id is None:
         conversation = Conversation(user_id=user.id, dept_id=user.dept_id, title=question[:20])
         db.add(conversation)
         db.flush()
         return conversation
-    return resolve_owned_conversation(db, user, conversation_id)
+    conversation = resolve_owned_conversation(db, user, conversation_id)
+    if conversation.title in _DEFAULT_TITLES:
+        conversation.title = question[:20]  # 首问补题：随 _persist_placeholder 的事务①提交
+    return conversation
 
 
 def _persist_placeholder(
