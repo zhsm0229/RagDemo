@@ -10,8 +10,6 @@ JSON 解析/形状不符、维度或覆盖不符）统一抛 UpstreamError(broke
 httpx.Client 默认传输）；模块不加全局 client，方法内 with 短连接，单机内网延迟可接受。
 """
 
-import json
-
 import httpx
 
 from app.core.llm import EMBED_DIM, UpstreamError, sigmoid
@@ -46,10 +44,14 @@ def _post_with_retry(
 
 
 def _parse_json(response: httpx.Response, kind: str) -> object:
-    """响应体解析为 JSON；解析失败归 UpstreamError（不裸抛 json 异常）。"""
+    """响应体解析为 JSON；解析失败归 UpstreamError（不裸抛 json 异常）。
+
+    异常族取 ValueError 而非仅 json.JSONDecodeError：200 + 非 UTF-8 体在
+    httpx 文本解码层抛 UnicodeDecodeError（ValueError 族），同样必须收口。
+    """
     try:
         return response.json()
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:  # 含 JSONDecodeError 与 UnicodeDecodeError（同族收口）
         raise UpstreamError(f"tei {kind} 响应不是合法 JSON: {exc}") from exc
 
 
@@ -113,15 +115,13 @@ class TeiReranker:
             if not isinstance(item, dict):
                 raise UpstreamError("tei rerank 结果项不是对象")
             index, score = item.get("index"), item.get("score")
-            if (
-                not isinstance(index, int)
-                or not 0 <= index < len(docs)
-                or scores[index] is not None
-            ):
+            if type(index) is not int or not 0 <= index < len(docs) or scores[index] is not None:
+                # type is int 显式排除 bool 子类（Task 3 评审收口）：True/False 不是合法 index
                 raise UpstreamError("tei rerank index 越界或重复（fail-closed）")
-            if not isinstance(score, (int, float)):
+            if isinstance(score, (int, float)) and not isinstance(score, bool):
+                scores[index] = sigmoid(float(score))
+            else:
                 raise UpstreamError("tei rerank score 不是数值")
-            scores[index] = sigmoid(float(score))
         filled = [score for score in scores if score is not None]
         if len(filled) != len(docs):
             raise UpstreamError("tei rerank 结果未覆盖全部输入（fail-closed）")

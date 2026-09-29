@@ -224,6 +224,36 @@ def test_rerank_results_missing_coverage_raises_upstream_error() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Task 3 评审收口：异常族放宽为 ValueError（200 + 非 UTF-8 体抛 UnicodeDecodeError
+# 裸逃）；index/score 校验显式排除 bool（bool 是 int 子类但不是合法 index/分数）
+# ---------------------------------------------------------------------------
+
+
+def test_embed_non_utf8_body_raises_upstream_error_not_raw_decode_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"\xff\xfe<not-utf-8>")  # 200 + 非 UTF-8 体
+
+    with pytest.raises(UpstreamError, match="JSON"):
+        TeiEmbedder(BASE_URL, transport=httpx.MockTransport(handler)).embed(["文本"])
+
+
+def test_rerank_bool_index_rejected_fail_closed() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"results": [{"index": True, "score": 1.0}]})
+
+    with pytest.raises(UpstreamError, match="index"):
+        TeiReranker(BASE_URL, transport=httpx.MockTransport(handler)).rerank("查询", ["甲", "乙"])
+
+
+def test_rerank_bool_score_rejected_fail_closed() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"results": [{"index": 0, "score": True}]})
+
+    with pytest.raises(UpstreamError, match="score 不是数值"):
+        TeiReranker(BASE_URL, transport=httpx.MockTransport(handler)).rerank("查询", ["甲"])
+
+
+# ---------------------------------------------------------------------------
 # 接口兼容：TeiEmbedder/TeiReranker 与 Embedder/Reranker Protocol 结构化兼容；
 # 构造器新参 transport 置于参数表最后，既有 base_url/model/timeout_s 调用不受影响
 # ---------------------------------------------------------------------------
