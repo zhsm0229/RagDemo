@@ -6,12 +6,15 @@ JSON）→ ③会话归属（conversationId 空新建，否则校验本人且 is
 ④事务①：user 消息 + assistant 占位行（content=''，nextval 发号）+ 首问标题 +
 updated_at，commit 拿双 id 再开流 → ⑤history（最近 3 轮严格轮次对）+ prepare_turn →
 ⑥StreamingResponse：事件编排与收尾落库在 services/chat_stream（citations 恒先于
-token；UpstreamError → mark_interrupted → error 事件，CHAT-12 不重复落库），本模块
-只做 SSE 线格式化（`event: {name}\ndata: {json}\n\n`，presentation 关切）。
+token；流中断裂 → mark_interrupted → error 事件，CHAT-12 不重复落库），本模块只做
+SSE 线格式化（`event: {name}\ndata: {json}\n\n`，presentation 关切）。
 
 连接红线：SSE 生成器自管短会话，绝不复用请求级会话横跨整个流（连接占用 60s 红线）；
-请求阶段会话 commit 后连接即还池，流期间不占库连接。测试经 monkeypatch 把
-services.chat_stream.SessionLocal 指向测试连接（tests/api/conftest.py chat_client）。
+请求阶段在构造 StreamingResponse 前对占位事务与 history/prepare 的读事务各 commit
+一次（事务①提交、prepare 后再提交终结 autobegin 的读事务），连接即还池——在途 SSE
+流期间请求级会话不占池中连接，依赖 teardown 在响应发完后才执行，不能依赖它释放。
+测试经 monkeypatch 把 services.chat_stream.SessionLocal 指向测试连接
+（tests/api/conftest.py chat_client），使生成器短会话与用例读回同处测试事务。
 """
 
 import json
@@ -27,9 +30,10 @@ from sqlalchemy.orm import Session
 from app.api.deps import DbSession, ReadyUser
 from app.core.clock import get_clock
 from app.core.errors import ERR_DAILY_LIMITED, ERR_INTERNAL, ERR_NOT_FOUND, ApiError
+from app.core.llm import UpstreamError
 from app.db.models import Conversation, Department, Message, User
 from app.services.chat import ChatDeps, prepare_turn
-from app.services.chat_stream import event_stream
+from app.services.chat_stream import event_stream, interrupt_turn
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -65,7 +69,8 @@ def _resolve_conversation(
     db: Session, user: User, conversation_id: int | None, question: str
 ) -> Conversation:
     """conversationId 空 → 新建会话（首问标题=question[:20]）；否则校验归属本人且
-    is_active（404/3003：不区分"不存在"与"无权"，不给探测空间，IDOR §21.8）。"""
+    is_active（404/3003：不区分"不存在"与"无权"，不给探测空间，IDOR §21.8）。
+    部门过滤豁免说明：个人会话仅属一人，user_id 归属校验严格强于 dept 过滤。"""
     if conversation_id is None:
         conversation = Conversation(user_id=user.id, dept_id=user.dept_id, title=question[:20])
         db.add(conversation)
@@ -110,7 +115,8 @@ def _load_history(
 
     id < current_user_msg_id 排除本轮 user 消息（prepare 的 question 另传，不得重复进
     history）；is_active 过滤中断占位行；同事务 now() 同刻以 id 兜底排序；奇数条（上轮
-    断流留下悬空 user）丢弃最新一条，保证严格 (user, assistant) 轮次对。
+    断流留下悬空 user）丢弃最新一条，保证严格 (user, assistant) 轮次对。部门过滤豁免
+    说明：会话归属已在上游 _resolve_conversation 校验，本查询随之继承本人边界。
     """
     rows = db.execute(
         select(Message.role, Message.content)
@@ -146,7 +152,12 @@ def chat_stream(
     conversation = _resolve_conversation(db, user, body.conversationId, body.question)
     user_msg_id, assistant_msg_id = _persist_placeholder(db, conversation, user, body.question)
     history = _load_history(db, conversation.id, user_msg_id)
-    plan = prepare_turn(db, deps, user.dept_id, _all_dept_id(db), body.question, history)
+    try:
+        plan = prepare_turn(db, deps, user.dept_id, _all_dept_id(db), body.question, history)
+    except UpstreamError:
+        interrupt_turn(assistant_msg_id)  # CHAT-12：事务①已提交，不留 is_active=true 幽灵占位
+        raise  # 开流前失败：交全局 500 兜底（话术脱敏不变），事务随依赖 teardown 回滚
+    db.commit()  # 终结 history/prepare 的 autobegin 读事务：连接还池，流期间不占连接
     return StreamingResponse(
         _format_stream(event_stream(deps, plan, assistant_msg_id, perf_counter())),
         media_type="text/event-stream",

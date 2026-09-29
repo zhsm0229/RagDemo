@@ -16,7 +16,12 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.errors import ERR_DAILY_LIMITED, ERR_NOT_FOUND, ERR_PARAM_INVALID
+from app.core.errors import (
+    ERR_DAILY_LIMITED,
+    ERR_INTERNAL,
+    ERR_NOT_FOUND,
+    ERR_PARAM_INVALID,
+)
 from app.core.llm import DEFAULT_CHAT_CHUNKS, StubEmbedder, StubLLMProvider, StubReranker, sigmoid
 from app.db.models import Chunk, Conversation, Department, Document, Message, User
 from app.main import app
@@ -266,6 +271,32 @@ def test_interrupted_stream_marks_placeholder_inactive_and_retry_creates_new_pai
     assert (rows[1].content, rows[1].is_active) == ("", False)  # 旧占位保持失败态
     assert rows[2].content == "那病假呢"  # 重试产生新 user 消息
     assert rows[3].is_active is True and rows[3].content != ""  # 新 assistant 正常收尾
+
+
+# ---------- ④b prepare 阶段上游故障：500 兜底且不留幽灵占位行（CHAT-12） ----------
+
+
+def test_prepare_upstream_failure_marks_placeholder_interrupted(chat_client, session) -> None:
+    """prepare 阶段 embed 故障（事务①已提交）：500 兜底响应，assistant 占位行读回
+    is_active=false——不留幽灵行混入后续 history 改写上下文；user 行不受牵连。"""
+    make_user(session, "ghostuser", "right-one", role="member")
+    assert login(chat_client, "ghostuser", "right-one").status_code == 200
+    app.state.chat_deps.embedder = StubEmbedder(fail_times=1)
+
+    resp = post_chat(chat_client, QUESTION)  # 新会话无历史：改写短路，embed 首调即抛
+
+    assert resp.status_code == 500
+    body = resp.json()
+    assert body["code"] == ERR_INTERNAL
+    assert body["message"] == "系统繁忙，请稍后重试"  # 对外脱敏，不透传上游细节
+    (user_row, placeholder) = _messages(session, _conversation_row(session).id)
+    assert (user_row.role, user_row.is_active) == ("user", True)  # 仅中断 assistant 占位
+    assert (placeholder.role, placeholder.content, placeholder.answer_type) == (
+        "assistant",
+        "",
+        None,
+    )
+    assert placeholder.is_active is False  # CHAT-12：中断标记失败，不重复落库
 
 
 # ---------- ⑤ 问题长度：2001 字 422/1003 字段级；全空白 422 ----------

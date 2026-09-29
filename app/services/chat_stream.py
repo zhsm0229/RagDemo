@@ -61,8 +61,9 @@ def _done_payload(
 
 
 def _error_payload(code: int, message: str) -> dict:
-    """error 事件 DTO（§3.6）：code 取共享错误码枚举，message 中文脱敏，可重试标记。"""
-    return {"code": code, "message": message, "retryable": True}
+    """error 事件 DTO（§3.6）：code 取共享错误码枚举，message 中文脱敏；重试语义跟着
+    错误码走——5001（上游故障）可重试，5000（兜底意外）不可重试，调用方不散落布尔。"""
+    return {"code": code, "message": message, "retryable": code == ERR_LLM_UNAVAILABLE}
 
 
 def _finalize(
@@ -92,9 +93,10 @@ def _finalize(
         db.commit()
 
 
-def _interrupt(assistant_msg_id: int) -> None:
-    """断流收尾（CHAT-12）：短会话 mark_interrupted（is_active=false）+ 独立提交；
-    只置失败标记，不重复落库，重试由前端重新 POST 产生新消息对。"""
+def interrupt_turn(assistant_msg_id: int) -> None:
+    """中断收尾（CHAT-12）：短会话 mark_interrupted（is_active=false）+ 独立提交；
+    只置失败标记，不重复落库，重试由前端重新 POST 产生新消息对。流中断裂与 prepare
+    阶段上游故障（api 层）共用本入口，保证两条路径的失败标记语义一致。"""
     with SessionLocal() as db:
         mark_interrupted(db, assistant_msg_id)
         db.commit()
@@ -186,12 +188,12 @@ def _stream_generate(
             pieces.append(piece)
             yield "token", {"messageId": assistant_msg_id, "content": piece}
     except UpstreamError:
-        _interrupt(assistant_msg_id)
+        interrupt_turn(assistant_msg_id)
         yield "error", _error_payload(ERR_LLM_UNAVAILABLE, _MSG_LLM_UNAVAILABLE)
         return
     except Exception:
         logger.exception("问答流式生成意外异常 assistant_message_id=%s", assistant_msg_id)
-        _interrupt(assistant_msg_id)
+        interrupt_turn(assistant_msg_id)
         yield "error", _error_payload(ERR_INTERNAL, _MSG_INTERRUPTED)
         return
     yield "done", _finish_generated(deps, plan, assistant_msg_id, "".join(pieces), start)

@@ -90,6 +90,8 @@ def chat_client(session, fake_clock, test_mode, monkeypatch):
     monkeypatch.setattr(chat_stream, "SessionLocal", factory)
     default_limiter.reset()
     app.dependency_overrides[get_db] = lambda: session
-    with TestClient(app) as http:
+    # raise_server_exceptions=False：prepare 阶段上游故障的 500 兜底响应可被用例断言
+    # （ServerErrorMiddleware 发送 500 后仍重抛异常，True 会让异常直接上抛测试进程）
+    with TestClient(app, raise_server_exceptions=False) as http:
         yield http
     app.dependency_overrides.pop(get_db, None)
