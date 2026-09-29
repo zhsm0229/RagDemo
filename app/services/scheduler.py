@@ -20,6 +20,9 @@ r"""定时任务（W1 Task 15）：到期文档下线清扫 + messages 月分区
   同生命周期）；pg 异常被 logger.exception 吞掉、聚合保留滚入下一轮。任务注册走
   add_hit_flush_job（时钟注入的 HitCounter 由装配方持有，build_scheduler 不造缓存实例）。
   调度时区统一 UTC（东八区口径为已登记遗留，同下）。
+- 提问记录保留清理（Task 12/F-803）：先归档后物理清理两段式（services/retention.py，
+  保留/冷却天数读 settings），独立会话每日一次，结果留日志；审计留痕在归档函数内部
+  完成（actor=seed 的 admin，同 W1 系统清扫先例）。
 """
 
 import logging
@@ -35,10 +38,11 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.clock import Clock, get_clock
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
 from app.db.base import SessionLocal
 from app.services.chat_cache import HitCounter
 from app.services.ingest import expire_due_documents
+from app.services.retention import purge_expired_messages, soft_archive_old_messages
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +50,7 @@ _PARENT_TABLE = "messages"
 _PARTITION_NAME = re.compile(r"messages_\d{4}_\d{2}\Z")
 _SWEEPS_JOB_ID = "run_due_sweeps"
 _PARTITIONS_JOB_ID = "ensure_month_partitions"
+_RETENTION_JOB_ID = "message_retention_cleanup"
 _HIT_FLUSH_JOB_ID = "flush_hit_counter"
 
 
@@ -100,11 +105,12 @@ def ensure_month_partitions(session: Session, n: int = 3) -> int:
 
 
 def build_scheduler(settings: Settings) -> BackgroundScheduler:
-    """装配 APScheduler（UTC）：每日 02:00 到期清扫、每月 1 日 02:30 分区补建。
+    """装配 APScheduler（UTC）：每日 02:00 到期清扫、每日 03:00 提问记录清理、
+    每月 1 日 02:30 分区补建。
 
-    分区排在清扫之后，同窗口内先收口到期再补建下月分区。settings.test_mode=True
-    只装配不自启；生产按单实例语义（多 worker 部署时各进程各持一份调度器，属
-    W4 部署关切）。
+    分区排在清扫之后，同窗口内先收口到期再补建下月分区；提问记录清理再后一小时
+    （03:00），避免与 02:00 清扫同窗口抢库。settings.test_mode=True 只装配不自启；
+    生产按单实例语义（多 worker 部署时各进程各持一份调度器，属 W4 部署关切）。
     """
     scheduler = BackgroundScheduler(timezone="UTC")
     scheduler.add_job(
@@ -119,6 +125,13 @@ def build_scheduler(settings: Settings) -> BackgroundScheduler:
         CronTrigger(day="1", hour="2", minute="30", timezone="UTC"),
         id=_PARTITIONS_JOB_ID,
         name="messages 月分区补建",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_retention_job,
+        CronTrigger(day="*", hour="3", minute="0", timezone="UTC"),
+        id=_RETENTION_JOB_ID,
+        name="提问记录两段式清理",
         replace_existing=True,
     )
     if not settings.test_mode:
@@ -175,3 +188,21 @@ def _run_partitions_job() -> None:
     """cron 任务体：独立会话执行月分区补建（失败由 DEFAULT 分区兜底，见迁移注释）。"""
     with SessionLocal() as session:
         ensure_month_partitions(session)
+
+
+def _run_retention_job() -> None:
+    """cron 任务体：独立会话执行提问记录两段式清理（先归档后物理清理），结果留日志。
+
+    保留/冷却天数从 settings 实时读取（改配置无需重装调度器）；F-803 要求清理任务
+    有日志与审计——审计由 soft_archive_old_messages 内部落 audit_logs，这里补运行日志。
+    """
+    settings = get_settings()
+    with SessionLocal() as session:
+        archived = soft_archive_old_messages(session, get_clock(), settings.message_retention_days)
+        purged = purge_expired_messages(
+            session,
+            get_clock(),
+            settings.message_retention_days,
+            settings.message_cleanup_cooldown_days,
+        )
+    logger.info("提问记录保留清理完成：归档 %d 条，物理清理 %d 条", archived, purged)
