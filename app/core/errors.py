@@ -61,14 +61,23 @@ def api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
 
 
 def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
-    """Pydantic 参数校验失败 → 422/1003，data 携带字段级错误（standards §21.9）。"""
-    fields = [
-        {
-            "field": ".".join(str(part) for part in err.get("loc", ()) if part != "body"),
-            "message": str(err.get("msg", "")),
-        }
-        for err in exc.errors()
-    ]
+    """Pydantic 参数校验失败 → 422/1003，data 携带字段级错误（standards §21.9）。
+
+    普通字段级错误 loc 原样映射（行为不变）；model_validator 的跨字段 value_error
+    loc 为空（仅 body 前缀），字段名由校验器抛出异常的 .field 属性经 ctx.error
+    带出（Task 11 反馈端点先例，CHAT-09）。msg 统一去掉 "Value error, " 前缀保
+    字段级中文。两类小改均向后兼容：无 .field 属性的错误按原 loc 逻辑映射。
+    """
+    fields = []
+    for err in exc.errors():
+        joined = ".".join(str(part) for part in err.get("loc", ()) if part != "body")
+        ctx_error = (err.get("ctx") or {}).get("error")
+        fields.append(
+            {
+                "field": joined or getattr(ctx_error, "field", ""),
+                "message": str(err.get("msg", "")).removeprefix("Value error, "),
+            }
+        )
     return JSONResponse(
         status_code=422, content=_envelope(ERR_PARAM_INVALID, "请求参数错误", fields)
     )
