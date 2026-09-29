@@ -1,0 +1,13 @@
+# 依赖与构建产物
+node_modules
+dist
+coverage
+
+# 本地环境与日志
+*.local
+*.log
+
+# 编辑器
+.idea
+.vscode/*
+!.vscode/extensions.json

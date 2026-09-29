@@ -1,0 +1,39 @@
+{
+  "name": "ragdemo-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit -p tsconfig.app.json && vite build",
+    "preview": "vite preview",
+    "type": "vue-tsc --noEmit -p tsconfig.app.json",
+    "lint": "npm run lint:eslint && npm run lint:prettier",
+    "lint:eslint": "eslint .",
+    "lint:prettier": "prettier --check .",
+    "lint:fix": "eslint --fix . && prettier --write .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "element-plus": "2.14.6",
+    "pinia": "3.0.4",
+    "vue": "3.5.43",
+    "vue-router": "4.6.4"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.43",
+    "@vitejs/plugin-vue": "6.0.9",
+    "@vue/eslint-config-prettier": "10.2.0",
+    "@vue/eslint-config-typescript": "14.9.0",
+    "@vue/test-utils": "2.5.1",
+    "eslint": "9.39.5",
+    "eslint-plugin-vue": "10.11.1",
+    "jsdom": "26.1.0",
+    "openapi-typescript": "7.13.0",
+    "prettier": "3.9.9",
+    "typescript": "5.9.3",
+    "vite": "7.3.6",
+    "vitest": "4.1.11",
+    "vue-tsc": "3.3.11"
+  }
+}
