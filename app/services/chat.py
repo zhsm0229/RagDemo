@@ -22,8 +22,9 @@ from sqlalchemy.orm import Session
 
 from app.core.assembly import PromptPack
 from app.core.config import Settings
+from app.core.errors import ERR_NOT_FOUND, ApiError
 from app.core.llm import Embedder, LLMProvider, Reranker
-from app.db.models import Message
+from app.db.models import Conversation, Message, User
 from app.rag.prompt import ContextSource, build_chat_messages, build_context_block
 from app.services.chat_cache import DailyCounter, ExactCache, HitCounter
 from app.services.retrieval import (
@@ -37,6 +38,7 @@ from app.services.retrieval import (
 from app.services.rewrite import rewrite_question
 
 _REWRITE_ROUNDS: int = 3  # 改写历史取最近 3 轮（prompt 层不截条数，截断归调用方约定）
+MSG_CONVERSATION_NOT_FOUND: str = "会话不存在或无权访问"  # 404/3003 对外文案（归属/软删共用）
 
 
 @dataclass
@@ -209,3 +211,16 @@ def mark_interrupted(db: Session, assistant_msg_id: int) -> None:
     """中断收尾（CHAT-12）：只置 is_active=false 标失败，不重复落库；flush 不 commit。"""
     db.execute(update(Message).where(Message.id == assistant_msg_id).values(is_active=False))
     db.flush()
+
+
+def resolve_owned_conversation(db: Session, user: User, conversation_id: int) -> Conversation:
+    """按 id 解析本人且 is_active 的会话，否则 404/3003（问答端点与会话管理端点共享）。
+
+    不区分"不存在"与"无权"，不给探测空间（IDOR 防线 §21.8）；部门过滤豁免说明：
+    个人会话仅属一人，user_id 归属校验严格强于 dept 过滤（api/chat.py 同注先例）。
+    Task 10 自 api/chat.py._resolve_conversation 提取共享，两处行为必须一致。
+    """
+    conversation = db.get(Conversation, conversation_id)
+    if conversation is None or conversation.user_id != user.id or not conversation.is_active:
+        raise ApiError(ERR_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND, 404)
+    return conversation

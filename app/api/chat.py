@@ -29,10 +29,10 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import DbSession, ReadyUser
 from app.core.clock import get_clock
-from app.core.errors import ERR_DAILY_LIMITED, ERR_INTERNAL, ERR_NOT_FOUND, ApiError
+from app.core.errors import ERR_DAILY_LIMITED, ERR_INTERNAL, ApiError
 from app.core.llm import UpstreamError
 from app.db.models import Conversation, Department, Message, User
-from app.services.chat import ChatDeps, prepare_turn
+from app.services.chat import ChatDeps, prepare_turn, resolve_owned_conversation
 from app.services.chat_stream import event_stream, interrupt_turn
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -69,17 +69,15 @@ def _resolve_conversation(
     db: Session, user: User, conversation_id: int | None, question: str
 ) -> Conversation:
     """conversationId 空 → 新建会话（首问标题=question[:20]）；否则校验归属本人且
-    is_active（404/3003：不区分"不存在"与"无权"，不给探测空间，IDOR §21.8）。
+    is_active（共享 services.chat.resolve_owned_conversation，Task 10 会话管理端点
+    同用同语义）：404/3003 不区分"不存在"与"无权"，不给探测空间，IDOR §21.8。
     部门过滤豁免说明：个人会话仅属一人，user_id 归属校验严格强于 dept 过滤。"""
     if conversation_id is None:
         conversation = Conversation(user_id=user.id, dept_id=user.dept_id, title=question[:20])
         db.add(conversation)
         db.flush()
         return conversation
-    conversation = db.get(Conversation, conversation_id)
-    if conversation is None or conversation.user_id != user.id or not conversation.is_active:
-        raise ApiError(ERR_NOT_FOUND, "会话不存在或无权访问", 404)
-    return conversation
+    return resolve_owned_conversation(db, user, conversation_id)
 
 
 def _persist_placeholder(
