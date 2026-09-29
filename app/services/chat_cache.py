@@ -1,0 +1,126 @@
+r"""问答进程内三件套（Task 7，Task 8 编排直接消费）：精确缓存 / 每日限额 / 召回计数聚合。
+
+- ExactCache（F-205/§17.5）：键 ``chat:{dept_id}:{question_normalized}`` →
+  (entry, expire_at)。仅进程内、精确匹配——语义缓存（相似度命中）属禁建清单
+  （standards §25.4）；过期惰性清除（get 时删，无后台回收线程）；拒答结果是否
+  入缓存由调用方（Task 8）裁决，本类不审查 entry 内容；get 返回浅拷贝，调用方
+  原地改写不污染缓存。多 worker 部署各进程各持一份、不做跨进程同步（W4 部署
+  关切，与 build_scheduler 单实例语义同口径）。
+- DailyCounter（每日提问限额）：{user_id: (当日, 已用次数)}，跨日以
+  clock.now().date() 比较（UTC 日期口径，北京时区为已登记遗留）；try_consume
+  满 limit 拒绝且不计数。
+- HitCounter（F-1011）：召回命中 chunk_id 进程内聚合；flush 一条 UPDATE
+  （executemany 参数绑定、单事务）原子累加 hit_count 并统一置 last_hit_at；
+  聚合仅在提交成功后清空，失败轮次滚入下一周期（scheduler.run_hit_flush
+  logger.exception 吞掉后自然重试）。
+"""
+
+import copy
+from datetime import date, datetime, timedelta
+
+from sqlalchemy import Integer, bindparam, update
+from sqlalchemy.orm import Session
+
+from app.core.clock import Clock
+from app.db.models import Chunk
+
+
+class ExactCache:
+    """进程内精确问答缓存：键 → (entry, 过期时刻)，TTL 到期惰性清除。"""
+
+    def __init__(self, clock: Clock, ttl_s: int) -> None:
+        self._clock = clock
+        self._ttl_s = ttl_s
+        self._entries: dict[str, tuple[dict, datetime]] = {}
+
+    def make_key(self, dept_id: int, question_normalized: str) -> str:
+        """缓存键（brief 规格）：部门进键，同问题不同部门绝不互串。"""
+        return f"chat:{dept_id}:{question_normalized}"
+
+    def get(self, key: str) -> dict | None:
+        """命中返回 entry 浅拷贝；过期返回 None 并惰性清除（无后台回收线程）。"""
+        found = self._entries.get(key)
+        if found is None:
+            return None
+        entry, expire_at = found
+        if self._clock.now() >= expire_at:  # 到期即失效（含恰等边界的秒级口径）
+            del self._entries[key]
+            return None
+        # 深拷贝出借：Task 8 会原地加工 citations，浅拷贝挡不住嵌套列表改写；
+        # 条目极小（≤10k 字回答 + ≤5 条引用），拷贝开销可忽略。
+        return copy.deepcopy(entry)
+
+    def put(self, key: str, entry: dict) -> None:
+        """写入缓存条目，过期时刻 = 注入时钟 now + ttl（内容裁决在调用方 Task 8）。"""
+        expire_at = self._clock.now() + timedelta(seconds=self._ttl_s)
+        self._entries[key] = (entry, expire_at)
+
+
+class DailyCounter:
+    """单用户每日提问限额：{user_id: (当日, 已用次数)}，跨日自动重置。"""
+
+    def __init__(self, clock: Clock) -> None:
+        self._clock = clock
+        self._usage: dict[int, tuple[date, int]] = {}
+
+    def try_consume(self, user_id: int, limit: int) -> bool:
+        """第 N 次消费（N ≤ limit）允许并计数；第 limit+1 次拒绝且不计数。
+
+        跨日重置以 clock.now().date() 与记录日比较（UTC 日期口径，已登记遗留）；
+        拒绝路径不写回——不会因连续拒绝把已用次数越推越满。
+        """
+        today = self._clock.now().date()
+        used_date, count = self._usage.get(user_id, (today, 0))
+        if used_date != today:
+            count = 0
+        if count >= limit:
+            return False
+        self._usage[user_id] = (today, count + 1)
+        return True
+
+
+class HitCounter:
+    """召回命中计数进程内聚合器：add 攒批，flush 一条 UPDATE 原子刷库。"""
+
+    def __init__(self, clock: Clock) -> None:
+        self._clock = clock
+        self._counts: dict[int, int] = {}
+
+    def add(self, chunk_ids: list[int]) -> None:
+        """累加本轮召回命中的 chunk（同 id 多次出现按出现次数累加）。"""
+        for chunk_id in chunk_ids:
+            self._counts[chunk_id] = self._counts.get(chunk_id, 0) + 1
+
+    def flush(self, db: Session) -> int:
+        """一条 UPDATE（executemany、参数绑定）原子累加 hit_count 并统一置 last_hit_at。
+
+        返回本次覆盖的去重 chunk 数；空聚合直接返回 0、不发 SQL。参数组按 id 升序
+        （断言与读回可复现）；now 取注入时钟（读库断言可精确钉值）。聚合仅在提交
+        成功后清空——execute/commit 失败原样上抛（吞异常是调度任务体
+        scheduler.run_hit_flush 的职责），计数保留滚入下一周期。
+        """
+        if not self._counts:
+            return 0
+        now = self._clock.now()
+        rows = [
+            {"chunk_id": chunk_id, "n": count, "now": now}
+            for chunk_id, count in sorted(self._counts.items())
+        ]
+        stmt = (
+            update(Chunk)
+            .where(Chunk.id == bindparam("chunk_id"))
+            # 参数名避开列名：UPDATE 语句里 bindparam 叫列名 "id" 是 SET 保留名
+            # （实测 CompileError），故以 chunk_id 命名。
+            .values(
+                hit_count=Chunk.hit_count + bindparam("n", type_=Integer),
+                last_hit_at=bindparam("now"),
+            )
+        )
+        # 走 Core 通道（会话当前连接/事务）而非 Session.execute：ORM 批量 UPDATE
+        # 按主键路径要求以映射键 "id" 供参（实测 InvalidRequestError bupq），与
+        # 上述保留名限制互相锁死；Core executemany 正是 brief 要的「一条 UPDATE
+        # 批量原子累加」，随 db.commit() 与置时同事务生效。
+        db.connection().execute(stmt, rows)
+        db.commit()  # flush 由调度独立会话调用、无外层提交者，原子性随本提交生效
+        self._counts.clear()
+        return len(rows)
