@@ -10,8 +10,8 @@ answer_type/model 取缓存条目原值）；refuse 逐字 REFUSAL_TEXT、不写
 拒答案频）；qa/rag 逐段下发，正常耗尽 finalize + 缓存 put（强制移交②：仅 qa/rag 且
 流正常结束，条目契约见 services/chat.py）→ done。UpstreamError 与意外异常均
 mark_interrupted（CHAT-12 只置 is_active=false 不重复落库）→ error 事件——响应头已发
-FastAPI 兜底不可达，只能经事件表达；意外异常 logger.exception 留堆栈（§16.4），
-error 文案对外脱敏不透传内部细节（§6.8）。
+FastAPI 兜底不可达，只能经事件表达；UpstreamError logger.warning、意外异常
+logger.exception 均留堆栈（§16.4），error 文案对外脱敏不透传内部细节（§6.8）。
 """
 
 import logging
@@ -188,6 +188,11 @@ def _stream_generate(
             pieces.append(piece)
             yield "token", {"messageId": assistant_msg_id, "content": piece}
     except UpstreamError:
+        # 上游故障也要留观测痕（§16.4）：不上抛（响应头已发只能经 error 事件表达），
+        # warning + 堆栈定位断流根因，与意外异常的 logger.exception 区分严重级。
+        logger.warning(
+            "流式生成中断（上游故障）assistant_message_id=%s", assistant_msg_id, exc_info=True
+        )
         interrupt_turn(assistant_msg_id)
         yield "error", _error_payload(ERR_LLM_UNAVAILABLE, _MSG_LLM_UNAVAILABLE)
         return
