@@ -11,7 +11,7 @@ import LoginView from '@/views/LoginView.vue'
 import ChangePasswordView from '@/views/ChangePasswordView.vue'
 import ChatView from '@/views/ChatView.vue'
 import DocumentsView from '@/views/DocumentsView.vue'
-import KbQaPairsView from '@/views/KbQaPairsView.vue'
+import QaPairsView from '@/views/QaPairsView.vue'
 import RetrievalTestView from '@/views/RetrievalTestView.vue'
 import UsersView from '@/views/UsersView.vue'
 import MessagesView from '@/views/MessagesView.vue'
@@ -40,7 +40,7 @@ const router = createRouter({
         {
           path: 'kb/qa-pairs',
           name: 'kb-qa-pairs',
-          component: KbQaPairsView,
+          component: QaPairsView,
           meta: { title: '知识库·问答对管理', requiresAdmin: true },
         },
         {
