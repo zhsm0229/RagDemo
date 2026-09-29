@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     generation_temperature: float = 0.2  # 与 prompts/manifest.json 同步版本化（§17.4）
     prompt_version: str = "v1"  # 提示词包版本（对应 prompts/ 头注释 # version）
     daily_question_limit: int = 200  # 单用户每日提问上限
-    qa_threshold: float = 0.85  # 问答准入阈值（rerank 最高分 ≥ 阈值才进入生成）
+    qa_threshold: float = 0.85  # 问答对准入阈值（embedding 余弦相似度 ≥ 此值才走问答对直答；不得与 rerank 分混用，§4.4）
     refuse_threshold: float = 0.55  # 拒答阈值；两套阈值不得混用（standards §4.4）
     cache_ttl_s: int = 300  # 问答结果缓存 TTL（秒）
     retriever_top_k: int = 20  # 向量检索候选数 top_k
