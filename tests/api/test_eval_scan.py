@@ -249,6 +249,72 @@ def test_推荐值并列档取更低阈值(client, session):
 
 
 # ---------------------------------------------------------------------------
+# ④-补 全拒答档不参与推荐（评审修复轮 1 复现钉）：refuseRate=1.0 的档凭严格
+# 最高 accuracy 胜出会把推荐推向"全部拒答"——恰是本功能要解决的串库场景
+# ---------------------------------------------------------------------------
+
+
+def test_全拒答档不参与推荐_串库场景复现(client, session):
+    """评审构造例：3 条拒答期望 refuse 题 + 1 条 cross_reject 漏判（doc 0.68）。
+    0.40-0.65 档 accuracy=0.75；0.70 档漏判题也被拒 → accuracy=1.0 严格最高、
+    refuseRate=1.0——守卫前推荐 0.70（全部拒答档），守卫后排除该档、0.40-0.65
+    并列 0.75 取更低 → 0.40。"""
+    admin_login(client, session)
+    items = [
+        _item(
+            qid,
+            qtype="cross_reject",
+            expected="[拒答]",
+            answerType="refuse",
+            answer="知识库中未找到相关内容",
+            autoJudgment="correct",
+        )
+        for qid in (21, 22, 23)
+    ] + [
+        _item(
+            24,
+            qtype="cross_reject",
+            expected="[拒答]",
+            answerType="rag",
+            citations=[_doc_citation(301, 0.68)],
+            autoJudgment="wrong",
+        )
+    ]
+    run_id = _make_run(session, items)
+
+    data = _scan(client, run_id).json()["data"]
+
+    top_tier = data["refuseCurve"][-1]  # 前置自证：0.70 档确为严格最高 accuracy
+    assert top_tier == {"threshold": 0.7, "accuracy": 1.0, "refuseRate": 1.0}
+    assert data["recommended"]["refuseThreshold"] != 0.7  # 全拒答档不得胜出
+    assert data["recommended"]["refuseThreshold"] == 0.4  # 可回答档并列取更低
+
+
+def test_全档全拒答时守卫不误伤_仍返回最低档(client, session):
+    """守卫边界：参与者全为 refuse 题（每档 refuseRate=1.0）——排除后无候选，
+    回退全档参与（"无可回答档"语义，模块 docstring 注明），accuracy 全档并列
+    1.0 取更低 → 0.40，不得返回 None 或空档崩溃。"""
+    admin_login(client, session)
+    items = [
+        _item(
+            qid,
+            qtype="cross_reject",
+            expected="[拒答]",
+            answerType="refuse",
+            answer="知识库中未找到相关内容",
+            autoJudgment="correct",
+        )
+        for qid in (31, 32)
+    ]
+    run_id = _make_run(session, items)
+
+    data = _scan(client, run_id).json()["data"]
+
+    assert all(entry["refuseRate"] == 1.0 for entry in data["refuseCurve"])
+    assert data["recommended"] == {"refuseThreshold": 0.4, "qaThreshold": None}
+
+
+# ---------------------------------------------------------------------------
 # ⑤ 结果存 detail.thresholdScan 读回 + 重复扫描覆盖旧结果
 # ---------------------------------------------------------------------------
 

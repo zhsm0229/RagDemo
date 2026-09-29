@@ -28,9 +28,13 @@ qa 曲线口径局限（scope.note 注明）：只统计 qa 题各档位仍命�
 rag 题曾见的 qa 匹配分，而 detail 快照只存最终 citations，rag 题的该分不在其中
 （快照天然边界）。需反证数据须在跑分引擎侧另存。
 
-推荐规则（钉死）：refuseThreshold = accuracy 最高的档，并列取更低阈值（同等
-准确度下更倾向回答、少拒）；qaThreshold 同规则作用于 hitRate（同等命中面下更
-宽容）。结果存 detail.thresholdScan 可追溯（重复扫描覆盖），审计
+推荐规则（钉死，评审修复轮 1 修订）：refuseThreshold = 可回答档（refuseRate
+< 1.0，排除"全员拒答"档）中 accuracy 最高者，并列取更低阈值（同等准确度下更
+倾向回答、少拒）——全拒答档可凭严格最高 accuracy 胜出把推荐推向"全部拒答"
+（如仅剩漏判串库题被抬阈值拒掉的档），恰是本功能要解决的场景，故排除；所有档
+均 refuseRate=1.0（无可回答档）时守卫不触发、全档参与（此时 accuracy 全档同值，
+并列取最低档）。qaThreshold 同规则作用于 hitRate，但 qa 曲线无拒答率概念、不设
+对称守卫。结果存 detail.thresholdScan 可追溯（重复扫描覆盖），审计
 eval.threshold_scan 与业务写入同事务（detail 读改写单 commit，先例
 submit_judgments）。
 """
@@ -84,7 +88,7 @@ def run_threshold_scan(db: Session, run_id: int, actor_user_id: int) -> dict:
         "refuseCurve": refuse_curve,
         "qaCurve": qa_curve,
         "recommended": {
-            "refuseThreshold": _recommend(refuse_curve, "accuracy"),
+            "refuseThreshold": _recommend(refuse_curve, "accuracy", exclude_full_refuse=True),
             "qaThreshold": _recommend(qa_curve, "hitRate"),
         },
         "scannedAt": get_clock().now().isoformat(),
@@ -187,10 +191,22 @@ def _qa_curve(items: list[dict]) -> list[dict]:
     ]
 
 
-def _recommend(curve: list[dict], metric: str) -> float | None:
+def _recommend(
+    curve: list[dict], metric: str, *, exclude_full_refuse: bool = False
+) -> float | None:
     """推荐档：metric 最高的档，并列取更低阈值（同等得分更倾向回答/更宽容）；
-    空曲线（该侧无参与者）→ None。档位升序遍历保证并列时首个即最低档。"""
+    空曲线（该侧无参与者）→ None。档位升序遍历保证并列时首个即最低档。
+
+    exclude_full_refuse（拒答侧守卫，评审修复轮 1）：refuseRate=1.0 的"全员拒
+    答"档不参与推荐——它可凭严格最高 accuracy 胜出把推荐推向全部拒答（如漏判
+    串库题恰在该档被拒）；仅当所有档均 1.0（无可回答档，排除后无候选）时回退
+    全档参与。qa 曲线无拒答率概念，不传此参即无守卫。"""
     if not curve:
         return None
-    best = max(entry[metric] for entry in curve)
-    return min(entry["threshold"] for entry in curve if entry[metric] == best)
+    candidates: list[dict] = curve
+    if exclude_full_refuse:
+        answerable = [entry for entry in curve if entry["refuseRate"] < 1.0]
+        if answerable:
+            candidates = answerable
+    best = max(entry[metric] for entry in candidates)
+    return min(entry["threshold"] for entry in candidates if entry[metric] == best)
