@@ -35,6 +35,8 @@ jobs:
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0（SHA pin）
+        with:
+          enable-cache: true # uv 缓存：与 test/security job 一致（W3 Task 1 收紧）
       - name: Locked dependency install (uv)
         run: uv sync --locked --extra dev
       - name: Ruff check
@@ -54,10 +56,14 @@ jobs:
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0（SHA pin）
+        with:
+          enable-cache: true # uv 缓存：与 test/security job 一致（W3 Task 1 收紧）
       - name: Locked dependency install + mypy
         run: |
           uv sync --locked --extra dev
-          uv pip install mypy # mypy 不在 dev extras（起步期宽松门未定版），叠加安装不动锁定依赖
+          # mypy 不在 dev extras（起步期宽松门未定版），叠加安装不动锁定依赖；
+          # 钉版（当前 2.3.1，W3 Task 1）：类型检查结果不随上游发版漂移。
+          uv pip install mypy==2.3.1
       - name: Mypy (loose)
         run: uv run --no-sync mypy --ignore-missing-imports app/rag app/services app/core
 
@@ -134,7 +140,8 @@ jobs:
           uv sync --locked --extra dev
           # pip-audit 不在 dev extras：叠加安装审计工具，项目依赖仍由 uv.lock 锁定；
           # uv venv 默认不含 pip 而 pip-audit 的环境审计依赖 pip，一并补装。
-          uv pip install pip pip-audit
+          # pip-audit 钉版（当前 2.10.1，W3 Task 1）：漏洞库解析行为不随上游发版漂移。
+          uv pip install pip pip-audit==2.10.1
       - name: pip-audit
         run: uv run --no-sync pip-audit --skip-editable # 审计全部已装依赖，跳过本仓库 editable 包自身
       - name: gitleaks
