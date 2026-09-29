@@ -5,6 +5,7 @@
  * - jwt 走 httpOnly Cookie，credentials: 'include' 同源携带；
  * - code !== 0 抛 ApiClientError(code, message, data)，默认 ElMessage.error 兜底，
  *   页面要内联展示错误（如登录页 §22.2）时传 silent: true 关掉；
+ * - body 传 FormData 时按 multipart 发送（文件上传），不设 Content-Type；
  * - SSE 与文件下载不走本封装（text/event-stream / 字节流无统一信封）。
  */
 import { ElMessage } from 'element-plus'
@@ -37,7 +38,7 @@ export class ApiClientError extends Error {
 
 export interface RequestOptions {
   method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
-  /** JSON 请求体；undefined 时不带 Content-Type 与 body */
+  /** JSON 或 FormData 请求体；undefined 时不带 Content-Type 与 body */
   body?: unknown
   signal?: AbortSignal
   /** true 时不做 ElMessage.error 兜底，由调用方内联展示 */
@@ -66,13 +67,16 @@ async function parseEnvelope(res: Response): Promise<ApiResponse<unknown> | null
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { method = 'GET', body, signal, silent = false } = options
 
+  // FormData（multipart 上传）不设 Content-Type：boundary 由浏览器生成，手工设置会缺 boundary
+  const isForm = body instanceof FormData
+
   let res: Response
   try {
     res = await fetch(`${API_PREFIX}${path}`, {
       method,
       credentials: 'include',
-      headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
+      headers: body !== undefined && !isForm ? { 'Content-Type': 'application/json' } : undefined,
+      body: body === undefined ? undefined : isForm ? body : JSON.stringify(body),
       signal,
     })
   } catch (error) {

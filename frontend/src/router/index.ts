@@ -10,7 +10,7 @@ import { useAuthStore } from '@/stores/auth'
 import LoginView from '@/views/LoginView.vue'
 import ChangePasswordView from '@/views/ChangePasswordView.vue'
 import ChatView from '@/views/ChatView.vue'
-import KbDocumentsView from '@/views/KbDocumentsView.vue'
+import DocumentsView from '@/views/DocumentsView.vue'
 import KbQaPairsView from '@/views/KbQaPairsView.vue'
 import RetrievalTestView from '@/views/RetrievalTestView.vue'
 import UsersView from '@/views/UsersView.vue'
@@ -34,7 +34,7 @@ const router = createRouter({
         {
           path: 'kb/documents',
           name: 'kb-documents',
-          component: KbDocumentsView,
+          component: DocumentsView,
           meta: { title: '知识库·文档管理', requiresAdmin: true },
         },
         {
