@@ -15,13 +15,21 @@ r"""定时任务（W1 Task 15）：到期文档下线清扫 + messages 月分区
   红线 §4.3「禁止 f-string 拼 SQL」字面达成；值为注入时钟 date 算术产物，非请求输入。
 - 调度任务一律用独立 SessionLocal 会话（调度线程无请求会话可依附）；
   settings.test_mode=True 时 build_scheduler 只装配不自启（测试进程不起后台线程）。
+- chat 召回计数 flush（Task 7/F-1011）：HitCounter 进程内聚合经 run_hit_flush
+  独立会话刷库，周期由调用方传（Task 8 装配传 settings.cache_ttl_s，与问答缓存
+  同生命周期）；pg 异常被 logger.exception 吞掉、聚合保留滚入下一轮。任务注册走
+  add_hit_flush_job（时钟注入的 HitCounter 由装配方持有，build_scheduler 不造缓存实例）。
+  调度时区统一 UTC（东八区口径为已登记遗留，同下）。
 """
 
+import logging
 import re
 from datetime import date
+from functools import partial
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from psycopg import sql
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -29,12 +37,16 @@ from sqlalchemy.orm import Session
 from app.core.clock import Clock, get_clock
 from app.core.config import Settings
 from app.db.base import SessionLocal
+from app.services.chat_cache import HitCounter
 from app.services.ingest import expire_due_documents
+
+logger = logging.getLogger(__name__)
 
 _PARENT_TABLE = "messages"
 _PARTITION_NAME = re.compile(r"messages_\d{4}_\d{2}\Z")
 _SWEEPS_JOB_ID = "run_due_sweeps"
 _PARTITIONS_JOB_ID = "ensure_month_partitions"
+_HIT_FLUSH_JOB_ID = "flush_hit_counter"
 
 
 def run_due_sweeps(session: Session, clock: Clock) -> int:
@@ -112,6 +124,34 @@ def build_scheduler(settings: Settings) -> BackgroundScheduler:
     if not settings.test_mode:
         scheduler.start()
     return scheduler
+
+
+def run_hit_flush(counter: HitCounter) -> None:
+    """flush 任务体：独立会话执行召回计数聚合刷库（调度线程无请求会话可依附）。
+
+    异常经 logger.exception 记录后吞掉：刷库失败不打垮调度线程；HitCounter 聚合
+    仅在提交成功后清空（chat_cache.HitCounter.flush 契约），失败轮次的计数自动
+    滚入下一周期重试。
+    """
+    try:
+        with SessionLocal() as session:
+            counter.flush(session)
+    except Exception:
+        logger.exception("chunk 召回计数刷库失败（聚合保留，待下一周期重试）")
+
+
+def add_hit_flush_job(scheduler: BackgroundScheduler, counter: HitCounter, interval_s: int) -> None:
+    """挂召回计数 flush 任务：IntervalTrigger 每 interval_s 秒（调用方传
+    settings.cache_ttl_s，与问答缓存同周期）。时区沿用调度器统一 UTC（已登记遗留）。
+    HitCounter 实例由装配方持有并注入，保证调度刷的与请求侧 add 的是同一份聚合。
+    """
+    scheduler.add_job(
+        partial(run_hit_flush, counter),
+        IntervalTrigger(seconds=interval_s, timezone="UTC"),
+        id=_HIT_FLUSH_JOB_ID,
+        name="chunk 召回计数刷库",
+        replace_existing=True,
+    )
 
 
 def _month_bounds(anchor: date, n: int) -> list[tuple[date, date]]:

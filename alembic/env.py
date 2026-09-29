@@ -19,8 +19,11 @@ if not _url or _url.startswith("driver://"):
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
+# disable_existing_loggers 必须关：默认 True 会把迁移前已 import 的业务 logger
+# （app.services.* 等）整体置 disabled，pg 集成测试里 logger 变哑（实测
+# caplog 捕不到任何记录），属静默吞日志的地雷。
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # add your model's MetaData object here
 # for 'autogenerate' support
