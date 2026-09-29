@@ -39,6 +39,8 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
+# docs/ 下设计文档含大量 .md 内嵌示意代码块，不受代码格式门约束（ruff 0.16 会格式化 md 代码块）
+extend-exclude = ["docs"]
 
 [tool.coverage.run]
 include = ["app/rag/*", "app/services/*"]
