@@ -1,17 +1,23 @@
 r"""进程内缓存 / 每日限额 / 召回计数聚合器单元测试（Task 7，FakeClock 注入）。
 
 断言清单来源 task-7-brief（①②③ 单元段；④ 真 pg 读回段见
-tests/integration/test_chat_cache.py，§15.4 写库必带读回）：
+tests/integration/test_hit_counter_flush.py，§15.4 写库必带读回）：
 ① ExactCache：make_key 精确格式 ``chat:{dept_id}:{question_normalized}``，同问题
   不同 dept 键不同；put→get 读回 entry 三字段相等；TTL 过期（clock 前拨 ttl+1s）
-  get 返回 None 且条目被惰性清除；get 返回浅拷贝，调用方改写不污染缓存。
+  get 返回 None 且条目被惰性清除；get 返回深拷贝，调用方改写不污染缓存。
 ② DailyCounter：连吃 limit 次后第 limit+1 次返回 False 且不计数（条目保持
   (当日, limit)）；跨日（clock 前拨 1 天）重置为可再消费；限额按 user_id 独立。
 ③ HitCounter：add 同 id 进程内累加；flush 一次 execute 携带全部参数组（一条 SQL
   executemany、参数绑定），按 id 升序携带 n 与注入时钟 now；提交成功才清空聚合，
   返回去重 chunk 数；空聚合 flush 返回 0 且不发 SQL；失败轮次聚合保留待重试。
+④ 并发（评审修复轮）：GIL 切换间隔压至微秒级 + Barrier 对齐起跑的多线程
+  stress——过期 get 无 KeyError 逃逸、同用户并发限额恰放行 limit 次、add 无丢
+  更新；flush 的 commit 窗口内落下的 add 用确定性替身（commit() 里 add）复现，
+  下一轮 flush 必须带上。
 """
 
+import sys
+import threading
 from datetime import UTC, date, datetime
 
 import pytest
@@ -25,6 +31,15 @@ TOMORROW = datetime(2026, 10, 16, 9, 30, tzinfo=UTC)
 
 def _clock() -> FakeClock:
     return FakeClock("2026-10-15T09:30:00+00:00")
+
+
+@pytest.fixture()
+def tiny_switch_interval():
+    """把 GIL 切换间隔压到微秒级放大线程切换频率（stress 放大，把窗口型竞态逼出）。"""
+    old = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    yield
+    sys.setswitchinterval(old)
 
 
 class _CaptureSession:
@@ -100,7 +115,7 @@ class TestExactCacheRoundTrip:
         }
 
     def test_mutating_returned_entry_does_not_corrupt_cache(self) -> None:
-        """get 返回浅拷贝：调用方原地改写（含嵌套列表）不影响缓存内条目。"""
+        """get 返回深拷贝：调用方原地改写（含嵌套列表）不影响缓存内条目。"""
         cache = ExactCache(_clock(), ttl_s=300)
         key = cache.make_key(1, "q")
         cache.put(key, {"answer": "a", "citations": [1], "answer_type": "doc"})
@@ -205,3 +220,118 @@ class TestHitCounterAggregate:
         db = _CaptureSession()
         assert counter.flush(db) == 1
         assert db.param_groups[0] == [{"chunk_id": 3, "n": 2, "now": NOW}]  # 计数未丢失
+
+
+class TestExactCacheConcurrency:
+    def test_concurrent_expired_get_no_keyerror_escape(self, tiny_switch_interval) -> None:
+        """评审竞态①：过期惰性清除并发 get——双线程同时 del 抛未捕获 KeyError（请求侧
+        500）。16 线程 × 150 轮双 Barrier 对齐（每轮先 put 后前拨 ttl+1s，等全部
+        get 完才进下一轮）：无异常逃逸、每轮 16 个结果全为 None。"""
+        clock = _clock()
+        cache = ExactCache(clock, ttl_s=300)
+        key = "chat:1:q"
+        workers, rounds = 16, 150
+        errors: list[BaseException] = []
+        results: list[dict | None] = []
+        collect = threading.Lock()
+        gate = threading.Barrier(workers + 1)
+        done = threading.Barrier(workers + 1)
+
+        def worker() -> None:
+            for _ in range(rounds):
+                gate.wait()
+                try:
+                    got = cache.get(key)
+                except Exception as exc:  # noqa: BLE001 — 竞态逃逸检测：任何异常都要记下断言
+                    with collect:
+                        errors.append(exc)
+                    got = None
+                with collect:
+                    results.append(got)
+                done.wait()
+
+        threads = [threading.Thread(target=worker) for _ in range(workers)]
+        for thread in threads:
+            thread.start()
+        for _ in range(rounds):
+            cache.put(key, {"answer": "a", "citations": [], "answer_type": "doc"})
+            clock.advance(seconds=301)
+            gate.wait()
+            done.wait()
+        for thread in threads:
+            thread.join()
+        assert errors == []
+        assert results == [None] * (workers * rounds)
+
+
+class TestDailyCounterConcurrency:
+    def test_concurrent_try_consume_never_exceeds_limit(self, tiny_switch_interval) -> None:
+        """评审竞态②：try_consume 的 check-then-act 并发——同用户并发提问可超限。
+        8 线程 × 25 次（合计 200 次请求）limit=50：放行恰 50 次、拒绝恰 150 次。"""
+        counter = DailyCounter(_clock())
+        limit, workers, calls = 50, 8, 25
+        gate = threading.Barrier(workers)
+        results: list[bool] = []
+        collect = threading.Lock()
+
+        def worker() -> None:
+            gate.wait()
+            local = [counter.try_consume(42, limit=limit) for _ in range(calls)]
+            with collect:
+                results.extend(local)
+
+        threads = [threading.Thread(target=worker) for _ in range(workers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert results.count(True) == limit
+        assert results.count(False) == workers * calls - limit
+
+
+class TestHitCounterConcurrency:
+    def test_concurrent_add_no_lost_updates(self, tiny_switch_interval) -> None:
+        """评审竞态③a：add 的读-改-写并发丢更新。8 线程 × 200 次 add([7])：flush
+        读回 n == 1600（仍是一条 UPDATE、参数绑定）。"""
+        counter = HitCounter(_clock())
+        workers, rounds = 8, 200
+        gate = threading.Barrier(workers)
+
+        def worker() -> None:
+            gate.wait()
+            for _ in range(rounds):
+                counter.add([7])
+
+        threads = [threading.Thread(target=worker) for _ in range(workers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        db = _CaptureSession()
+        assert counter.flush(db) == 1
+        assert db.param_groups[0] == [{"chunk_id": 7, "n": workers * rounds, "now": NOW}]
+        assert db.committed is True
+
+    def test_flush_preserves_adds_landed_during_commit_window(self) -> None:
+        """评审竞态③b（确定性复现，无需真并发）：flush 的 commit 窗口内请求线程
+        add 的计数不得被 clear 静默丢弃——替身 session 在 commit() 里模拟一次并发
+        add([9])，下一轮 flush 必须把 [9] 带上。"""
+        counter = HitCounter(_clock())
+        counter.add([7])
+
+        class _AddDuringCommitSession:
+            """execute 照常；commit() 触发时模拟另一线程恰好完成一次 add([9])。"""
+
+            def connection(self) -> "_AddDuringCommitSession":
+                return self
+
+            def execute(self, statement: object, params: object = None) -> None:
+                pass
+
+            def commit(self) -> None:
+                counter.add([9])
+
+        assert counter.flush(_AddDuringCommitSession()) == 1
+        db = _CaptureSession()
+        assert counter.flush(db) == 1
+        assert db.param_groups[0] == [{"chunk_id": 9, "n": 1, "now": NOW}]
