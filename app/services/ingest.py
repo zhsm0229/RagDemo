@@ -56,8 +56,8 @@ def create_document(
 ) -> Document:
     """同步段：元数据必填 → 白名单 → 查重 → 落盘 → 登记 parsing → 审计并提交。
 
-    查重双保险：_reject_duplicate 挡同步可见的重复；提交段 IntegrityError 捕
-    uq_doc_content_hash 的并发抢注（DOC-06），同样映射 409。
+    查重双保险：_reject_duplicate 挡同步可见的重复；提交段（_commit_upload）
+    IntegrityError 捕 uq_doc_content_hash 的并发抢注（DOC-06），同样映射 409。
     """
     missing = [key for key in _META_REQUIRED if not meta.get(key)]
     if missing:
@@ -87,14 +87,7 @@ def create_document(
     session.flush()  # 先取 id 供审计外键
     detail = {"after": {"title": doc.title, "filename": filename, "sha256": gate.sha256}}
     _audit(session, uploader.id, "document.upload", doc.id, detail)
-    try:
-        session.commit()
-    except IntegrityError as exc:
-        # 并发半边（DOC-06）：同步查重通过后、提交前对手抢注同 content_hash，提交段
-        # 撞 uq_doc_content_hash 唯一索引——转 409 业务码（常见路径由 _reject_duplicate
-        # 把守）。只捕 IntegrityError 一族：其余异常（UpstreamError 等）绝不吞。
-        session.rollback()  # 丢弃半程写入（文档行+审计）：冲突即失败，不留痕迹
-        raise ApiError(ERR_DUPLICATE_DOC, "文件与已有文档重复，请勿重复上传", 409) from exc
+    _commit_upload(session)
     return doc
 
 
@@ -202,6 +195,19 @@ def _next_version(session: Session, dept_id: int, title: str) -> int:
         )
     )
     return (current or 0) + 1
+
+
+def _commit_upload(session: Session) -> None:
+    """上传事务提交段：IntegrityError = 并发抢注同 content_hash（DOC-06），回滚并转 409。
+
+    同步查重（_reject_duplicate）只挡提交前可见的重复；查重通过后、提交前对手抢注
+    同 content_hash 的并发半边，由提交段撞 uq_doc_content_hash 唯一索引在此兜底。
+    只捕 IntegrityError 一族：其余异常（UpstreamError 等）绝不吞。"""
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()  # 丢弃半程写入（文档行+审计）：冲突即失败，不留痕迹
+        raise ApiError(ERR_DUPLICATE_DOC, "文件与已有文档重复，请勿重复上传", 409) from exc
 
 
 def _commit_ready(
