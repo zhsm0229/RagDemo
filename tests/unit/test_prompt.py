@@ -1,18 +1,37 @@
 r"""prompt 组装纯函数测试：注入防线（<data> 包裹、question 只在 user role）与格式逐字断言。
 
-断言来源 task-6-brief + standards §6.7/§17.5 + CHAT-03：REFUSAL_TEXT 与标准拒答
-话术各自硬编码逐字相等（防漂移）；资料段 "[n] 标题｜位置" 逐字格式（全角竖线｜，
-doc 位置 = title_path｜第N页，qa 位置 = 问答对）；chat messages 恰 2 条、system
-原文透传、question 只出现在 user role；rewrite messages 三轮历史逐字断言、助手
-内容超 200 字截断加省略号、全部历史原样渲染（取最近 3 轮由调用方截断）。
+断言来源 task-6-brief/task-6b-brief + standards §6.7/§17.5 + CHAT-03：REFUSAL_TEXT
+与标准拒答话术各自硬编码逐字相等（防漂移）；资料段 "[n] 标题｜位置" 逐字格式
+（全角竖线｜；来源类型由 ContextSource.ref_type 显式判别，page 不参与类型推断——
+doc 位置 = title_path（page 非 None 时附"｜第N页"），qa 位置 = 问答对）；chat
+messages 恰 2 条、system 原文透传、question 只出现在 user role；rewrite messages
+三轮历史逐字断言、助手内容超 200 字截断加省略号、全部历史原样渲染（取最近 3 轮由
+调用方截断）。
 """
+
+import pytest
 
 from app.rag.prompt import (
     REFUSAL_TEXT,
+    ContextSource,
     build_chat_messages,
     build_context_block,
     build_rewrite_messages,
 )
+
+
+def _source(**overrides: object) -> ContextSource:
+    """doc 来源基线构造：测试按需覆写单字段，避免逐字断言被样板噪声淹没。"""
+    base: dict[str, object] = {
+        "n": 1,
+        "ref_type": "doc",
+        "title": "员工手册",
+        "title_path": "人事制度 > 员工手册",
+        "page": 3,
+        "content": "试用期三个月。",
+    }
+    base.update(overrides)
+    return ContextSource(**base)  # type: ignore[arg-type] — 键集即为 ContextSource 字段
 
 
 def test_refusal_text_is_chat03_exact_phrase() -> None:
@@ -22,22 +41,72 @@ def test_refusal_text_is_chat03_exact_phrase() -> None:
 
 def test_context_block_doc_segment_with_page() -> None:
     """doc 命中（page 非 None）：location = title_path｜第N页，逐字格式含两个全角竖线。"""
-    block = build_context_block([(1, "员工手册", "人事制度 > 员工手册", 3, "试用期三个月。")])
+    block = build_context_block([_source()])
     assert block == "[1] 员工手册｜人事制度 > 员工手册｜第3页\n试用期三个月。"
 
 
-def test_context_block_qa_segment_without_page() -> None:
-    """qa 命中（page 为 None）：location 固定为"问答对"，title_path 不参与渲染。"""
-    block = build_context_block([(2, "退货时限是多久", "", None, "签收后 7 天内。")])
+def test_context_block_doc_without_page_omits_page_segment() -> None:
+    """doc 命中 page 为 None：location = title_path（省略页码段），绝不误标"问答对"。"""
+    block = build_context_block([_source(page=None, content="本手册适用于全体员工。")])
+    assert block == "[1] 员工手册｜人事制度 > 员工手册\n本手册适用于全体员工。"
+    assert "问答对" not in block
+
+
+def test_context_block_qa_segment_renders_qa_label() -> None:
+    """qa 命中（ref_type="qa"）：location 固定为"问答对"，title_path 与 page 不参与渲染。"""
+    block = build_context_block(
+        [
+            _source(
+                n=2,
+                ref_type="qa",
+                title="退货时限是多久",
+                title_path="",
+                page=None,
+                content="签收后 7 天内。",
+            )
+        ]
+    )
     assert block == "[2] 退货时限是多久｜问答对\n签收后 7 天内。"
+
+
+def test_context_block_type_is_explicit_not_inferred_from_page() -> None:
+    """显式判别：类型只由 ref_type 决定——qa 即使携带 page 也渲染"问答对"，不翻转为 doc。"""
+    block = build_context_block(
+        [
+            _source(
+                n=3,
+                ref_type="qa",
+                title="退货时限",
+                title_path="",
+                page=5,
+                content="签收后 7 天内。",
+            )
+        ]
+    )
+    assert block == "[3] 退货时限｜问答对\n签收后 7 天内。"
+
+
+def test_context_block_unknown_ref_type_rejected() -> None:
+    """ref_type 仅收 doc/qa：未知值显式拒绝（防静默误标——本任务修复的缺陷类别）。"""
+    with pytest.raises(ValueError, match="doc/qa"):
+        build_context_block([_source(ref_type="web")])
 
 
 def test_context_block_multi_segments_joined_in_input_order() -> None:
     """多段以单个换行相接，按输入顺序渲染不重排（编号与资料段一一对应 §6.7）。"""
     block = build_context_block(
         [
-            (2, "退货政策", "客服 > 退货政策", 12, "七日无理由。"),
-            (1, "员工手册", "人事 > 手册", None, "问答对内容。"),
+            _source(
+                n=2, title="退货政策", title_path="客服 > 退货政策", page=12, content="七日无理由。"
+            ),
+            _source(
+                n=1,
+                ref_type="qa",
+                title="员工手册",
+                title_path="人事 > 手册",
+                page=None,
+                content="问答对内容。",
+            ),
         ]
     )
     assert block == (
