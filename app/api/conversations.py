@@ -83,7 +83,8 @@ def list_conversations(
 
 @router.post("")
 def create_conversation(user: ReadyUser, db: DbSession) -> dict:
-    """新建空会话：title 缺省走 DB 默认"新会话"（首问时由问答端点改题，chat.py）。"""
+    """新建空会话：title 缺省走 DB 默认"新会话"；仅问答端点自建会话时以首问前 20 字
+    命题，复用已有会话标题不变（chat.py）。"""
     conversation = Conversation(user_id=user.id, dept_id=user.dept_id)
     db.add(conversation)
     db.flush()  # 先发号取 id：commit 后不再触碰过期属性
