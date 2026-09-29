@@ -129,6 +129,12 @@ class QaPair(Base):
     embedding_model: Mapped[str] = mapped_column(Text, server_default=text("'bge-m3'"))
     status: Mapped[str] = mapped_column(Text, server_default=text("'enabled'"))
     batch_no: Mapped[str | None] = mapped_column(Text)  # 导入批次
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        server_default=text("true"),
+        # 与 0002 迁移注释逐字一致（autogenerate 零差异守卫依赖）
+        comment="软删位：删除问答对置 false，退出检索与列表，行保留可追溯（QA-07）",
+    )
     created_by: Mapped[int] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(_ts(), server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(_ts(), server_default=text("now()"))
