@@ -26,10 +26,11 @@ docker compose down
 
 - 用途：检索准确率评测的 RAGFlow 对照基线（project-brief 决策 11/15），**仅内测期存在，不进生产栈**（§12.2）。配置文件：`deploy/docker-compose.ragflow.yml`（独立 project `ragflow-baseline`，网络/卷与主栈完全隔离）。
 - **§7.6 红线：禁止为 RAGFlow 配置任何云 API key 灌真实语料**（否则构成第二条内容出网通道）。只允许 full 镜像内置本地 embedding，或在基线界面配置内网模型端点；语料只用脱敏/合成数据。发现配置了云 key 立即下线整改。
+- 凭据：compose 内置默认值仅供首次拉起；部署机建议经 `deploy/.env`（git 已忽略）覆盖 `RAGFLOW_MYSQL_PASSWORD` / `RAGFLOW_MINIO_USER` / `RAGFLOW_MINIO_PASSWORD` / `RAGFLOW_REDIS_PASSWORD`。
 
 ### 2.2 启动（错峰顺序）
 
-基线资源上限约 11.75G / 4.5C，主栈满配上限 10C17G，主机仅 4 核 16G——**两栈禁止同时满载（§12.5）**，顺序如下：
+基线资源上限约 11.75G / 4.5C，主栈满配上限 10C17G（§12.5 预算值，主栈 compose limits 待后续任务落地），主机仅 4 核 16G——**两栈禁止同时满载（§12.5）**，顺序如下：
 
 ```bash
 # 1. 先确认主栈无重负载：无解析任务（mineru 空闲）、无批量上传/评测在跑；
@@ -62,7 +63,7 @@ docker compose up -d
 |---|---|---|
 | 内存 | `free -h` | available < 2G 预警，< 1G 立即停一栈 |
 | 容器资源 | `docker stats --no-stream` | 任一容器贴 memory limit（被 limit OOM 会频繁重启） |
-| 系统 OOM | `dmesg -T \| grep -i "out of memory"` | 出现 kill 记录即资源超卖，回去查错峰纪律 |
+| 系统 OOM | `sudo dmesg -T \| grep -i "out of memory"` | 出现 kill 记录即资源超卖，回去查错峰纪律 |
 | ES 磁盘水位 | 基线界面 / `docker logs baseline-es01` | 5gb/3gb/2gb 水位告警（已内置） |
 | 宿主磁盘 | `df -h` | es/mysql/minio 卷增长，剩余 < 20% 预警 |
 
@@ -96,9 +97,21 @@ docker inspect --format '{{index .RepoDigests 0}}' <镜像:tag>
 | docker.elastic.co/elasticsearch/elasticsearch | 8.11.3 | 待部署机登记 | - | - | - |
 | mysql | 8.0.39 | 待部署机登记 | - | - | - |
 | quay.io/minio/minio | RELEASE.2023-12-20T01-00-02Z | 待部署机登记 | - | - | - |
-| valkey/valkey | 8 | 待部署机登记 | - | - | - |
+| valkey/valkey | 8.1.3 | 待部署机登记 | - | - | - |
 
 注：① `infiniflow/ragflow:v0.19.1` 为 full 变体，内置 embedding 模型工件同受 §12.8 约束（模型 hash 复核在镜像内进行，登记表可加行）；② tag 全部钉死、禁 `latest`（§12.1）。
+
+登记后闭环（§12.8「含模型的镜像以 digest 引用」）：在部署机 `deploy/.env`（git 已忽略）把 ragflow 运行引用切到 digest，并重建容器生效——
+
+```bash
+# deploy/.env
+RAGFLOW_IMAGE=infiniflow/ragflow@sha256:<登记值>
+
+# 重建生效（数据卷不受影响）
+docker compose -f deploy/docker-compose.ragflow.yml up -d
+```
+
+compose 中 `${RAGFLOW_IMAGE:-infiniflow/ragflow:v0.19.1}` 的 tag 默认值保留作可读回退，部署机以 `.env` 的 digest 引用为准。
 
 ## 3. 备份 / 恢复
 
