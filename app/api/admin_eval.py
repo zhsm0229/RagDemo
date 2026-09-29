@@ -1,24 +1,34 @@
-r"""管理端评测题库路由（薄控制器）：Excel 导入（F-601）与模板下载。
+r"""管理端评测路由（薄控制器）：题库 Excel 导入（F-601）+ 模板下载 + 跑分（F-602）。
 
-业务全部委托 services/eval_service：XlsxBatchError（结构级 + 行级聚合错误行列表）
-统一转 422/1003，错误行列表直接放 data（standards §21.9），行号是 xlsx_io 携带的
-Excel 物理行号；文件级单一错误（row=0）把 reason 提为 message。上传早拒照搬
-admin_qa_pairs 先例（体积 seek/tell 先拒 + 扩展名/MIME 宽容口径 + 魔数 PK），坏
-zip 不再漏到 500 兜底。评测题不参与问答检索（跑分引擎自带缓存旁路，F-602），
+业务全部委托 services 层：导入走 eval_service（XlsxBatchError 统一转 422/1003，错误
+行列表直接放 data（standards §21.9），行号是 xlsx_io 携带的 Excel 物理行号；文件级
+单一错误（row=0）把 reason 提为 message）；跑分走 eval_engine（创建即 commit running
+行 + 审计，BackgroundTasks 执行 run_eval_run——任务体自管短会话只能看到已提交行）。
+上传早拒照搬 admin_qa_pairs 先例（体积 seek/tell 先拒 + 扩展名/MIME 宽容口径 + 魔数
+PK），坏 zip 不再漏到 500 兜底。评测题不参与问答检索（跑分引擎自带缓存旁路，F-602），
 导入成功无需失效问答精确缓存。
+
+跑分端点挂在独立 runs_router（prefix=/admin/eval-runs）：202 异步语义同 documents
+上传先例，前端以 GET /{id} 轮询 detail；deps/视角部门经 add_task 实参注入——后台
+任务拿不到 request/app.state，run 行也不存部门。
 """
 
 from typing import Annotated
 
-from fastapi import APIRouter, File, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, field_validator
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from app.api.deps import AdminUser, DbSession
-from app.core.errors import ERR_PARAM_INVALID, ApiError
-from app.services import eval_service
+from app.core.errors import ERR_NOT_FOUND, ERR_PARAM_INVALID, ApiError
+from app.db.models import Department, EvalRun
+from app.services import eval_engine, eval_service
 from app.services.xlsx_io import XlsxBatchError
 
 router = APIRouter(prefix="/admin/eval-questions", tags=["admin-eval"])
+runs_router = APIRouter(prefix="/admin/eval-runs", tags=["admin-eval"])
 
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 _TEMPLATE_FILENAME = "eval_questions_template.xlsx"
@@ -88,3 +98,119 @@ def download_template(user: AdminUser) -> Response:
         media_type=_XLSX_MIME,
         headers={"Content-Disposition": f'attachment; filename="{_TEMPLATE_FILENAME}"'},
     )
+
+
+# ---------------------------------------------------------------------------
+# 跑分（F-602）：POST 发起（202 异步）+ GET 列表 / 详情（轮询）
+# ---------------------------------------------------------------------------
+
+_RUN_NAME_MAX = 100  # 任务名单行文本，页面输入框量级；超限 422/1003 字段级
+_MSG_RUN_NOT_FOUND = "评测任务不存在"
+
+
+def _resolve_perspective_dept(db: Session, code: str) -> int:
+    """视角部门 code → id：未播种 422（与导入 _resolve_depts"部门数据未初始化"同口径）。
+
+    放 api 层的先例：api/chat.py._all_dept_id 同款单查 + 错误转换；engine 收 id，
+    code 只在创建时被人读（审计 perspective）。
+    """
+    dept_id = db.scalar(select(Department.id).where(Department.code == code))
+    if dept_id is None:
+        raise ApiError(ERR_PARAM_INVALID, f"部门数据未初始化：{code}", 422)
+    return dept_id
+
+
+class EvalRunCreate(BaseModel):
+    """POST /api/admin/eval-runs 请求体（camelCase §3.4）：name 非空 ≤100。"""
+
+    name: str
+    perspectiveDeptCode: str
+
+    @field_validator("name", "perspectiveDeptCode")
+    @classmethod
+    def _strip_nonempty(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("不能为空")
+        return stripped
+
+    @field_validator("name")
+    @classmethod
+    def _check_name_length(cls, value: str) -> str:
+        if len(value) > _RUN_NAME_MAX:
+            raise ValueError(f"名称超过 {_RUN_NAME_MAX} 字上限")
+        return value
+
+
+def _run_summary(run: EvalRun) -> dict:
+    """列表项 DTO（§3.4 camelCase，brief 钉字段）：accuracy Decimal 转 float。"""
+    return {
+        "id": run.id,
+        "name": run.name,
+        "status": run.status,
+        "total": run.total,
+        "correct": run.correct,
+        "accuracy": float(run.accuracy),
+        "createdAt": run.created_at.isoformat(),
+    }
+
+
+@runs_router.post("", status_code=202)
+def create_eval_run(
+    body: EvalRunCreate, user: AdminUser, db: DbSession, request: Request, tasks: BackgroundTasks
+) -> Response:
+    """发起跑分（F-602）：running 行 + 审计 eval.run 落库提交后，后台执行 run_eval_run。
+
+    202 {id}：跑分异步进行，前端轮询 GET /{id}；视角部门未播种 422（创建前置校验，
+    不留无法执行的 running 行）。
+    """
+    dept_id = _resolve_perspective_dept(db, body.perspectiveDeptCode)
+    run_id = eval_service.create_eval_run(db, user.id, body.name, dept_id)
+    tasks.add_task(eval_engine.run_eval_run, run_id, request.app.state.chat_deps, dept_id)
+    return JSONResponse(
+        status_code=202, content={"code": 0, "message": "ok", "data": {"id": run_id}}
+    )
+
+
+@runs_router.get("")
+def list_eval_runs(
+    user: AdminUser,
+    db: DbSession,
+    page: Annotated[int, Query(ge=1)] = 1,
+    pageSize: Annotated[int, Query(ge=1, le=100)] = 20,
+) -> dict:
+    """跑分任务列表：created_at DESC（同刻 id 降序兜底），分页 §3.5（§22.1 同口径）。"""
+    total = db.scalar(select(func.count()).select_from(EvalRun))
+    rows = (
+        db.execute(
+            select(EvalRun)
+            .order_by(EvalRun.created_at.desc(), EvalRun.id.desc())
+            .offset((page - 1) * pageSize)
+            .limit(pageSize)
+        )
+        .scalars()
+        .all()
+    )
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": {
+            "items": [_run_summary(run) for run in rows],
+            "total": total,
+            "page": page,
+            "pageSize": pageSize,
+        },
+    }
+
+
+@runs_router.get("/{run_id}")
+def get_eval_run(run_id: int, user: AdminUser, db: DbSession) -> dict:
+    """跑分详情：含 config 快照与 detail 全量（逐题判定与引用），轮询用；不存在 404。"""
+    run = db.get(EvalRun, run_id)
+    if run is None:
+        raise ApiError(ERR_NOT_FOUND, _MSG_RUN_NOT_FOUND, 404)
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": {**_run_summary(run), "config": run.config, "detail": run.detail},
+    }

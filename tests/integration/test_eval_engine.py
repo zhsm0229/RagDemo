@@ -1,0 +1,583 @@
+r"""评测跑分引擎集成测试（Task 6，F-602 核心）：真 pg + Stub 三件套，brief ①-⑦ 逐条。
+
+合成 4 题库：客服事实题×2（密码重置/差旅报销，检索必命中→被回答→pending）、
+`[拒答]` 拒答题、cross_reject 串库题（无命中内容→被拒→correct）；题面挂 service
+部门、perspective=hr 触发——检索边界按视角部门 [hr, all]，语料块播种在 hr 部门下
+（裁决：视角部门决定检索过滤，题面 dept_id 只进 byDept 报告口径，不参与检索）。
+
+替身：_MarkerReranker 按 marker 在 query 与 doc 双出现注分（高分 sigmoid(3.0)≥0.55
+放行、低分 sigmoid(-8)<0.55 必拒），与召回排序解耦、确定性可复现；_BreakOneLLM 仅
+对指定题注入流中断裂（产出一段后 UpstreamError(broken=True)，Task 4 交接的断流形态）。
+
+跑分执行路径两路都测：直接调 run_eval_run（session_factory 指向测试事务连接，对齐
+tests/api/conftest chat_client 的 SessionLocal 替换先例）；API 接线（POST 202/审计/
+GET 列表详情/后台任务同步执行）走 eval_client。认证辅助 make_user/login/admin_login
+与 tests/api 两份重复——跨目录 import 依赖收集顺序不可靠，暂复制最小份；第三份出现
+时上收（rider③ 备注）。
+"""
+
+import os
+from datetime import date
+from io import BytesIO
+
+import pytest
+from fastapi.testclient import TestClient
+from openpyxl import Workbook
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.core.assembly import load_prompt_pack
+from app.core.clock import FakeClock
+from app.core.config import Settings, get_settings
+from app.core.errors import ERR_NOT_FOUND, ApiError
+from app.core.llm import StubEmbedder, StubLLMProvider, UpstreamError, sigmoid
+from app.db.models import (
+    AuditLog,
+    Chunk,
+    Conversation,
+    Department,
+    Document,
+    EvalQuestion,
+    EvalRun,
+    Message,
+    User,
+)
+from app.rag.prompt import REFUSAL_TEXT
+from app.services import eval_engine, eval_service
+from app.services.chat import ChatDeps
+from app.services.chat_cache import DailyCounter, ExactCache, HitCounter
+
+# ---------------------------------------------------------------------------
+# 种子与装配助手（ORM 直插，先例 tests/integration/test_chat_flow.py）
+# ---------------------------------------------------------------------------
+
+_FACTUAL_1 = "员工如何重置门户登录密码？"
+_FACTUAL_2 = "差旅费报销标准是多少？"
+_REJECT_1 = "人力部门的薪酬体系是怎样的？"
+_REJECT_2 = "其他部门全员大会时间是几点？"
+
+
+def _dept_ids(session: Session) -> dict[str, int]:
+    """种子三部门 code → id（seed.py：service/hr/all）。"""
+    return dict(session.execute(select(Department.code, Department.id)).all())
+
+
+def _admin_id(session: Session) -> int:
+    return session.execute(select(User.id).where(User.username == "admin")).scalar_one()
+
+
+def _add_document(session: Session, dept_id: int, admin_id: int, title: str) -> Document:
+    doc = Document(
+        title=title,
+        dept_id=dept_id,
+        original_filename=f"{title}.docx",
+        file_path=f"seed/{title}.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=16,
+        content_hash=f"eval-{title}",
+        effective_date=date(2026, 9, 1),
+        owner_name="制度责任人",
+        status="ready",
+        is_active=True,
+        uploaded_by=admin_id,
+    )
+    session.add(doc)
+    session.flush()
+    return doc
+
+
+def _add_chunk(session: Session, doc: Document, content: str, embedder: StubEmbedder) -> Chunk:
+    chunk = Chunk(
+        document_id=doc.id,
+        dept_id=doc.dept_id,
+        title_path=doc.title,
+        content=content,
+        content_chars=len(content),
+        position=0,
+        page_no=None,
+        embedding=embedder.embed([content])[0],
+    )
+    session.add(chunk)
+    session.flush()
+    return chunk
+
+
+def _add_question(
+    session: Session, dept_id: int, question: str, expected: str, qtype: str
+) -> EvalQuestion:
+    """按导入归一后的落库形态直插评测题（expected=[拒答] ⇔ qtype=cross_reject）。"""
+    eq = EvalQuestion(
+        dept_id=dept_id, question=question, expected_answer=expected, source_ref=None, qtype=qtype
+    )
+    session.add(eq)
+    session.flush()
+    return eq
+
+
+def _seed_bank(session: Session, admin_id: int, embedder: StubEmbedder) -> dict[str, int]:
+    """hr 视角可见语料：两块必命中文本（marker 与事实题问题双出现），返回块 id 表。"""
+    doc = _add_document(session, _dept_ids(session)["hr"], admin_id, "HR_共享客服语料")
+    chunk_a = _add_chunk(
+        session, doc, "登录密码重置：登录页点击忘记密码，验证手机号后重置。", embedder
+    )
+    chunk_b = _add_chunk(session, doc, "差旅报销：交通费与住宿费凭票据实报销。", embedder)
+    return {"chunk_a": chunk_a.id, "chunk_b": chunk_b.id}
+
+
+def _seed_questions(session: Session) -> list[EvalQuestion]:
+    """合成 4 题库（service 部门）：事实×2 + 拒答×2，插入序即跑分序。"""
+    dept_id = _dept_ids(session)["service"]
+    return [
+        _add_question(session, dept_id, _FACTUAL_1, "登录页点击忘记密码后重置。", "factual"),
+        _add_question(session, dept_id, _FACTUAL_2, "交通费凭票据实报销。", "factual"),
+        _add_question(session, dept_id, _REJECT_1, "[拒答]", "cross_reject"),
+        _add_question(session, dept_id, _REJECT_2, "[拒答]", "cross_reject"),
+    ]
+
+
+def _make_deps(embedder: StubEmbedder, reranker, llm) -> ChatDeps:
+    settings = Settings(jwt_secret="eval-engine-test", test_mode=True)
+    clock = FakeClock("2026-10-15T09:30:00+00:00")
+    return ChatDeps(
+        embedder=embedder,
+        reranker=reranker,
+        llm=llm,
+        cache=ExactCache(clock, settings.cache_ttl_s),  # 主缓存引用：⑤ 断言其不被污染
+        counter=DailyCounter(clock),
+        hit_counter=HitCounter(clock),
+        settings=settings,
+        prompts=load_prompt_pack(),
+    )
+
+
+def _new_run(session: Session, admin_id: int, name: str = "W4 回归") -> EvalRun:
+    run = EvalRun(
+        name=name,
+        config=None,
+        status="running",
+        total=0,
+        correct=0,
+        accuracy=0,
+        detail={"items": []},
+        triggered_by=admin_id,
+    )
+    session.add(run)
+    session.flush()
+    return run
+
+
+def _engine_factory(session: Session) -> sessionmaker:
+    """引擎自管短会话指向测试事务连接（对齐 chat_client 的 SessionLocal 替换先例）。"""
+    return sessionmaker(bind=session.connection(), expire_on_commit=False)
+
+
+class _MarkerReranker:
+    """确定性替身：marker 在 query 与 doc 双出现 → 高分（放行回答），否则低分（必拒答）。"""
+
+    def __init__(self, markers: list[str]) -> None:
+        self.markers = markers
+
+    def rerank(self, query: str, docs: list[str]) -> list[float]:
+        return [
+            sigmoid(3.0 if any(m in query and m in doc for m in self.markers) else -8.0)
+            for doc in docs
+        ]
+
+
+class _BreakOneLLM:
+    """仅对含 marker 的问题注入流中断裂（先产出一段再 UpstreamError broken=True），其余透传。"""
+
+    def __init__(self, inner: StubLLMProvider, marker: str) -> None:
+        self.inner = inner
+        self.marker = marker
+
+    def chat_stream(self, messages, max_tokens):  # type: ignore[no-untyped-def]
+        if self.marker in messages[-1]["content"]:
+            yield "部分"
+            raise UpstreamError("stub stream broken", broken=True)
+        yield from self.inner.chat_stream(messages, max_tokens)
+
+
+def _run_engine(session: Session, deps: ChatDeps, run_id: int) -> None:
+    """以 hr 视角部门直接执行跑分任务体（session_factory 注入测试事务）。"""
+    eval_engine.run_eval_run(
+        run_id, deps, _dept_ids(session)["hr"], session_factory=_engine_factory(session)
+    )
+
+
+def _item_of(run: EvalRun, question_id: int) -> dict:
+    """detail.items 中按题目 id 取逐题条目。"""
+    return next(item for item in run.detail["items"] if item["questionId"] == question_id)
+
+
+# ---------------------------------------------------------------------------
+# ① 收口：status/total/correct/accuracy 与 config 快照逐字段
+# ---------------------------------------------------------------------------
+
+
+def test_跑分收口_done与total_correct_accuracy及config快照逐字段(session: Session) -> None:
+    """① 4 题收口 done：拒答两题 correct、事实两题 pending 不计；accuracy=0.5；
+    config 快照 9 字段与当前 Settings/prompts 一致。"""
+    admin = _admin_id(session)
+    embedder = StubEmbedder()
+    _seed_bank(session, admin, embedder)
+    questions = _seed_questions(session)
+    run = _new_run(session, admin)
+    deps = _make_deps(embedder, _MarkerReranker(["密码", "差旅"]), StubLLMProvider())
+
+    _run_engine(session, deps, run.id)
+    session.expire_all()
+    run = session.get(EvalRun, run.id)
+
+    assert run.status == "done"
+    assert run.total == 4
+    assert run.correct == 2  # 拒答两题被拒 correct；事实两题被答 pending 不计
+    assert float(run.accuracy) == pytest.approx(0.5)  # 2/4，pending 计 0 口径
+    assert run.detail["pendingCount"] == 2
+    judgment = {q.id: _item_of(run, q.id)["autoJudgment"] for q in questions}
+    assert [
+        judgment[questions[0].id],
+        judgment[questions[1].id],
+        judgment[questions[2].id],
+        judgment[questions[3].id],
+    ] == ["pending", "pending", "correct", "correct"]
+    assert run.config == {
+        "model": deps.settings.llm_model or "stub",  # W2 口径：llm_model 空回退 stub
+        "promptVersion": deps.settings.prompt_version,
+        "qaThreshold": deps.settings.qa_threshold,
+        "refuseThreshold": deps.settings.refuse_threshold,
+        "efSearch": deps.settings.hnsw_ef_search,
+        "topK": deps.settings.retriever_top_k,
+        "topN": deps.settings.rerank_top_n,
+        "temperature": deps.prompts.temperature,
+        "manifestVersion": deps.prompts.version,
+    }
+
+
+# ---------------------------------------------------------------------------
+# ② 拒答题自动判 wrong 反例：检索必命中的拒答题被回答
+# ---------------------------------------------------------------------------
+
+
+def test_拒答题检索命中被回答_自动判wrong(session: Session) -> None:
+    """② 反例：拒答题语料在库且 rerank 高分 → 被回答 → autoJudgment=wrong 不计 correct。"""
+    admin = _admin_id(session)
+    embedder = StubEmbedder()
+    _seed_bank(session, admin, embedder)
+    doc = _add_document(session, _dept_ids(session)["hr"], admin, "HR_薪酬语料")
+    _add_chunk(session, doc, "薪酬体系：基本工资、绩效奖金与津贴构成。", embedder)  # 命中薪酬题
+    questions = _seed_questions(session)
+    run = _new_run(session, admin)
+    deps = _make_deps(embedder, _MarkerReranker(["密码", "差旅", "薪酬"]), StubLLMProvider())
+
+    _run_engine(session, deps, run.id)
+    session.expire_all()
+    run = session.get(EvalRun, run.id)
+
+    assert run.status == "done"
+    assert run.correct == 1  # 仅未命中的串库题 correct
+    assert float(run.accuracy) == pytest.approx(0.25)
+    wrong_item = _item_of(run, questions[2].id)
+    assert wrong_item["autoJudgment"] == "wrong"
+    assert wrong_item["answerType"] == "rag"
+    assert wrong_item["answer"] != REFUSAL_TEXT  # 被回答（非拒答话术）→ wrong
+
+
+# ---------------------------------------------------------------------------
+# ③ messages 读回：is_eval=true 且专用会话单一
+# ---------------------------------------------------------------------------
+
+
+def test_评测消息落专用会话且is_eval为真(session: Session) -> None:
+    """③ 每 run 恰一个专用会话（[评测] 前缀、user=触发者、dept=视角部门），8 条消息
+    全部 is_eval=true 且 conversation 单一，user 消息按题序落题面。"""
+    admin = _admin_id(session)
+    embedder = StubEmbedder()
+    _seed_bank(session, admin, embedder)
+    questions = _seed_questions(session)
+    run = _new_run(session, admin)
+    deps = _make_deps(embedder, _MarkerReranker(["密码", "差旅"]), StubLLMProvider())
+
+    _run_engine(session, deps, run.id)
+    session.expire_all()
+
+    conversations = session.scalars(select(Conversation)).all()
+    assert len(conversations) == 1  # 专用会话单一
+    conv = conversations[0]
+    assert conv.user_id == run.triggered_by
+    assert conv.dept_id == _dept_ids(session)["hr"]
+    assert conv.title == f"[评测]{run.name}"
+    messages = session.scalars(select(Message).order_by(Message.id)).all()
+    assert len(messages) == 8  # 4 题 × (user + assistant)
+    assert all(msg.conversation_id == conv.id for msg in messages)
+    assert all(msg.is_eval is True for msg in messages)
+    user_msgs = [msg for msg in messages if msg.role == "user"]
+    assert [msg.content for msg in user_msgs] == [q.question for q in questions]
+
+
+# ---------------------------------------------------------------------------
+# ④ detail 逐题结构：citations 快照与回答一致
+# ---------------------------------------------------------------------------
+
+
+def test_detail逐题结构_citations快照与消息一致(session: Session) -> None:
+    """④ 逐题条目键固定；rag 题引用按 rerank 分降序且与 assistant 消息 JSONB 全等；
+    拒答题 citations 空回话术、answerType=refuse。"""
+    admin = _admin_id(session)
+    embedder = StubEmbedder()
+    chunk_ids = _seed_bank(session, admin, embedder)
+    questions = _seed_questions(session)
+    run = _new_run(session, admin)
+    deps = _make_deps(embedder, _MarkerReranker(["密码", "差旅"]), StubLLMProvider())
+
+    _run_engine(session, deps, run.id)
+    session.expire_all()
+    run = session.get(EvalRun, run.id)
+
+    assert set(run.detail.keys()) == {"items", "pendingCount"}
+    item1 = _item_of(run, questions[0].id)
+    assert set(item1.keys()) == {
+        "questionId",
+        "deptId",
+        "qtype",
+        "expected",
+        "answerType",
+        "answer",
+        "citations",
+        "autoJudgment",
+        "error",
+    }
+    assert item1["answerType"] == "rag"
+    assert item1["error"] is None
+    assert [c["refId"] for c in item1["citations"]] == [
+        chunk_ids["chunk_a"],
+        chunk_ids["chunk_b"],
+    ]  # 高分在前（rerank 降序）
+    assert item1["citations"][0]["score"] == pytest.approx(sigmoid(3.0))
+    assistant = session.scalar(
+        select(Message).where(Message.role == "assistant", Message.content == item1["answer"])
+    )
+    assert assistant.citations == item1["citations"]  # citations 快照与落库消息一致
+    assert assistant.answer_type == item1["answerType"]
+    expected_model = deps.settings.llm_model or "stub"  # W2 口径：llm_model 空回退 stub
+    assert (assistant.model, assistant.cache_hit, assistant.is_eval) == (
+        expected_model,
+        False,
+        True,
+    )
+
+    item3 = _item_of(run, questions[2].id)
+    assert (item3["answerType"], item3["answer"], item3["citations"]) == (
+        "refuse",
+        REFUSAL_TEXT,
+        [],
+    )
+
+
+# ---------------------------------------------------------------------------
+# ⑤ 评测不写主缓存（旁路：put 进随跑弃置实例）
+# ---------------------------------------------------------------------------
+
+
+def test_评测不写主缓存(session: Session) -> None:
+    """⑤ 跑完后 deps.cache（主缓存引用）_entries 恒空——评测 put 只进旁路弃置实例。"""
+    admin = _admin_id(session)
+    embedder = StubEmbedder()
+    _seed_bank(session, admin, embedder)
+    run = _new_run(session, admin)
+    deps = _make_deps(embedder, _MarkerReranker(["密码", "差旅"]), StubLLMProvider())
+
+    _run_engine(session, deps, run.id)
+
+    assert deps.cache._entries == {}  # 主缓存零污染（EVAL-02 旁路精确缓存）
+
+
+# ---------------------------------------------------------------------------
+# ⑥ 单题 LLM 中断：不落 assistant 行、detail 记 error、整体 done
+# ---------------------------------------------------------------------------
+
+
+def test_单题LLM中断不拖垮整体(session: Session) -> None:
+    """⑥ 仅差旅题流中断裂：该题不落 assistant 行、detail 记 error、autoJudgment pending，
+    其余题正常判分，run 收口 done。"""
+    admin = _admin_id(session)
+    embedder = StubEmbedder()
+    _seed_bank(session, admin, embedder)
+    questions = _seed_questions(session)
+    run = _new_run(session, admin)
+    deps = _make_deps(
+        embedder,
+        _MarkerReranker(["密码", "差旅"]),
+        # marker 取题面全短语：Q1 的 <data> 资料段含另一块的"差旅报销"文本，短词会误伤
+        _BreakOneLLM(StubLLMProvider(), "差旅费报销标准"),
+    )
+
+    _run_engine(session, deps, run.id)
+    session.expire_all()
+    run = session.get(EvalRun, run.id)
+
+    assert run.status == "done"  # 单题失败不拖垮整体
+    assert run.total == 4 and run.correct == 2
+    conv_id = session.scalar(select(Conversation.id))
+    roles = session.scalars(
+        select(Message.role).where(Message.conversation_id == conv_id).order_by(Message.id)
+    ).all()
+    assert roles.count("user") == 4  # 断裂题 user 消息保留
+    assert roles.count("assistant") == 3  # 断裂题不落 assistant 行
+    broken_item = _item_of(run, questions[1].id)
+    assert broken_item["error"] == "stub stream broken"
+    assert broken_item["autoJudgment"] == "pending"  # 失败题进人工复核队列
+    assert run.detail["pendingCount"] == 2  # 事实题一答一断，均 pending
+
+
+# ---------------------------------------------------------------------------
+# ⑦ 创建审计读回 + 端点接线（POST 202 / GET 列表 / GET 详情 / 404 / 未知部门 422）
+# ---------------------------------------------------------------------------
+
+
+def make_user(session: Session, username: str, password: str, role: str) -> User:
+    """直插测试用户（bcrypt 哈希），挂在测试事务内（口径同 tests/api 导入测试）。"""
+    from app.core.security import hash_password
+
+    dept = session.scalars(select(Department).where(Department.code == "all")).first()
+    user = User(
+        username=username,
+        password_hash=hash_password(password),
+        dept_id=dept.id,
+        role=role,
+        must_change_password=False,
+    )
+    session.add(user)
+    session.flush()
+    return user
+
+
+def login(client: TestClient, username: str, password: str):  # type: ignore[no-untyped-def]
+    return client.post("/api/auth/login", json={"username": username, "password": password})
+
+
+@pytest.fixture()
+def eval_client(session: Session, monkeypatch: pytest.MonkeyPatch):
+    """评测跑分 API 客户端：get_db 覆写 + TEST_MODE（lifespan 装 Stub 三件套）+ 引擎
+    自管短会话指向测试事务连接（对齐 tests/api/conftest chat_client 先例）。TestClient
+    同步执行 BackgroundTasks——202 响应返回时跑分已收口，可直接断言终态。"""
+    saved = os.environ.get("TEST_MODE")
+    os.environ["TEST_MODE"] = "true"
+    get_settings.cache_clear()
+    monkeypatch.setattr(eval_engine, "SessionLocal", _engine_factory(session))
+    from app.api.deps import get_db
+    from app.main import app
+    from app.services.auth import default_limiter
+
+    default_limiter.reset()
+    app.dependency_overrides[get_db] = lambda: session
+    with TestClient(app) as http:
+        yield http
+    app.dependency_overrides.pop(get_db, None)
+    if saved is None:
+        os.environ.pop("TEST_MODE", None)
+    else:
+        os.environ["TEST_MODE"] = saved
+    get_settings.cache_clear()
+
+
+def test_创建跑分_202与审计读回及GET接线(eval_client: TestClient, session: Session) -> None:
+    """⑦ POST 202 {id} + 审计 eval.run {runId,name,perspective}；空题库跑完 done
+    （TestClient 同步执行后台任务）；GET 列表/详情/404 接线读回。"""
+    make_user(session, "evalrunadmin", "right-one", role="admin")
+    assert login(eval_client, "evalrunadmin", "right-one").status_code == 200
+
+    resp = eval_client.post(
+        "/api/admin/eval-runs", json={"name": "上线前回归", "perspectiveDeptCode": "hr"}
+    )
+
+    assert resp.status_code == 202
+    run_id = resp.json()["data"]["id"]
+    assert resp.json()["code"] == 0 and isinstance(run_id, int)
+
+    session.expire_all()
+    audit = session.scalar(select(AuditLog).where(AuditLog.action == "eval.run"))
+    assert audit is not None
+    assert audit.object_type == "eval_run"
+    assert audit.object_id == run_id
+    assert audit.detail == {"runId": run_id, "name": "上线前回归", "perspective": "hr"}
+    admin_id = session.scalars(select(User.id).where(User.username == "evalrunadmin")).one()
+    assert audit.actor_user_id == admin_id
+
+    run = session.get(EvalRun, run_id)
+    assert run.status == "done" and run.total == 0  # 空题库：正常收口
+    assert run.detail == {"items": [], "pendingCount": 0}
+
+    listing = eval_client.get("/api/admin/eval-runs?page=1&pageSize=20")
+    assert listing.status_code == 200
+    body = listing.json()["data"]
+    assert body["total"] == 1 and body["page"] == 1 and body["pageSize"] == 20
+    assert body["items"] == [
+        {
+            "id": run_id,
+            "name": "上线前回归",
+            "status": "done",
+            "total": 0,
+            "correct": 0,
+            "accuracy": 0.0,
+            "createdAt": run.created_at.isoformat(),
+        }
+    ]
+
+    detail = eval_client.get(f"/api/admin/eval-runs/{run_id}")
+    assert detail.status_code == 200
+    data = detail.json()["data"]
+    assert data["id"] == run_id and data["status"] == "done"
+    assert set(data["config"].keys()) == {
+        "model",
+        "promptVersion",
+        "qaThreshold",
+        "refuseThreshold",
+        "efSearch",
+        "topK",
+        "topN",
+        "temperature",
+        "manifestVersion",
+    }
+    assert data["detail"] == {"items": [], "pendingCount": 0}
+
+    missing = eval_client.get("/api/admin/eval-runs/999999")
+    assert missing.status_code == 404
+    assert missing.json()["code"] == ERR_NOT_FOUND
+
+
+def test_未知视角部门_422部门数据未初始化(eval_client: TestClient, session: Session) -> None:
+    """rider②（跑分侧）：perspectiveDeptCode 未播种 → 422"部门数据未初始化"，不建 run。"""
+    make_user(session, "evalrunadmin2", "right-one", role="admin")
+    assert login(eval_client, "evalrunadmin2", "right-one").status_code == 200
+
+    resp = eval_client.post(
+        "/api/admin/eval-runs", json={"name": "坏视角", "perspectiveDeptCode": "finance"}
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["code"] == 1003
+    assert resp.json()["message"] == "部门数据未初始化：finance"
+    assert session.scalar(select(func.count()).select_from(EvalRun)) == 0
+
+
+def test_部门未播种_导入422部门数据未初始化(session: Session) -> None:
+    """rider②（导入侧）：_resolve_depts 播种缺失分支——拔掉部门 code 后导入 422 全量退回。
+    （departments 行被 users.dept_id 外键引用不可物理删，code 唯一约束下逐行改空 code
+    等效未播种。）"""
+    admin = _admin_id(session)
+    for dept in session.scalars(select(Department)).all():
+        dept.code = f"drained_{dept.id}"
+    wb = Workbook()
+    ws = wb.worksheets[0]
+    ws.append(["部门", "问题", "期望答案", "来源", "题型"])
+    ws.append(["客服", "问题一", "答案一", "", "factual"])
+    buf = BytesIO()
+    wb.save(buf)
+
+    with pytest.raises(ApiError) as exc_info:
+        eval_service.import_eval_questions(session, admin, buf.getvalue())
+
+    assert exc_info.value.http_status == 422
+    assert exc_info.value.message == "部门数据未初始化：service"
+    assert session.scalar(select(func.count()).select_from(EvalQuestion)) == 0

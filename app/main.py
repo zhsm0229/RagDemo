@@ -80,6 +80,7 @@ def create_app() -> FastAPI:
     app.include_router(documents.router, prefix="/api")
     app.include_router(admin_qa_pairs.router, prefix="/api")
     app.include_router(admin_eval.router, prefix="/api")
+    app.include_router(admin_eval.runs_router, prefix="/api")
     app.include_router(chat.router, prefix="/api")
     app.include_router(conversations.router, prefix="/api")
     app.include_router(feedback.router, prefix="/api")

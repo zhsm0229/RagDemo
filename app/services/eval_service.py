@@ -1,8 +1,8 @@
-r"""评测题库业务：Excel 整批导入（F-601）与模板数据。
+r"""评测题库业务：Excel 整批导入（F-601）、模板数据与跑分任务创建（F-602 请求期分区）。
 
-分区预留（Task 6/7）：本文件当前只含"导入 + 模板"分区；跑分引擎（F-602）与
-人工评判相关实现将在本模块依次追加新分区（单文件 ≤300 行约束下按区组织，导入
-区保持文件头部不动）。
+分区预留（Task 7）：人工评判与分组报告将在本模块追加新分区（单文件 ≤300 行约束下
+按区组织）；跑分**执行**引擎独立在 services/eval_engine.py（Task 5 评审裁决：后台
+任务体不进本文件，预算留给评判/报告）。
 
 整批语义与问答对导入（services/qa_pairs.py）同构：xlsx_io.read_rows 结构级校验后，
 行级业务校验在本模块聚合（部门枚举、问题 1-2000、期望答案非空 ≤10000、题型枚举，
@@ -21,12 +21,14 @@ r"""评测题库业务：Excel 整批导入（F-601）与模板数据。
 跑分引擎（Task 6）据 `expected_answer == '[拒答]'` 单一条件识别拒答题自动判。
 """
 
+from decimal import Decimal
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.clock import Clock, get_clock
 from app.core.errors import ERR_PARAM_INVALID, ApiError
-from app.db.models import Department, EvalQuestion
+from app.db.models import Department, EvalQuestion, EvalRun
 from app.services.audit import record_audit
 from app.services.xlsx_io import XlsxBatchError, read_rows, write_template
 
@@ -177,3 +179,40 @@ def _resolve_depts(db: Session, dept_names: set[str]) -> dict[str, int]:
     if missing:
         raise ApiError(ERR_PARAM_INVALID, f"部门数据未初始化：{'、'.join(missing)}", 422)
     return {name: by_code[_DEPT_NAME_TO_CODE[name]] for name in dept_names}
+
+
+# ---------------------------------------------------------------------------
+# 跑分任务创建（F-602 请求期分区）：执行体在 services/eval_engine.py
+# ---------------------------------------------------------------------------
+
+
+def create_eval_run(db: Session, actor_user_id: int, name: str, perspective_dept_id: int) -> int:
+    """建 running 行（config=null，total/correct/accuracy 计 0）+ 审计 eval.run 并提交。
+
+    先 commit 再返回 id：跑分后台任务自管短会话，只能看到已提交行（202 异步语义，
+    前端轮询 GET /{id}）；审计 detail 带视角部门 code（id 对人不读）。事务边界归
+    本函数（services 层惯例）。
+    """
+    run = EvalRun(
+        name=name,
+        config=None,
+        status="running",
+        total=0,
+        correct=0,
+        accuracy=Decimal(0),
+        detail={"items": []},
+        triggered_by=actor_user_id,
+    )
+    db.add(run)
+    db.flush()  # 取自增 id 供审计 detail.runId
+    perspective = db.scalar(select(Department.code).where(Department.id == perspective_dept_id))
+    record_audit(
+        db,
+        actor_user_id,
+        "eval.run",
+        "eval_run",
+        run.id,
+        {"runId": run.id, "name": name, "perspective": perspective},
+    )
+    db.commit()
+    return run.id

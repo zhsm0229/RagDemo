@@ -1,0 +1,300 @@
+r"""评测跑分引擎（Task 6，F-602 核心）：复用问答管道对题库自动跑分并自动判分。
+
+职责边界：本模块只含后台任务体；run 行创建与审计在 eval_service.create_eval_run。
+评测专用 ChatDeps 副本（旁路缓存，EVAL-02）：replace(deps, cache=新 ExactCache,
+counter=None)——缓存 put 落进随跑弃置实例、绝不污染线上问答缓存；不调 try_consume
+不占日限；hit_counter 共用。逐题：user 消息（is_eval=true）→ prepare_turn(history=[])
+（单轮无改写）→ refuse 直出 REFUSAL_TEXT 不调 LLM；qa/rag 流收集全文——取迭代器与
+迭代包进同一 UpstreamError 异常边界（Task 4 交接：生成器首次 next() 才抛）；单题
+失败记 error、不落 assistant 行、继续下一题（整体不失败）；评测无断流恢复语义，
+assistant 行不走占位+finalize，一次 INSERT 完整行。自动判（判定协议第 3 条）：拒答类
+（expected=='[拒答]' 或 qtype==cross_reject，取或防御手工造数）按 answer==REFUSAL_TEXT
+判 correct/wrong；其余 pending（Task 7 人工评判以 judgment 覆写合并）；失败题恒
+pending。detail 结构（Task 7 按此消费，键名勿改）：{"items": [逐题 dict],
+"pendingCount": n}——逐题重赋值触发 JSONB 变更跟踪后即 commit（进度可查、崩溃保留
+已完成题）；整体异常 → failed 且 detail 附 "error"；收口 accuracy=correct/total
+（pending 计 0、total=0 记 0）+ config 快照 9 字段（锁定阈值/模型/提示词版本）→ done。
+
+事务：任务体自管短会话逐题独立 commit，绝不横跨整个跑分（连接占用红线，chat_stream
+同注）；测试经 session_factory 实参指向测试事务连接。检索边界恒 [视角部门, 全员]
+（F-502），题面 dept_id 只进 byDept 报告口径、不参与检索。
+"""
+
+import logging
+from dataclasses import dataclass, replace
+from decimal import Decimal
+from time import perf_counter
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.core.assembly import PromptPack
+from app.core.clock import get_clock
+from app.core.config import Settings
+from app.core.llm import UpstreamError
+from app.db.base import SessionLocal
+from app.db.models import Conversation, Department, EvalQuestion, EvalRun, Message
+from app.rag.prompt import REFUSAL_TEXT
+from app.services.chat import ChatDeps, TurnPlan, prepare_turn
+from app.services.chat_cache import ExactCache
+from app.services.eval_service import REJECT_MARK
+
+logger = logging.getLogger(__name__)
+
+_STUB_MODEL = "stub"  # settings.llm_model 为空（test_mode Stub 无模型名）时的落库回退名
+_ALL_DEPT_CODE = "all"  # 全员部门 code（F-502：检索范围恒为 [视角部门, 全员]）
+_ERROR_MAX_CHARS = 500  # detail.error 截断：留根因不吞日志，防异常串撑爆 detail
+_CORRECT, _WRONG, _PENDING = "correct", "wrong", "pending"
+
+
+@dataclass
+class _TurnAnswer:
+    """单题产出：全文、引用快照、答案类型与 usage（None 记双 0，对齐 finalize_turn）。"""
+
+    content: str
+    citations: list[dict]
+    answer_type: str
+    usage: tuple[int, int] | None
+
+
+def eval_chat_deps(deps: ChatDeps) -> ChatDeps:
+    """评测专用副本：旁路缓存（随跑弃置实例）+ counter=None（不占每日限额）。"""
+    return replace(deps, cache=ExactCache(get_clock(), deps.settings.cache_ttl_s), counter=None)
+
+
+def run_eval_run(
+    run_id: int,
+    deps: ChatDeps,
+    perspective_dept_id: int,
+    *,
+    session_factory: sessionmaker | None = None,
+) -> None:
+    """后台任务体：逐题跑分、逐题 commit，收口 done；整体异常置 failed 不外泄。
+    deps/视角部门经 add_task 实参注入（后台任务拿不到 request/app.state）；幂等闸：
+    run 不存在或已收口（重复触发）直接返回不重跑。
+    """
+    factory = session_factory if session_factory is not None else SessionLocal
+    eval_deps = eval_chat_deps(deps)
+    snapshot = _config_snapshot(eval_deps.settings, eval_deps.prompts)
+    with factory() as db:
+        run = db.get(EvalRun, run_id)
+        if run is None or run.status != "running":
+            return
+        try:
+            all_dept_id = _all_dept_id(db)
+            conversation = Conversation(
+                user_id=run.triggered_by,
+                dept_id=perspective_dept_id,
+                title=f"[评测]{run.name}",
+            )
+            db.add(conversation)
+            # 全部 is_active 题，按 id 升序（插入序即跑分序，与 detail 逐题顺序一致）
+            questions = list(
+                db.scalars(
+                    select(EvalQuestion)
+                    .where(EvalQuestion.is_active.is_(True))
+                    .order_by(EvalQuestion.id)
+                ).all()
+            )
+            db.commit()  # 会话先落库：逐题消息随之可见
+            correct, items = _run_questions(
+                db, eval_deps, run, conversation, perspective_dept_id, all_dept_id, questions
+            )
+        except Exception as exc:
+            logger.exception("评测跑分整体失败 run_id=%s", run_id)
+            _mark_failed(db, run_id, exc)
+            return
+        _finish(db, run_id, snapshot, correct, len(questions), items)
+
+
+def _all_dept_id(db: Session) -> int:
+    """全员部门 id：种子幂等存在，缺失按整体失败处理（不留 running 幽灵行）。"""
+    dept_id = db.scalar(select(Department.id).where(Department.code == _ALL_DEPT_CODE))
+    if dept_id is None:
+        raise RuntimeError("全员部门未播种，无法执行评测跑分")
+    return dept_id
+
+
+def _run_questions(
+    db: Session,
+    deps: ChatDeps,
+    run: EvalRun,
+    conversation: Conversation,
+    perspective_dept_id: int,
+    all_dept_id: int,
+    questions: list[EvalQuestion],
+) -> tuple[int, list[dict]]:
+    """逐题执行：detail.items 重赋值后即 commit（进度可查、崩溃保留已完成题）。"""
+    correct = 0
+    items: list[dict] = list(run.detail["items"]) if run.detail else []
+    for question in questions:
+        item = _run_one(
+            db, deps, conversation, run.triggered_by, perspective_dept_id, all_dept_id, question
+        )
+        correct += item["autoJudgment"] == _CORRECT
+        items.append(item)
+        run.detail = {"items": items}  # 重赋值：JSONB 原地改动不被变更跟踪
+        db.commit()
+    return correct, items
+
+
+def _user_message(conversation: Conversation, user_id: int, dept_id: int, question: str) -> Message:
+    """评测 user 消息：is_eval=true（F-5 提问记录/运营统计过滤位）。"""
+    return Message(
+        conversation_id=conversation.id,
+        user_id=user_id,
+        dept_id=dept_id,
+        role="user",
+        content=question,
+        is_eval=True,
+    )
+
+
+def _assistant_message(
+    conversation: Conversation,
+    user_id: int,
+    dept_id: int,
+    turn: _TurnAnswer,
+    model: str,
+    latency_ms: int,
+) -> Message:
+    """评测 assistant 消息：不走占位+finalize（无断流恢复语义），一次 INSERT 完整行。"""
+    prompt_tokens, completion_tokens = turn.usage if turn.usage is not None else (0, 0)
+    return Message(
+        conversation_id=conversation.id,
+        user_id=user_id,
+        dept_id=dept_id,
+        role="assistant",
+        content=turn.content,
+        citations=turn.citations,
+        answer_type=turn.answer_type,
+        model=model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        latency_ms=latency_ms,
+        cache_hit=False,
+        is_eval=True,
+    )
+
+
+def _run_one(
+    db: Session,
+    deps: ChatDeps,
+    conversation: Conversation,
+    user_id: int,
+    dept_id: int,
+    all_dept_id: int,
+    question: EvalQuestion,
+) -> dict:
+    """单题：user 消息 → prepare → 生成/拒答 → assistant 完整行一次 INSERT。
+    UpstreamError：user 消息保留留痕、不落 assistant 行、detail 记 error；其余异常
+    外泄走整体 failed。
+    """
+    item: dict = {
+        "questionId": question.id,
+        "deptId": question.dept_id,
+        "qtype": question.qtype,
+        "expected": question.expected_answer,
+        "answerType": "",
+        "answer": "",
+        "citations": [],
+        "autoJudgment": _PENDING,
+        "error": None,
+    }
+    start = perf_counter()
+    db.add(_user_message(conversation, user_id, dept_id, question.question))
+    db.flush()
+    try:
+        plan = prepare_turn(db, deps, dept_id, all_dept_id, question.question, [])
+        turn = _collect_answer(deps, plan)
+    except UpstreamError as exc:
+        db.commit()  # user 消息随失败题提交；异常已捕获，继续下一题
+        item["error"] = str(exc)
+        return item
+    model = deps.settings.llm_model or _STUB_MODEL
+    latency_ms = int((perf_counter() - start) * 1000)
+    db.add(_assistant_message(conversation, user_id, dept_id, turn, model, latency_ms))
+    if plan.kind in ("qa", "rag") and plan.cache_key is not None:
+        deps.cache.put(  # 旁路：put 进随跑弃置实例，主缓存零污染（EVAL-02）
+            plan.cache_key,
+            {
+                "answer": turn.content,
+                "citations": turn.citations,
+                "answer_type": turn.answer_type,
+                "model": model,
+            },
+        )
+    item["answerType"] = turn.answer_type
+    item["answer"] = turn.content
+    item["citations"] = turn.citations
+    item["autoJudgment"] = _auto_judge(question, turn.content)
+    return item
+
+
+def _collect_answer(deps: ChatDeps, plan: TurnPlan) -> _TurnAnswer:
+    """refuse 直出话术；cache 取条目；qa/rag 流收集——迭代器+迭代同一异常边界（调用方捕获 UpstreamError）。"""
+    if plan.kind == "refuse":
+        return _TurnAnswer(REFUSAL_TEXT, [], "refuse", None)
+    if plan.kind == "cache":
+        entry = plan.cache_entry or {}
+        return _TurnAnswer(
+            entry.get("answer", ""),
+            entry.get("citations", []),
+            entry.get("answer_type", "rag"),
+            None,
+        )
+    answer = "".join(deps.llm.chat_stream(plan.llm_messages, deps.settings.chat_max_tokens))
+    return _TurnAnswer(answer, plan.citations, plan.kind, getattr(deps.llm, "last_usage", None))
+
+
+def _auto_judge(question: EvalQuestion, answer: str) -> str:
+    """判定协议第 3 条：拒答类按话术精确匹配自动判；其余 pending（人工复核）。"""
+    if question.expected_answer == REJECT_MARK or question.qtype == "cross_reject":
+        return _CORRECT if answer == REFUSAL_TEXT else _WRONG
+    return _PENDING
+
+
+def _config_snapshot(settings: Settings, prompts: PromptPack) -> dict:
+    """收口 config 快照 9 字段：阈值/模型/提示词版本/温度，防跨跑对比被污染。"""
+    return {
+        "model": settings.llm_model or _STUB_MODEL,
+        "promptVersion": settings.prompt_version,
+        "qaThreshold": settings.qa_threshold,
+        "refuseThreshold": settings.refuse_threshold,
+        "efSearch": settings.hnsw_ef_search,
+        "topK": settings.retriever_top_k,
+        "topN": settings.rerank_top_n,
+        "temperature": prompts.temperature,
+        "manifestVersion": prompts.version,
+    }
+
+
+def _mark_failed(db: Session, run_id: int, exc: Exception) -> None:
+    """整体异常收口：rollback 后重取（已 commit 的逐题 detail 保留），置 failed+error。"""
+    db.rollback()
+    run = db.get(EvalRun, run_id)
+    detail = dict(run.detail) if run.detail else {"items": []}
+    detail["error"] = str(exc)[:_ERROR_MAX_CHARS]
+    run.status = "failed"
+    run.detail = detail
+    db.commit()
+
+
+def _finish(
+    db: Session,
+    run_id: int,
+    snapshot: dict,
+    correct: int,
+    total: int,
+    items: list[dict],
+) -> None:
+    """收口置 done：total/correct/accuracy（pending 计 0、total=0 记 0）+ 快照 + pendingCount。"""
+    run = db.get(EvalRun, run_id)
+    pending = sum(1 for item in items if item["autoJudgment"] == _PENDING)
+    run.total = total
+    run.correct = correct
+    run.accuracy = Decimal(correct) / Decimal(total) if total else Decimal(0)
+    run.detail = {"items": items, "pendingCount": pending}
+    run.config = snapshot
+    run.status = "done"
+    db.commit()
