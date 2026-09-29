@@ -5,7 +5,8 @@ pypdf 解出文本且 engine="pypdf"（降级标记）、MinerU stub 重试语�
 200 成功；持续 500/ConnectError 重试 1 次后抛 UpstreamError，恰 2 次请求）、响应
 契约（缺 content/非 str/非 JSON 一律 UpstreamError）、`.doc` 抛
 ApiError(1001, "请另存为 docx", 422)、调度树、pdf 页数/输出字符上限与 MinerU 可
-注入上限、入库样本与工具再产物解析一致。
+注入上限、入库样本与工具再产物解析一致、页码线程化（pdf 按 \\f 分页打 Block.page
+1 起；docx/MinerU 无页码概念 page 全 None）。
 """
 
 import importlib.util
@@ -16,6 +17,7 @@ from types import ModuleType
 import httpx
 import pytest
 from docx import Document
+from pypdf import PdfReader, PdfWriter
 
 from app.core.config import Settings
 from app.core.errors import ApiError
@@ -25,6 +27,7 @@ from app.rag.parser import (
     MAX_ENTRY_XML_BYTES,
     MAX_OUTPUT_CHARS,
     MAX_PAGES,
+    PDF_PAGE_SEPARATOR,
     Block,
     DocxParser,
     MinerUParser,
@@ -85,12 +88,30 @@ def _mineru(
     )
 
 
+def _three_page_pdf() -> bytes:
+    """构造 3 页 pdf：克隆 2 页样本并复拼第 1 页（pypdf 公开 API，页文本可提取）。"""
+    reader = PdfReader(io.BytesIO(_tool("make_sample_pdf").build_sample_pdf()))
+    writer = PdfWriter()
+    writer.add_page(reader.pages[0])
+    writer.add_page(reader.pages[1])
+    writer.add_page(reader.pages[0])
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
+
+
 def test_docx_blocks_hierarchy_and_full_heading_path() -> None:
     """docx：H1/H2/正文/表格按序产出标题节，heading_path 为根到当前节全路径（T7 契约）。"""
     doc = DocxParser().parse("员工手册.docx", _tool("make_sample_docx").build_sample_docx())
     assert doc == _expected_docx_doc()
     assert doc.blocks[1].heading_path == ["第一章 总则", "1.1 适用范围"]  # 全路径，非仅当前节
     assert [b.level for b in doc.blocks] == [1, 2, 1]
+
+
+def test_docx_blocks_have_no_page_numbers() -> None:
+    """docx 无页码概念：解析产物各 Block.page 全为 None（prompt 侧不得据 page 推断来源类型）。"""
+    doc = DocxParser().parse("员工手册.docx", _tool("make_sample_docx").build_sample_docx())
+    assert [block.page for block in doc.blocks] == [None, None, None]
 
 
 def test_heading_skip_level_collapses_path() -> None:
@@ -127,7 +148,7 @@ def test_committed_samples_match_tool_output() -> None:
 
 
 def test_pdf_fallback_pages_and_engine() -> None:
-    """pypdf 降级：逐页文本以 \\f 拼接（与 precheck.page_hint 计页约定一致），标记正确。"""
+    """pypdf 降级：逐页提取为按页打页码的 Block（\\f 分页约定，page 从 1 起），标记正确。"""
     parser = PdfFallbackParser()
     doc = parser.parse("季报.pdf", _tool("make_sample_pdf").build_sample_pdf())
     assert parser.engine == "pypdf"
@@ -138,10 +159,24 @@ def test_pdf_fallback_pages_and_engine() -> None:
             Block(
                 level=1,
                 heading_path=["季报"],
-                text="Chapter 1 Overview. Total expense lines.\fAppendix contact table.",
-            )
+                text="Chapter 1 Overview. Total expense lines.",
+                page=1,
+            ),
+            Block(level=1, heading_path=["季报"], text="Appendix contact table.", page=2),
         ],
     )
+
+
+def test_pdf_pages_threaded_to_blocks_with_page_numbers() -> None:
+    """3 页 pdf（含 2 个 \\f 的 pdf 风格文本）：各 Block.page 依次为第 1/2/3 页且页文本无 \\f。"""
+    doc = PdfFallbackParser().parse("三页.pdf", _three_page_pdf())
+    assert [block.page for block in doc.blocks] == [1, 2, 3]
+    assert [block.text for block in doc.blocks] == [
+        "Chapter 1 Overview. Total expense lines.",
+        "Appendix contact table.",
+        "Chapter 1 Overview. Total expense lines.",
+    ]
+    assert all(PDF_PAGE_SEPARATOR not in block.text for block in doc.blocks)
 
 
 def test_mineru_success_and_first_fail_retry_succeeds() -> None:
@@ -152,6 +187,7 @@ def test_mineru_success_and_first_fail_retry_succeeds() -> None:
     assert doc == ParsedDoc(
         title="样例", blocks=[Block(level=1, heading_path=["样例"], text="全公司差旅报销标准。")]
     )
+    assert doc.blocks[0].page is None  # content 无 \f：单块 page=None（MinerU 页码契约为移交项）
     assert calls["n"] == 1
     calls2: dict[str, int] = {"n": 0}
     seen: list[httpx.Request] = []

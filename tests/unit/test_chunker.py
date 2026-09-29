@@ -6,6 +6,7 @@ content 前缀 `f"{title_path}｜"`、position 从 0 递增。补边界：空 bl
 单块 <300 字原样保留、切分边界必须落在句号之后（残句即失败）、
 尾块 <min_len 并入前块、无句号超长单句硬切兜底、空白正文块不产空块。
 min_len/max_len 均按正文计，不含 `title_path｜` 前缀。
+页码线程化（task-6b）：OutChunk.page 取组内首块 Block.page，无页码来源缺省 None。
 """
 
 import pytest
@@ -138,7 +139,38 @@ def test_blank_text_block_dropped() -> None:
     """边界：纯空白正文块不产出只有前缀的空块。"""
     blocks = [
         Block(level=1, heading_path=["第1章"], text="   \n　 "),
-        Block(level=1, heading_path=["第2章"], text="正" * 300),
+        Block(level=2, heading_path=["第2章"], text="正" * 300),
     ]
     chunks = split(ParsedDoc(title="员工手册", blocks=blocks))
     assert chunks == [OutChunk(content=f"第2章｜{'正' * 300}", title_path="第2章", position=0)]
+
+
+def test_page_threaded_from_first_block_of_group() -> None:
+    """页码线程化：OutChunk.page 取组内首块 page——跨页同级合并组取首块页码，超长按句切各块同页。"""
+    merged = split(
+        ParsedDoc(
+            title="员工手册",
+            blocks=[
+                Block(level=2, heading_path=["第3章", "3.1"], text="甲" * 150, page=4),
+                Block(level=2, heading_path=["第3章", "3.2"], text="乙" * 150, page=5),
+            ],
+        )
+    )
+    assert [chunk.page for chunk in merged] == [4]  # 合并组页码取首块（第 4 页），不取后继
+    oversized = split(
+        ParsedDoc(
+            title="员工手册",
+            blocks=[Block(level=1, heading_path=["附录"], text=_sentences(15), page=7)],
+        )
+    )
+    assert [chunk.page for chunk in oversized] == [7, 7]  # 同节按句切分：各块页码一致
+
+
+def test_page_defaults_to_none_without_page_source() -> None:
+    """无页码来源（docx/MinerU 构造点）：Block.page 缺省 None 且透传到 OutChunk.page。"""
+    blocks = [
+        Block(level=1, heading_path=["第1章"], text="正" * 350),
+        Block(level=1, heading_path=["第2章"], text="正" * 350),
+    ]
+    chunks = split(ParsedDoc(title="员工手册", blocks=blocks))
+    assert [chunk.page for chunk in chunks] == [None, None]

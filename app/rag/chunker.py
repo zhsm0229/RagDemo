@@ -6,6 +6,8 @@ r"""分块纯函数：标题层级分块 + 长度约束 + title_path 前缀，�
 硬切兜底；③ 尾块 <min_len 并入前块（min_len 优先于 max_len，此时该块正文可能
 超出 max_len）。title_path = `" > ".join(heading_path)`；content 前缀
 `f"{title_path}｜"`（全角竖线）。min_len/max_len 均按正文计，不含前缀。
+页码线程化（task-6b）：OutChunk.page 取组内首块 Block.page（跨页合并组不混页码），
+无页码来源（docx/MinerU）为 None；页码只作引用定位，不参与聚合与切分判定。
 """
 
 from dataclasses import dataclass
@@ -15,11 +17,15 @@ _SENTENCE_ENDERS = "。！？!?"
 
 @dataclass
 class Block:
-    """标题节：level 为标题层级，heading_path 为根到当前节的标题路径，text 为节正文。"""
+    """标题节：level 为标题层级，heading_path 为根到当前节的标题路径，text 为节正文。
+
+    page 为块所在页码（1 起；\\f 分页约定见 parser.PDF_PAGE_SEPARATOR），无页码
+    概念的来源（docx/MinerU）为 None——带默认值，既有构造点向后兼容。"""
 
     level: int
     heading_path: list[str]
     text: str
+    page: int | None = None
 
 
 @dataclass
@@ -32,20 +38,25 @@ class ParsedDoc:
 
 @dataclass
 class OutChunk:
-    """输出块：content 为带 `title_path｜` 前缀的正文（供引用溯源），position 为全局序号。"""
+    """输出块：content 为带 `title_path｜` 前缀的正文（供引用溯源），position 为全局序号。
+
+    page 为组内首块页码（入库落 chunks.page_no），无页码来源为 None，与 position
+    同为逐块直传字段。"""
 
     content: str
     title_path: str
     position: int
+    page: int | None = None
 
 
 @dataclass
 class _Group:
-    """聚合中间态：title_path/level 取首节，texts 为并入的各节正文（以换行连接）。"""
+    """聚合中间态：title_path/level/page 取首节，texts 为并入的各节正文（以换行连接）。"""
 
     title_path: str
     level: int
     texts: list[str]
+    page: int | None
 
     @property
     def text(self) -> str:
@@ -101,7 +112,12 @@ def _aggregate(doc: ParsedDoc, min_len: int, max_len: int) -> list[_Group]:
                 last.texts.append(block.text)
                 continue
         groups.append(
-            _Group(title_path=" > ".join(block.heading_path), level=block.level, texts=[block.text])
+            _Group(
+                title_path=" > ".join(block.heading_path),
+                level=block.level,
+                texts=[block.text],
+                page=block.page,
+            )
         )
     return groups
 
@@ -121,6 +137,7 @@ def split(doc: ParsedDoc, min_len: int = 300, max_len: int = 800) -> list[OutChu
                     content=f"{group.title_path}｜{piece}",
                     title_path=group.title_path,
                     position=len(chunks),
+                    page=group.page,
                 )
             )
     return chunks

@@ -203,8 +203,10 @@ def test_upload_ready_writes_chunks_and_audits(session: Session, tmp_path) -> No
         assert row.content == chunk.content  # 含 `title_path｜` 前缀
         assert row.title_path == chunk.title_path
         assert row.content_chars == len(chunk.content)
+        assert row.page_no == chunk.page  # docx 无页码概念：page_no 随块保持 NULL
         assert row.dept_id == doc.dept_id
         assert row.is_active is True
+    assert all(row.page_no is None for row in rows)
     dims = (
         session.execute(
             select(func.vector_dims(Chunk.embedding)).where(Chunk.document_id == doc.id)
@@ -477,6 +479,7 @@ def test_pdf_without_mineru_uses_pypdf_engine(session: Session, tmp_path) -> Non
     rows = _chunks(session, doc.id)
     assert len(rows) == 2  # 两页共约 1260 字 > max_len 800：按句切为两块
     assert [row.position for row in rows] == [0, 1]
+    assert [row.page_no for row in rows] == [1, 2]  # 页码入库：块所在页（1 起）回填 page_no
     for row in rows:  # PDF 无标题层级：title_path 取文件名主干
         assert row.title_path == "policy_2026"
         assert row.content.startswith("policy_2026｜")

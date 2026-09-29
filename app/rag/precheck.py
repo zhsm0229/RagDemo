@@ -112,7 +112,10 @@ def garbled_ratio(text: str) -> float:
 
 
 def _page_hint(text: str, offset: int) -> int:
-    """页码提示：解析器以 \f（换页符）分页，命中前的 \f 计数 + 1。"""
+    """页码提示：解析器以 \f（换页符）分页，命中前的 \f 计数 + 1。
+
+    与 parser._page_blocks 并存不冲突（task-6b 互指）：后者按同一 \f 约定为
+    Block.page 打引用定位页码；本函数只服务敏感扫描命中的原文定位。"""
     return text.count("\f", 0, offset) + 1
 
 

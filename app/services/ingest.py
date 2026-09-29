@@ -218,6 +218,7 @@ def _commit_ready(
                 content=chunk.content,
                 content_chars=len(chunk.content),
                 position=chunk.position,
+                page_no=chunk.page,  # 引用定位（task-6b）：pdf 块所在页，无页码来源 NULL
                 embedding=vector,
             )
         )

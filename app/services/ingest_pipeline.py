@@ -6,7 +6,7 @@ r"""F1 异步段只读分析管线：解析→质量红线→逐块清洗→乱�
 （有符号）的互转在本模块收口。
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from sqlalchemy import select
@@ -18,7 +18,7 @@ from app.core.errors import ERR_PARSE_FAILED, ApiError
 from app.core.llm import Embedder, UpstreamError
 from app.core.storage import FileStorage
 from app.db.models import Document
-from app.rag.chunker import Block, OutChunk, ParsedDoc, split
+from app.rag.chunker import OutChunk, ParsedDoc, split
 from app.rag.clean import RAW_CHARS, clean_text
 from app.rag.parser import PdfFallbackParser, get_parser
 from app.rag.precheck import (
@@ -72,7 +72,8 @@ def analyze_document(session: Session, deps: IngestDeps, doc: Document) -> Pipel
         doc.original_filename, content, deps.parser_settings
     )
     raw = "\n".join(block.text for block in parsed.blocks)  # 清洗前全文＝红线分母（§10.3）
-    cleaned_blocks = [Block(b.level, b.heading_path, clean_text(b.text)) for b in parsed.blocks]
+    # 清洗只覆写 text（dataclasses.replace）：parse 阶段打上的 Block.page 原样保留（task-6b）
+    cleaned_blocks = [replace(block, text=clean_text(block.text)) for block in parsed.blocks]
     cleaned = "\n".join(block.text for block in cleaned_blocks)
     _check_quality(raw, cleaned)
     fingerprint = simhash64(cleaned)

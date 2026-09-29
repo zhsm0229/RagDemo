@@ -32,7 +32,9 @@ MAX_ENTRIES: int = 100_000  # §6.3：docx 压缩包条目数上限
 MAX_ENTRY_XML_BYTES: int = 64 * 1024 * 1024  # 单个自读条目的声明/实读上限（防内存放大 OOM）
 MAX_PAGES: int = 2000  # §6.3：pdf 页数上限
 MAX_OUTPUT_CHARS: int = 2_000_000  # §6.3：解析输出字符数上限
-PDF_PAGE_SEPARATOR: str = "\f"  # 全链路分页约定：rag/precheck.page_hint 按其计页
+# 全链路分页约定（task-6b）：pdf 页间以 \f 相接；precheck.page_hint 按其计页（敏感
+# 扫描定位），_page_blocks 按其切页为 Block.page 打页码（引用定位）——两处并存互指。
+PDF_PAGE_SEPARATOR: str = "\f"
 
 _XML_SCAN_CHUNK: int = 1 << 20  # 流式扫描块大小
 _SCAN_OVERLAP: int = 8  # 重叠窗口 = 最长模式 len(b"<!doctype") - 1，防模式跨块漏检
@@ -87,6 +89,17 @@ def _check_output(total_chars: int, cap: int) -> None:
     """解析输出字符数上限（§6.3）：超限拒收。"""
     if total_chars > cap:
         raise ApiError(ERR_PARSE_FAILED, "解析输出字符数超过上限", 422)
+
+
+def _page_blocks(stem: str, text: str) -> list[Block]:
+    r"""text→分页 Block 的唯一转换点：按 PDF_PAGE_SEPARATOR（\f）切页，逐页打页码（1 起）。
+
+    与 precheck.page_hint 互为表里：page_hint 数原文 \f 计页（敏感扫描定位），
+    本函数按同一约定为 Block.page 打页码（引用定位），两条线并存不冲突（task-6b）。"""
+    return [
+        Block(level=1, heading_path=[stem], text=page_text, page=number)
+        for number, page_text in enumerate(text.split(PDF_PAGE_SEPARATOR), start=1)
+    ]
 
 
 class DocxParser:
@@ -197,7 +210,7 @@ class DocxParser:
 
 
 class PdfFallbackParser:
-    """pypdf 纯文本降级解析：逐页提取，页间以 \\f 拼接（分页约定见模块 docstring）。
+    """pypdf 纯文本降级解析：逐页提取，按 \\f 分页约定为每页 Block 打页码（1 起）。
 
     魔数≠内容安全：本类只做文本提取，PDF 内嵌 JS/OpenAction 的处置在 W2 生成链路复核。
     """
@@ -212,7 +225,7 @@ class PdfFallbackParser:
         self.max_output_chars: int = max_output_chars
 
     def parse(self, filename: str, content: bytes) -> ParsedDoc:
-        """提取全部页面文本为单块 ParsedDoc（PDF 无标题层级，标题取文件名主干）。"""
+        """逐页提取后经 _page_blocks 产出带页码的标题节块（PDF 无标题层级，标题取文件名主干）。"""
         try:
             reader = PdfReader(io.BytesIO(content))
             if len(reader.pages) > self.max_pages:  # §6.3 页数上限，先于逐页提取
@@ -223,7 +236,7 @@ class PdfFallbackParser:
         text = PDF_PAGE_SEPARATOR.join(pages)
         _check_output(len(text), self.max_output_chars)
         stem = _stem(filename)
-        return ParsedDoc(title=stem, blocks=[Block(level=1, heading_path=[stem], text=text)])
+        return ParsedDoc(title=stem, blocks=_page_blocks(stem, text))
 
 
 class MinerUParser:
@@ -251,7 +264,9 @@ class MinerUParser:
         self._transport: httpx.BaseTransport | None = transport  # 测试注入 httpx.MockTransport
 
     def parse(self, filename: str, content: bytes) -> ParsedDoc:
-        """上传字节取回文本为单块 ParsedDoc；响应须为 {"content": str, "pages": int?}。"""
+        """上传字节取回文本为单块 ParsedDoc；响应须为 {"content": str, "pages": int?}。
+
+        content 无 \\f 分页 → 单块 Block.page=None 不崩；真实部署的页码契约为 W1 移交项。"""
         with httpx.Client(timeout=self.timeout_s, transport=self._transport) as client:
             response = self._post_with_retry(client, filename, content)
             try:
