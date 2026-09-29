@@ -2,8 +2,8 @@ r"""解析器：Parser 接口 + DocxParser（python-docx）+ PdfFallbackParser�
 MinerUParser（HTTP 客户端）+ get_parser 调度器（standards §10.2 解析器选择树）。
 
 安全边界（standards §6.1/§6.3）：docx zip 条目白名单（其余跳过）；包总量声明
-≤500MB、条目 ≤10 万；单条目 MAX_ENTRY_XML_BYTES 实读上限 + 流式重叠窗口扫描
-（防内存放大 OOM）；自读内容拒绝 DOCTYPE/ENTITY（§6.1）；页数/输出字符数上限。
+≤500MB、条目 ≤10 万；单条目 MAX_ENTRY_XML_BYTES 实读上限 + DOCTYPE/ENTITY 流式
+重叠窗口字节扫描（防线实现在 rag/xmlguard.py）；页数/输出字符数上限。
 
 职责边界：解析器不做扩展名/MIME/魔数白名单——那是同步预检
 （rag/precheck.check_sync）的闸门；解析器只管"给字节出文本"。
@@ -26,6 +26,7 @@ from app.core.config import Settings
 from app.core.errors import ERR_PARSE_FAILED, ERR_UNSUPPORTED_FORMAT, ApiError
 from app.core.llm import UpstreamError
 from app.rag.chunker import Block, ParsedDoc
+from app.rag.xmlguard import scan_entry
 
 MAX_UNCOMPRESSED_BYTES: int = 500 * 1024 * 1024  # §6.3：包声明解压总量上限（防解压炸弹）
 MAX_ENTRIES: int = 100_000  # §6.3：docx 压缩包条目数上限
@@ -36,8 +37,6 @@ MAX_OUTPUT_CHARS: int = 2_000_000  # §6.3：解析输出字符数上限
 # 扫描定位），_page_blocks 按其切页为 Block.page 打页码（引用定位）——两处并存互指。
 PDF_PAGE_SEPARATOR: str = "\f"
 
-_XML_SCAN_CHUNK: int = 1 << 20  # 流式扫描块大小
-_SCAN_OVERLAP: int = 8  # 重叠窗口 = 最长模式 len(b"<!doctype") - 1，防模式跨块漏检
 _CONTENT_TYPES: str = "[Content_Types].xml"
 _ALLOWED_PREFIXES: tuple[str, ...] = ("word/", "docProps/", "_rels/")
 # 非法包体底层异常族：加密条目(RuntimeError)、压缩方法不支持(NotImplementedError)、
@@ -153,31 +152,13 @@ class DocxParser:
             try:
                 for info in infos:
                     if _allowed_entry(info.filename):
-                        self._scan_entry(archive, info.filename, info.file_size)
+                        scan_entry(archive, info.filename, info.file_size, self.max_entry_xml_bytes)
             except (
                 _DOCX_PARSE_ERRORS
             ) as exc:  # 条目加密(RuntimeError)/压缩方法不支持(NotImplementedError)
                 raise ApiError(
                     ERR_PARSE_FAILED, "docx 解析失败：条目不可读或压缩方法不支持", 422
                 ) from exc
-
-    def _scan_entry(self, archive: zipfile.ZipFile, name: str, declared: int) -> None:
-        """自读条目守规（§6.1）：声明超限即拒；流式分块扫描 DOCTYPE/ENTITY（重叠窗口防跨界漏检）。"""
-        if declared > self.max_entry_xml_bytes:
-            raise ApiError(ERR_PARSE_FAILED, "docx 单个条目解压后超过 64MB 上限", 422)
-        tail = b""
-        read = 0
-        with archive.open(name) as fh:
-            while chunk := fh.read(_XML_SCAN_CHUNK):
-                read += len(chunk)
-                if read > self.max_entry_xml_bytes:  # 实读限量：谎报声明头的第二道闸
-                    raise ApiError(ERR_PARSE_FAILED, "docx 单个条目解压后超过 64MB 上限", 422)
-                window = (tail + chunk).lower()  # 仅块级小写副本，无全量 data.lower()
-                if b"<!doctype" in window or b"<!entity" in window:
-                    raise ApiError(
-                        ERR_PARSE_FAILED, "docx 内含 DOCTYPE/ENTITY 声明，已拒绝解析", 422
-                    )
-                tail = window[-_SCAN_OVERLAP:]
 
     def _collect(self, document: DocumentObject) -> list[Block]:
         """按文档序遍历段落与表格：标题开新节（heading_path 置根到当前节全路径），正文/表格并入当前节。"""
