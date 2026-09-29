@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 
-from app.api import auth, chat, conversations, documents, feedback
+from app.api import admin_qa_pairs, auth, chat, conversations, documents, feedback
 from app.core import errors
 from app.core.assembly import build_embedder, build_llm, build_reranker, load_prompt_pack
 from app.core.clock import SystemClock
@@ -78,6 +78,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="企业智能工作台", version="0.1.0", lifespan=lifespan)
     app.include_router(auth.router, prefix="/api")
     app.include_router(documents.router, prefix="/api")
+    app.include_router(admin_qa_pairs.router, prefix="/api")
     app.include_router(chat.router, prefix="/api")
     app.include_router(conversations.router, prefix="/api")
     app.include_router(feedback.router, prefix="/api")
