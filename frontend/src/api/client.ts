@@ -19,9 +19,9 @@ export const ABORTED_CODE = -2
 /** 响应体非统一信封（网关 502 页面等），按系统兜底码呈现 */
 export const BAD_RESPONSE_CODE = 5000
 
-const NETWORK_ERROR_MESSAGE = '网络异常，请检查网络后重试'
-const ABORTED_MESSAGE = '请求已取消'
-const FALLBACK_MESSAGE = '系统繁忙，请稍后重试'
+export const NETWORK_ERROR_MESSAGE = '网络异常，请检查网络后重试'
+export const ABORTED_MESSAGE = '请求已取消'
+export const FALLBACK_MESSAGE = '系统繁忙，请稍后重试'
 
 export class ApiClientError extends Error {
   readonly code: number
