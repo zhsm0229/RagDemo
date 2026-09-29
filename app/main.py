@@ -14,6 +14,7 @@ from app.api import (
     admin_eval,
     admin_overview,
     admin_qa_pairs,
+    admin_retrieval_test,
     admin_views,
     auth,
     chat,
@@ -94,6 +95,7 @@ def create_app() -> FastAPI:
     app.include_router(conversations.router, prefix="/api")
     app.include_router(feedback.router, prefix="/api")
     app.include_router(admin_views.router, prefix="/api")
+    app.include_router(admin_retrieval_test.router, prefix="/api")
     app.include_router(admin_overview.router, prefix="/api")
     # 注册顺序即匹配优先级：ApiError → 参数校验 → 兜底 Exception（500 通用错误）
     app.add_exception_handler(errors.ApiError, errors.api_error_handler)

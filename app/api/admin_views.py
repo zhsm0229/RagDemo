@@ -1,7 +1,8 @@
 r"""管理后台路由（M7 起）：/api/admin/*——admin 专属查询/处理端点的汇聚 router。
 
-本文件是管理端路由唯一挂载点（Task 9 badcase / Task 10 检索测试 / Task 11 运营
-概览陆续加入本 router，保持单文件 ≤300 行，超出时按域拆子 router）。全部端点过
+本文件是管理端路由主挂载点（Task 9 badcase / Task 11 运营概览陆续加入本 router，
+保持单文件 ≤300 行，超出时按域拆子 router——Task 10 检索测试因余量不足独立为
+admin_retrieval_test.py，由 main.py 同位注册）。全部端点过
 AdminUser 门（依赖链：登录 → 首登改密 → 角色，401/2003、403/2004，§5.5）；提问
 记录（F-701）与 badcase 队列（F-702）恒滤 is_eval（W3 约束：评测数据不污染运营
 查询）。查询与配对逻辑在 services.admin_views / services.badcase_views，本层只做
