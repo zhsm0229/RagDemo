@@ -1,8 +1,9 @@
 r"""评测题库业务：Excel 整批导入（F-601）、模板数据与跑分任务创建（F-602 请求期分区）。
 
-分区预留（Task 7）：人工评判与分组报告将在本模块追加新分区（单文件 ≤300 行约束下
-按区组织）；跑分**执行**引擎独立在 services/eval_engine.py（Task 5 评审裁决：后台
-任务体不进本文件，预算留给评判/报告）。
+分区（Task 7）：人工评判（submit_judgments 录分重算）在本模块追加；分组报告是
+纯读聚合，独立在 services/eval_report.py（消费本模块的 final_judgment 合并口径，
+单文件 ≤300 行约束）；跑分**执行**引擎独立在 services/eval_engine.py（Task 5 评审
+裁决：后台任务体不进本文件，预算留给评判）。
 
 整批语义与问答对导入（services/qa_pairs.py）同构：xlsx_io.read_rows 结构级校验后，
 行级业务校验在本模块聚合（部门枚举、问题 1-2000、期望答案非空 ≤10000、题型枚举，
@@ -27,7 +28,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.clock import Clock, get_clock
-from app.core.errors import ERR_PARAM_INVALID, ApiError
+from app.core.errors import ERR_EVAL_STATE, ERR_NOT_FOUND, ERR_PARAM_INVALID, ApiError
 from app.db.models import Department, EvalQuestion, EvalRun
 from app.services.audit import record_audit
 from app.services.xlsx_io import XlsxBatchError, read_rows, write_template
@@ -216,3 +217,72 @@ def create_eval_run(db: Session, actor_user_id: int, name: str, perspective_dept
     )
     db.commit()
     return run.id
+
+
+# ---------------------------------------------------------------------------
+# 人工评判（F-602 录分）：detail 逐题 judgment + correct/accuracy 重算
+# ---------------------------------------------------------------------------
+
+RUN_NOT_FOUND_MSG: str = "评测任务不存在"  # 评测任务寻址失败统一文案（详情/录分/报告共用）
+_MSG_NOT_DONE: str = "评测任务未完成，暂不能录分"  # 仅 done 收口可录分（running 后台正写 detail）
+
+# 判定协议第 1 条折算表：正确 1 / 部分 0.5 / 错误 0 / pending（人工与 auto 均未判）计 0。
+# Decimal 精确累加 0.5 不漂；eval_runs.correct 已迁 NUMERIC(6,1)（0003）容半分
+JUDGMENT_SCORES: dict[str, Decimal] = {
+    "correct": Decimal(1),
+    "partial": Decimal("0.5"),
+    "wrong": Decimal(0),
+    "pending": Decimal(0),
+}
+
+
+def final_judgment(item: dict) -> str:
+    """合并口径（Task 7 钉死，录分重算与 eval_report 报告共用单一来源）：每题最终
+    判定 = 人工 judgment（若有，api 层 Literal 三档把关）否则 autoJudgment——
+    auto correct 无人工判计 1、auto correct 被人工判 wrong 计 0、拒答题未被拒
+    （auto wrong）无人工判计 0、人工与 auto 均 pending 计 0（JUDGMENT_SCORES）。"""
+    return item.get("judgment") or item["autoJudgment"]
+
+
+def submit_judgments(
+    db: Session, run_id: int, actor_user_id: int, entries: list[tuple[int, str]]
+) -> EvalRun:
+    """人工评判录分（F-602）：逐题 judgment 写进 detail 并重算 correct/accuracy。
+
+    仅 status='done' 可评（running 时后台任务正逐题写 detail，并发读-改-写互相
+    覆盖；failed 明细不完整）→ 422/ERR_EVAL_STATE；run 不存在 404；questionId
+    不在明细 → 422/ERR_PARAM_INVALID 指名题号。correct 为加权总分（判定协议
+    第 1 条，JUDGMENT_SCORES 折算，含未判题 pending 计 0）；逐题最终判定走
+    final_judgment（人工优先）。detail 一次性读-改-写并重赋值触发 JSONB 变更
+    跟踪（先例 eval_engine._run_questions），单 commit 保证 judgment 与指标原子
+    一致；pendingCount 同步刷新为"人工与 auto 均未判"题数。审计 eval.judge
+    {runId, judged} 与业务写入同事务（§23）。entries 由 api 层 Literal 校验后
+    传 (questionId, judgment) 对。
+    """
+    run = db.get(EvalRun, run_id)
+    if run is None:
+        raise ApiError(ERR_NOT_FOUND, RUN_NOT_FOUND_MSG, 404)
+    if run.status != "done":
+        raise ApiError(ERR_EVAL_STATE, _MSG_NOT_DONE, 422)
+    detail = dict(run.detail) if run.detail else {"items": []}
+    by_id = {item["questionId"]: item for item in detail["items"]}
+    unknown = sorted({question_id for question_id, _ in entries} - by_id.keys())
+    if unknown:
+        raise ApiError(ERR_PARAM_INVALID, f"题目不在本次跑分明细中：{unknown}", 422)
+    for question_id, judgment in entries:
+        by_id[question_id]["judgment"] = judgment
+    items: list[dict] = detail["items"]
+    detail["pendingCount"] = sum(1 for item in items if final_judgment(item) == "pending")
+    run.correct = sum(JUDGMENT_SCORES[final_judgment(item)] for item in items)
+    run.accuracy = run.correct / Decimal(run.total) if run.total else Decimal(0)
+    run.detail = detail  # 重赋值：JSONB 原地改动不被变更跟踪（eval_engine 同注）
+    record_audit(
+        db,
+        actor_user_id,
+        "eval.judge",
+        "eval_run",
+        run.id,
+        {"runId": run.id, "judged": len(entries)},
+    )
+    db.commit()
+    return run

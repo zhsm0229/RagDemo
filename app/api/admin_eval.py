@@ -1,4 +1,5 @@
-r"""管理端评测路由（薄控制器）：题库 Excel 导入（F-601）+ 模板下载 + 跑分（F-602）。
+r"""管理端评测路由（薄控制器）：题库 Excel 导入（F-601）+ 模板下载 + 跑分（F-602）
++ 人工评判录分（F-602/F-603 评判提交）+ 分组报告（F-603）。
 
 业务全部委托 services 层：导入走 eval_service（XlsxBatchError 统一转 422/1003，错误
 行列表直接放 data（standards §21.9），行号是 xlsx_io 携带的 Excel 物理行号；文件级
@@ -13,18 +14,19 @@ PK），坏 zip 不再漏到 500 兜底。评测题不参与问答检索（跑�
 任务拿不到 request/app.state，run 行也不存部门。
 """
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, BackgroundTasks, File, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import AdminUser, DbSession
 from app.core.errors import ERR_NOT_FOUND, ERR_PARAM_INVALID, ApiError
 from app.db.models import Department, EvalRun
-from app.services import eval_engine, eval_service
+from app.services import eval_engine, eval_report, eval_service
+from app.services.eval_service import RUN_NOT_FOUND_MSG
 from app.services.xlsx_io import XlsxBatchError
 
 router = APIRouter(prefix="/admin/eval-questions", tags=["admin-eval"])
@@ -105,7 +107,6 @@ def download_template(user: AdminUser) -> Response:
 # ---------------------------------------------------------------------------
 
 _RUN_NAME_MAX = 100  # 任务名单行文本，页面输入框量级；超限 422/1003 字段级
-_MSG_RUN_NOT_FOUND = "评测任务不存在"
 
 
 def _resolve_perspective_dept(db: Session, code: str) -> int:
@@ -143,13 +144,13 @@ class EvalRunCreate(BaseModel):
 
 
 def _run_summary(run: EvalRun) -> dict:
-    """列表项 DTO（§3.4 camelCase，brief 钉字段）：accuracy Decimal 转 float。"""
+    """列表项 DTO（§3.4 camelCase，brief 钉字段）：Decimal 列转 float（correct 可半分）。"""
     return {
         "id": run.id,
         "name": run.name,
         "status": run.status,
         "total": run.total,
-        "correct": run.correct,
+        "correct": float(run.correct),
         "accuracy": float(run.accuracy),
         "createdAt": run.created_at.isoformat(),
     }
@@ -208,9 +209,66 @@ def get_eval_run(run_id: int, user: AdminUser, db: DbSession) -> dict:
     """跑分详情：含 config 快照与 detail 全量（逐题判定与引用），轮询用；不存在 404。"""
     run = db.get(EvalRun, run_id)
     if run is None:
-        raise ApiError(ERR_NOT_FOUND, _MSG_RUN_NOT_FOUND, 404)
+        raise ApiError(ERR_NOT_FOUND, RUN_NOT_FOUND_MSG, 404)
     return {
         "code": 0,
         "message": "ok",
         "data": {**_run_summary(run), "config": run.config, "detail": run.detail},
     }
+
+
+# ---------------------------------------------------------------------------
+# 人工评判（F-602 录分）+ 分组报告（F-603）
+# ---------------------------------------------------------------------------
+
+
+class JudgmentItem(BaseModel):
+    """单题录分：judgment 三档枚举锁 API（判定协议第 1 条，防口径漂移）。"""
+
+    questionId: int
+    judgment: Literal["correct", "partial", "wrong"]
+
+
+class JudgmentSubmit(BaseModel):
+    """POST /api/admin/eval-runs/{id}/judgments 请求体；items 非空（空提交无意义
+    且会写审计痕，Pydantic 先拒 422/1003）。"""
+
+    items: list[JudgmentItem] = Field(min_length=1)
+
+
+@runs_router.post("/{run_id}/judgments")
+def submit_eval_judgments(
+    run_id: int, body: JudgmentSubmit, user: AdminUser, db: DbSession
+) -> Response:
+    """人工评判录分（F-602）：detail 逐题 judgment + correct/accuracy 重算，200 回
+    收口后的 summary + pendingCount（前端即时刷新）。
+
+    仅 status='done' 可评：running/failed → 422/3004（ERR_EVAL_STATE，running 时
+    后台任务正逐题写 detail，并发读-改-写互相覆盖）；questionId 不在明细 →
+    422/1003 指名题号；不存在 → 404/3003。审计 eval.judge {runId, judged}。
+    """
+    run = eval_service.submit_judgments(
+        db, run_id, user.id, [(item.questionId, item.judgment) for item in body.items]
+    )
+    return JSONResponse(
+        status_code=200,
+        content={
+            "code": 0,
+            "message": "ok",
+            "data": {
+                **_run_summary(run),
+                "pendingCount": (run.detail or {}).get("pendingCount", 0),
+            },
+        },
+    )
+
+
+@runs_router.get("/{run_id}/report")
+def get_eval_report(run_id: int, user: AdminUser, db: DbSession) -> dict:
+    """分组报告（F-603）：{config, status, totals, byDept, byQtype}，明细从 detail
+    聚合（合并口径=人工 judgment 优先否则 autoJudgment，见 eval_report 模块
+    docstring）；不存在 404/3003。"""
+    run = db.get(EvalRun, run_id)
+    if run is None:
+        raise ApiError(ERR_NOT_FOUND, RUN_NOT_FOUND_MSG, 404)
+    return {"code": 0, "message": "ok", "data": eval_report.build_report(db, run)}

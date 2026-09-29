@@ -31,6 +31,7 @@ ERR_RATE_LIMITED: int = 2005  # 登录请求过于频繁（进程内滑动窗口
 ERR_DUPLICATE_DOC: int = 3001  # 上传文件与库内已有文档完全重复（F-1001 精确查重，409）
 ERR_DAILY_LIMITED: int = 3002  # 单用户每日提问次数已达上限（问答端点开流前拒绝，429）
 ERR_NOT_FOUND: int = 3003  # 会话不存在或无权访问（问答端点归属校验，404，IDOR 防线 §21.8）
+ERR_EVAL_STATE: int = 3004  # 评测任务状态冲突：仅 status=done 收口的跑分可人工录分（422）
 
 # 5xxx 系统类
 ERR_INTERNAL: int = 5000  # 兜底系统错误（响应体只给通用提示，堆栈进日志 §16.4）
