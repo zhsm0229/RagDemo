@@ -34,6 +34,14 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 _ALLOWED_STATUS: tuple[str, ...] = ("pending", "parsing", "ready", "failed")  # 与 DDL CHECK 同源
 _MAX_UPLOAD_BYTES: int = 50 * 1024 * 1024  # 与 check_sync 的 50MB 上限同源（API 侧早拒用）
 _MSG_NOT_FOUND = "文档不存在"
+_ESCAPES = (("\\", "\\\\"), ("%", "\\%"), ("_", "\\_"))  # §22：ILIKE 通配符按字面匹配
+
+
+def _escape_like(keyword: str) -> str:
+    """§22：`%`/`_`/`\\` 逐一转义，关键字按字面匹配不展开为通配（同 qa_pairs 口径）。"""
+    for raw, safe in _ESCAPES:
+        keyword = keyword.replace(raw, safe)
+    return keyword
 
 
 def _early_reject_oversize(file: UploadFile) -> None:
@@ -157,8 +165,13 @@ def list_documents(
             raise ApiError(ERR_PARAM_INVALID, f"状态取值无效：{status}", 422)
         filters.append(Document.status == status)
     if keyword:
-        like = f"%{keyword}%"
-        filters.append(or_(Document.title.ilike(like), Document.original_filename.ilike(like)))
+        like = f"%{_escape_like(keyword)}%"
+        filters.append(
+            or_(
+                Document.title.ilike(like, escape="\\"),
+                Document.original_filename.ilike(like, escape="\\"),
+            )
+        )
     stmt = select(Document, Department.code).join(Department, Document.dept_id == Department.id)
     if filters:
         stmt = stmt.where(*filters)

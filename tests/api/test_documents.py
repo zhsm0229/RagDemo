@@ -427,6 +427,26 @@ def test_upload_normal_mode_schedules_background(client, session, sandbox_storag
     assert scheduled == [data["id"]]
 
 
+# ---------- keyword ILIKE 转义（§22，与 qa_pairs 同口径） ----------
+
+
+def test_list_keyword_wildcards_matched_literally(client, session, sandbox_storage, test_mode):
+    """keyword ILIKE 转义（§22）：`折扣率100%` 不命中「100X」行、`上限_万` 不命中
+    「上限9万」行——通配符按字面匹配不展开（qa_pairs 口径移植到 documents 列表）。"""
+    admin_login(client, session)
+    id_pct = post_document(client, title="客服_折扣率100%规则_20260901").json()["data"]["id"]
+    id_x = post_document(client, title="客服_折扣率100X规则_20260901").json()["data"]["id"]
+    id_ul = post_document(client, title="客服_报销上限_万规则_20260901").json()["data"]["id"]
+    post_document(client, title="客服_报销上限9万规则_20260901")  # 阴性对照：_ 不展开则不命中
+
+    by_pct = client.get("/api/documents", params={"keyword": "折扣率100%"}).json()["data"]
+    assert [i["id"] for i in by_pct["items"]] == [id_pct]  # % 若展开为通配 id_x 也命中
+    by_underline = client.get("/api/documents", params={"keyword": "上限_万"}).json()["data"]
+    assert [i["id"] for i in by_underline["items"]] == [id_ul]  # _ 若展开 id_num 也命中
+    by_literal = client.get("/api/documents", params={"keyword": "折扣率100X"}).json()["data"]
+    assert [i["id"] for i in by_literal["items"]] == [id_x]  # 字面 keyword 精确命中
+
+
 # ---------- 元数据日期格式（字段级 422） ----------
 
 
