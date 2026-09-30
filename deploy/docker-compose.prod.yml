@@ -1,0 +1,98 @@
+# 生产栈 compose（standards §12.2/§12.5 口径）：仅 app 对外发布 80，其余纯内网互联。
+# 用法（部署机）：APP_IMAGE=<ghcr 引用@digest> docker compose -f docker-compose.prod.yml up -d
+# 密钥经同目录 .env.prod（git 忽略，runbook §发布 有字段清单），本文件零明文密钥（§12.7）。
+# 镜像一律 digest 引用（§13.2 同 digest 双 tag），digest 清单见 deploy/releases.md。
+services:
+  app:
+    image: ${APP_IMAGE:?必须提供镜像 digest 引用，如 ghcr.io/org/repo/ragdemo@sha256:...}
+    container_name: ragdemo-app
+    ports:
+      - "80:8000" # 全栈唯一对外端口（前端 dist + /api 同源）
+    environment:
+      DATABASE_URL: postgresql+psycopg://rag:${POSTGRES_PASSWORD:?}@pg:5432/rag
+      STATIC_DIR: /srv/ragdemo/static
+    env_file:
+      - .env.prod
+    volumes:
+      - uploads:/srv/ragdemo/data
+    depends_on:
+      pg:
+        condition: service_healthy
+    mem_limit: 2g # §12.5 app 2C2G
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz', timeout=3).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  pg:
+    image: pgvector/pgvector:pg15 # §12.2 钉 15+（HNSW/分区下限），禁止 latest
+    container_name: ragdemo-pg
+    environment:
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: rag
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    mem_limit: 3g # §12.5 pg 2C3G
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag -d rag"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  tei-embed:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.2
+    container_name: ragdemo-tei-embed
+    command: ["--model-id", "/data/bge-m3", "--pooling", "cls", "--max-batch-tokens", "2048"]
+    volumes:
+      - ${TEI_MODELS_DIR:-/opt/ragdemo/tei-models}:/data:ro
+    mem_limit: 3g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 10m
+
+  tei-rerank:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.2
+    container_name: ragdemo-tei-rerank
+    command: ["--model-id", "/data/bge-reranker-v2-m3", "--max-batch-tokens", "2048"]
+    volumes:
+      - ${TEI_MODELS_DIR:-/opt/ragdemo/tei-models}:/data:ro
+    # 偏差登记：§12.5 按 GPU 口径给 1C3G；现 CPU candle 后端加载+预热峰值需 4.5g
+    #（reranker 仓库无 onnx 导出）。GPU TEI 到位后调回并复测（runbook 模型版本表跟踪）。
+    mem_limit: 4g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 10m
+
+  mineru:
+    image: ${MINERU_IMAGE:-mineru-cpu:2.5.4} # 部署机自建（docker/mineru-cpu.Dockerfile），digest 入 runbook 模型版本表
+    container_name: ragdemo-mineru
+    environment:
+      MINERU_MODEL_SOURCE: modelscope
+    volumes:
+      - mineru-models:/root/.cache
+    mem_limit: 6g # §12.5 mineru 4C6G（ONNX/pipeline 后端）
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/docs || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 15m
+
+volumes:
+  pgdata:
+  uploads:
+  mineru-models:
