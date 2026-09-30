@@ -2,7 +2,7 @@
 
 > 依据 `docs/standards.md` §3（API 接口规范）编写，随代码演进（§19.1 文档随代码）。
 > 覆盖 `app/api/` 当前全部路由：auth 4 个、documents 6 个、chat 1 个、conversations 4 个、citations 1 个、messages（feedback）1 个、admin 管理端 27 个（问答对 6、评测 8、提问记录与 badcase 4、检索测试 1、概览与健康度 2、用户管理 4、审计查询 2），共 44 个端点。
-> 最后更新：W4 合并门禁（补登 import-zip / metadata-suggest / citations-content / 用户管理 / 审计查询；§4.2.8 补推荐守卫条款与错误码 3005）。
+> 最后更新：W5 Task 2（qa-pairs 列表 DTO 补 deptCode 成 9 键；§4.3/§4.5 补"包含已删除会话的消息"口径句；§2.9 部门段双收中文，与 §2.10 同源别名表）。
 
 ## 1. 通用约定
 
@@ -145,7 +145,7 @@ POST SSE 须用 fetch + ReadableStream 消费（无 EventSource 自动重连）�
 | 鉴权 | AdminUser |
 | 请求 | multipart/form-data：`file`（.zip 压缩包本体；无表单元数据字段） |
 | 合规语义 | 视同已勾选内容合规确认（§7.4：zip 导入是管理端管理员的显式批量操作），不设 `complianceConfirmed` 字段 |
-| 条目规则 | 文件名 `部门_主题_日期.ext`：部门限库内枚举 service / hr / all，日期 YYYYMMDD / YYYY-MM-DD（严格位数 + 真实日期），主题可含下划线；责任人=上传管理员；命名不符该条"元数据待补"不入库（skipped_metadata），不拖垮包内其余条目 |
+| 条目规则 | 文件名 `部门_主题_日期.ext`：部门段中文名（客服/人力/全员）与编码（service/hr/all）均收、归一为编码（与 §2.10 同源别名表）；日期 YYYYMMDD / YYYY-MM-DD（严格位数 + 真实日期），主题可含下划线；责任人=上传管理员；命名不符该条"元数据待补"不入库（skipped_metadata），不拖垮包内其余条目 |
 | 安全上限（§6.3） | 先**安全预扫描**（流式计数实际解压字节，不信任 file_size 声明，不落盘不落库）：解压产物总量 ≤500MB、条目数 ≤10 万、嵌套 zip 与加密条目**整包拒收** 422；单条目 >50MB 仅该条 rejected、包内其余继续；任一整包超限读到即中止，无已写产物可残留 |
 | 成功响应 | `202`，`data: {results, accepted, rejected, skipped}`。results 逐条目 `{filename, status, documentId?, reason?}`，status 四态枚举：`accepted`（入库并进解析队列，带 documentId）/ `duplicate`（SHA-256 与已有文档完全重复，带已有 documentId 与 reason）/ `rejected`（白名单 / 单条目超限等，带 reason）/ `skipped_metadata`（命名不符，带 reason）。`skipped` = duplicate + skipped_metadata；批量部分成功语义（逐条目独立事务），accepted 条目后台解析（test_mode 同步执行，响应即可断言终态） |
 | 错误分支 | `422/1003` 非 zip 包 / 条目数超上限 / 解压总量超 500MB / 嵌套 zip / 加密条目（整包拒收，中文原因指名条目）；`401/2003`；`403/2004` |
@@ -271,7 +271,7 @@ SSE 事件 DTO 字段表（**逐字引自 standards §3 第 6 条**）：
 | 项 | 说明 |
 |----|------|
 | 查询参数 | `deptId`（可选）、`status`（enabled / disabled，可选）、`keyword`（问题/答案 ILIKE 模糊，`%`/`_`/`\` 已转义按字面匹配）、`page`（≥1，默认 1）、`pageSize`（1-100，默认 20） |
-| 成功响应 | `200`，`data: {items, total, page, pageSize}`。items 项字段：`id, deptId, question, answer, status, batchNo, createdAt, isActive`；软删行不出现 |
+| 成功响应 | `200`，`data: {items, total, page, pageSize}`。items 项字段：`id, deptId, deptCode, question, answer, status, batchNo, createdAt, isActive`（deptCode 为 join departments 取库内编码）；软删行不出现 |
 | 错误分支 | `422/1003` status 取值无效、分页越界 |
 
 #### 4.1.4 PATCH /api/admin/qa-pairs/{id}/status — 停用 / 启用
@@ -366,7 +366,7 @@ SSE 事件 DTO 字段表（**逐字引自 standards §3 第 6 条**）：
 
 ### 4.3 提问记录与 badcase 治理（M7，/api/admin/messages、/api/admin/badcases）
 
-两查询恒滤 `is_eval=true`（W3 约束：评测数据不污染运营查询）；提问记录以 user 消息行为单位，badcase 队列以点踩回答为单位。
+两查询恒滤 `is_eval=true`（W3 约束：评测数据不污染运营查询）；提问记录以 user 消息行为单位，badcase 队列以点踩回答为单位。口径说明：提问记录与运营概览包含已删除会话的消息（管理审计面，删除仅前端隐藏）。
 
 #### 4.3.1 GET /api/admin/messages — 提问记录列表（F-701）
 
@@ -413,6 +413,8 @@ SSE 事件 DTO 字段表（**逐字引自 standards §3 第 6 条**）：
 | 错误分支 | `422/1003` question 长度非法（field 级）、deptCode 枚举外 |
 
 ### 4.5 运营概览与语料健康度
+
+口径说明：运营概览与提问记录一样，包含已删除会话的消息（管理审计面，删除仅前端隐藏）。
 
 #### 4.5.1 GET /api/admin/overview — 运营概览（F-704）
 
