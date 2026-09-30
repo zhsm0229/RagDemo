@@ -1,8 +1,8 @@
 # RagDemo 接口文档（W1 - W4）
 
 > 依据 `docs/standards.md` §3（API 接口规范）编写，随代码演进（§19.1 文档随代码）。
-> 覆盖 `app/api/` 当前全部路由：auth 4 个、documents 4 个、chat 1 个、conversations 4 个、messages（feedback）1 个、admin 管理端 21 个，共 35 个端点。
-> 最后更新：W4（Task 5 追加评测阈值扫描端点）。
+> 覆盖 `app/api/` 当前全部路由：auth 4 个、documents 6 个、chat 1 个、conversations 4 个、citations 1 个、messages（feedback）1 个、admin 管理端 27 个（问答对 6、评测 8、提问记录与 badcase 4、检索测试 1、概览与健康度 2、用户管理 4、审计查询 2），共 44 个端点。
+> 最后更新：W4 合并门禁（补登 import-zip / metadata-suggest / citations-content / 用户管理 / 审计查询；§4.2.8 补推荐守卫条款与错误码 3005）。
 
 ## 1. 通用约定
 
@@ -11,8 +11,8 @@
 - 除 `POST /api/auth/login` 外全部接口需要登录：请求须携带登录时下发的 `jwt` Cookie
   （httpOnly、SameSite=Lax，有效期默认 8 小时）。
 - 权限门两级：
-  - **ReadyUser**（已登录且已完成首登改密）：问答 / 会话 / 反馈全部端点；
-  - **AdminUser**（admin 角色，链在改密门之后）：文档管理 + W3 全部管理端点（问答对 / 评测 / 提问记录与 badcase 治理 / 检索测试 / 运营概览与语料健康度）。
+  - **ReadyUser**（已登录且已完成首登改密）：问答 / 会话 / 反馈 / 引用正文全部端点；
+  - **AdminUser**（admin 角色，链在改密门之后）：文档管理（含 zip 批量导入与元数据建议）+ 全部管理端点（问答对 / 评测 / 提问记录与 badcase 治理 / 检索测试 / 运营概览与语料健康度 / 用户管理 / 审计查询）。
 - 首登未改密用户访问业务接口一律 `403/2004`；登录过期 / 令牌无效 / 账号禁用一律 `401/2003`。
 
 ### 1.2 统一响应体（standards §3-2）
@@ -59,6 +59,7 @@ POST SSE 须用 fetch + ReadableStream 消费（无 EventSource 自动重连）�
 | 3002 | 429 | 单用户每日提问次数已达上限（问答端点开流前拒绝） | POST /api/chat/stream |
 | 3003 | 404 | 会话/消息不存在或无权访问（归属校验 IDOR 防线，§21.8；不区分"不存在"与"无权"）。W3 管理端寻址失败同码：提问记录不存在 / 点踩记录不存在 / 评测任务不存在 | chat / conversations / feedback / admin 治理与评测端点 |
 | 3004 | 422 | 评测任务状态冲突：仅 status=done 收口的跑分可人工录分 / 阈值扫描（running 时后台正逐题写 detail，failed 明细不完整；扫描另有"无可重放题目"分支，见 4.2.8） | POST /api/admin/eval-runs/{id}/judgments、POST /api/admin/eval-runs/{id}/threshold-scan |
+| 3005 | 409 | 用户名已存在（F-102 发放账号重名；并发撞 users_username_key 唯一索引同码兜底） | POST /api/admin/users |
 | 5000 | 500 | 兜底系统错误（响应体只给通用提示"系统繁忙，请稍后重试"，堆栈进日志） | 全部端点 |
 | 5001 | —（SSE） | 生成服务暂时不可用（仅经 SSE `error` 事件下发，`retryable=true`，话术对外脱敏） | POST /api/chat/stream |
 
@@ -137,6 +138,30 @@ POST SSE 须用 fetch + ReadableStream 消费（无 EventSource 自动重连）�
 | 成功响应 | `200`，`data: {id, isActive: true}`（审计操作者为点击确认的管理员本人） |
 | 错误分支 | `404/1003` 文档不存在 |
 
+### 2.9 POST /api/documents/import-zip — zip 批量导入（W4 后端追加，F-1007）
+
+| 项 | 说明 |
+|----|------|
+| 鉴权 | AdminUser |
+| 请求 | multipart/form-data：`file`（.zip 压缩包本体；无表单元数据字段） |
+| 合规语义 | 视同已勾选内容合规确认（§7.4：zip 导入是管理端管理员的显式批量操作），不设 `complianceConfirmed` 字段 |
+| 条目规则 | 文件名 `部门_主题_日期.ext`：部门限库内枚举 service / hr / all，日期 YYYYMMDD / YYYY-MM-DD（严格位数 + 真实日期），主题可含下划线；责任人=上传管理员；命名不符该条"元数据待补"不入库（skipped_metadata），不拖垮包内其余条目 |
+| 安全上限（§6.3） | 先**安全预扫描**（流式计数实际解压字节，不信任 file_size 声明，不落盘不落库）：解压产物总量 ≤500MB、条目数 ≤10 万、嵌套 zip 与加密条目**整包拒收** 422；单条目 >50MB 仅该条 rejected、包内其余继续；任一整包超限读到即中止，无已写产物可残留 |
+| 成功响应 | `202`，`data: {results, accepted, rejected, skipped}`。results 逐条目 `{filename, status, documentId?, reason?}`，status 四态枚举：`accepted`（入库并进解析队列，带 documentId）/ `duplicate`（SHA-256 与已有文档完全重复，带已有 documentId 与 reason）/ `rejected`（白名单 / 单条目超限等，带 reason）/ `skipped_metadata`（命名不符，带 reason）。`skipped` = duplicate + skipped_metadata；批量部分成功语义（逐条目独立事务），accepted 条目后台解析（test_mode 同步执行，响应即可断言终态） |
+| 错误分支 | `422/1003` 非 zip 包 / 条目数超上限 / 解压总量超 500MB / 嵌套 zip / 加密条目（整包拒收，中文原因指名条目）；`401/2003`；`403/2004` |
+| 审计 | `document.import_zip {total, accepted, rejected, skipped}` |
+
+### 2.10 POST /api/documents/metadata-suggest — 上传元数据自动建议（W4 后端追加，F-1008）
+
+| 项 | 说明 |
+|----|------|
+| 鉴权 | AdminUser |
+| 请求 | multipart/form-data：`file`（**仅解析文件名，不读文件内容**，纯函数无 IO） |
+| 规则 | 与 zip 条目同源：`部门_主题_日期.ext`；部门中文名（客服/人力/全员）与编码（service/hr/all）均收、归一为编码；日期 YYYYMMDD / YYYY-MM-DD（严格位数 + 真实日期）；主题可含下划线 |
+| 成功响应 | `200`，`data: {suggestedDeptCode, suggestedTitle, suggestedEffectiveDate}`；任一段不符返回空建议 `{}`（不报错、绝不产出错误建议），前端仅作表单预填 |
+| 越权防线 | 建议部门仅限库内枚举——文件名声明的部门不得造成越权注入；建议仅预填，最终提交仍过上传端点部门校验（§2.5）；AdminUser 门即管辖闸（部门→ACL 演进时按上传人管辖部门收紧，§1.7） |
+| 错误分支 | `401/2003`；`403/2004` |
+
 ---
 
 ## 3. W2 端点
@@ -207,11 +232,21 @@ SSE 事件 DTO 字段表（**逐字引自 standards §3 第 6 条**）：
 | 成功响应 | `200`，`data: {id, feedback, feedbackCategory, feedbackComment, badcaseStatus}`。down 落三列并把 badcase_status="待处理" 进治理队列（F-702；仅状态为空或"待处理"时置，admin 处理终态"已修语料"/"已忽略"不被用户改评重开）；改评语义：down→up 清空备注/类型但 badcase_status 不回退，重复 down 幂等更新备注/类型 |
 | 错误分支 | `422/1003` 备注长度非法（field=comment）/ 类型不在枚举（field=category）；`404/3003` 消息不存在或无权访问（不存在 / 他人消息 / 非 assistant / 中断占位行同判）；`401/2003`；`403/2004` |
 
+### 3.7 GET /api/citations/content — 引用正文（W4 后端追加，T8 评审裁决 Rider）
+
+| 项 | 说明 |
+|----|------|
+| 鉴权 | ReadyUser（引用产自问答链路，读者即提问者） |
+| 查询参数 | `refType`（枚举 `doc` / `qa`）、`refId`（正整数；语义随 refType：`doc` → chunk id，`qa` → 问答对 id，同 §3.1 citations 口径） |
+| 隔离与存活闸 | 部门隔离 0 容忍（红线①）：`dept_id IN (用户部门, 全员部门)`，与检索 F-502 同口径；存活闸与检索面一致——chunk `is_active` / 问答对 `enabled`+`is_active` / 文档 `is_active`+`ready`（检索给出的引用必在面内，文档撤回后不得再经引用读出正文，W4 T4 评审裁定保留） |
+| 成功响应 | `200`，`data` 六键：`{refType, refId, content, title, page, titlePath}`。doc 分支 content=块原文、title=文档规范标题；qa 分支 content=answer、title=question，`page` / `titlePath` 恒 null（问答对无页码与标题路径概念） |
+| 错误分支 | `404/3003` 统一文案"引用不存在或无权访问"（隔离面外与不存在不区分，不给探测空间，同会话归属口径）；`422/1003` refType 枚举外 / refId 非正整数 |
+
 ---
 
 ## 4. W3 端点（管理后台）
 
-W3 全部 20 个端点均为 **AdminUser 门**（依赖链：登录 → 首登改密 → admin 角色；`401/2003` 未登录 / 令牌无效、`403/2004` 已登录但无权限，下文各端点不再重复）。按域分五个 router：问答对管理（M4）、评测（M6）、提问记录与 badcase 治理（M7）、检索测试、运营概览与语料健康度。涉及列表的响应统一 `{items, total, page, pageSize}`、created_at 降序（同刻 id 降序兜底）；DTO 键 camelCase。
+本节全部端点均为 **AdminUser 门**（依赖链：登录 → 首登改密 → admin 角色；`401/2003` 未登录 / 令牌无效、`403/2004` 已登录但无权限，下文各端点不再重复）。按域分七个 router：问答对管理（M4）、评测（M6）、提问记录与 badcase 治理（M7）、检索测试、运营概览与语料健康度，及 W4 追加的用户管理（§4.7，F-102）与审计查询（§4.8，F-802）。涉及列表的响应统一 `{items, total, page, pageSize}`、created_at 降序（同刻 id 降序兜底）；DTO 键 camelCase。
 
 ### 4.1 问答对管理（M4，/api/admin/qa-pairs）
 
@@ -326,7 +361,7 @@ W3 全部 20 个端点均为 **AdminUser 门**（依赖链：登录 → 首登�
 |----|------|
 | 请求体 | 无。对该 run 已收口的 detail 快照**离线重放**（不调 LLM、不触检索、不改线上阈值），纯内存毫秒级，同步返回（非后台任务） |
 | 重放口径 | 仅重放明细中非 error 且最终判定非 pending（人工 judgment 优先否则 autoJudgment，同 report 口径）的题：refuse 题（citations 为空、无 doc 分）每档都判"拒答"；rag 题取 citations 中 doc 块最大 rerank 分对照档位，score < 阈值判"拒答"（与线上 refuse 分支同序）；qa 题不参与拒答曲线（scope.qaTotal 计数注明），仅参与 qa 曲线——refType=qa 的余弦分 ≥ 阈值即命中（与 match_qa 同序）。拒答档位 0.40-0.70 步长 0.05（7 档）、qa 档位 0.75-0.95 步长 0.05（5 档）。逐档 accuracy 折算：拒答期望题（`[拒答]`/cross_reject）判"拒答"=1、判"回答"=0；非拒答题判"拒答"=0、判"回答"=final_judgment 折算（人工优先，correct 1 / partial 0.5 / wrong 0） |
-| 成功响应 | `200`，`data: {refuseCurve, qaCurve, recommended, scannedAt, scope}`。`refuseCurve: [{threshold, accuracy, refuseRate}]`×7（分母 = refuse/rag 参与题数）；`qaCurve: [{threshold, hitRate}]`×5——**仅 qa 题档位敏感度**：detail 快照未存 rag 题曾见的 qa 匹配分，不含"降档会把 rag 题误引入 qa 通道"的反证数据，局限在 `scope.note` 注明；`recommended: {refuseThreshold, qaThreshold}`——accuracy（qa 侧为 hitRate）最高的档、**并列取更低阈值**（同等得分下更倾向回答/更宽容），该侧无参与者为 null；`scannedAt` ISO 时刻；`scope: {refuseTotal, qaTotal, pendingSkipped, errorSkipped, note}` 分区计数与口径局限说明。结果同时存入该 run 的 `detail.thresholdScan`（F-1012 可追溯，重复扫描覆盖），审计 `eval.threshold_scan {runId}` 与写入同事务 |
+| 成功响应 | `200`，`data: {refuseCurve, qaCurve, recommended, scannedAt, scope}`。`refuseCurve: [{threshold, accuracy, refuseRate}]`×7（分母 = refuse/rag 参与题数）；`qaCurve: [{threshold, hitRate}]`×5——**仅 qa 题档位敏感度**：detail 快照未存 rag 题曾见的 qa 匹配分，不含"降档会把 rag 题误引入 qa 通道"的反证数据，局限在 `scope.note` 注明；`recommended: {refuseThreshold, qaThreshold}`——accuracy（qa 侧为 hitRate）最高的档、**并列取更低阈值**（同等得分下更倾向回答/更宽容），该侧无参与者为 null；**拒答侧推荐守卫（T5 修复轮裁决）：`refuseRate=1.0` 的"全拒答"档不参与推荐**——该档可凭严格最高 accuracy 把推荐推向"全部拒答"（如仅剩漏判串库题在该档被拒），恰是本功能要解决的场景，故排除；仅当所有档均 refuseRate=1.0（无可回答档）时守卫回退、全档参与（此时 accuracy 全档同值，并列取最低档）；qa 侧无拒答率概念、不设对称守卫；`scannedAt` ISO 时刻；`scope: {refuseTotal, qaTotal, pendingSkipped, errorSkipped, note}` 分区计数与口径局限说明。结果同时存入该 run 的 `detail.thresholdScan`（F-1012 可追溯，重复扫描覆盖），审计 `eval.threshold_scan {runId}` 与写入同事务 |
 | 错误分支 | `404/3003` 任务不存在；`422/3004` 非 done 状态（message"评测任务未完成，暂不能扫描阈值"）、或明细全部待人工评判/执行失败（message 指名"无可重放题目"） |
 
 ### 4.3 提问记录与 badcase 治理（M7，/api/admin/messages、/api/admin/badcases）
@@ -401,4 +436,56 @@ W3 全部 20 个端点均为 **AdminUser 门**（依赖链：登录 → 首登�
 - **冷却期**：`message_cleanup_cooldown_days`（默认 30）。
 - **第二阶段（物理清理）**：created_at 早于 now −（保留 + 冷却）的消息物理删除——messages 是全库**唯一物理删除点**，分批 ≤1000 行/批、批间独立提交；purge 阶段不再逐条审计（audit_logs 只增不删，被清理记录靠归档批量审计可追溯）。
 - **调度**：每日 03:00 UTC（APScheduler cron，单机单实例语义）；保留 / 冷却天数实时读 Settings，改配置无需重启调度器。
+
+### 4.7 用户管理（W4 后端追加，F-102，/api/admin/users）
+
+#### 4.7.1 GET /api/admin/users — 用户列表
+
+| 项 | 说明 |
+|----|------|
+| 查询参数 | `keyword`（username ILIKE 模糊，`%`/`_`/`\` 已转义按字面匹配，可选）、`page`（≥1，默认 1）、`pageSize`（1-100，默认 20） |
+| 成功响应 | `200`，`data: {items, total, page, pageSize}`，created_at 降序（同刻 id 降序兜底）。items 项字段：`id, username, name（同 username，库无姓名列）, deptCode, role（admin/member）, status（"正常"/"已禁用"）, locked（按当下时刻判定，locked_until 已过期不算锁着）, mustChangePassword, lastLoginAt（null=从未登录）, createdAt` |
+
+#### 4.7.2 POST /api/admin/users — 发放账号
+
+| 项 | 说明 |
+|----|------|
+| 请求体 | `username`（2-32 位中文/字母/数字，§21.5）、`deptCode`（枚举 service / hr / all）、`role`（枚举 admin / member） |
+| 一次性密码语义 | 初始密码 16 位密码学安全随机（secrets.choice，无歧义字符集去 0/O/1/l/I，人工抄写不混淆），**仅在本次响应体出现一次**：库里只有 bcrypt 哈希，明文不落库、不进日志与审计（红线 4）；新账号置 `mustChangePassword=true` 首登强制改密 |
+| 成功响应 | `201`，`data: {id, initialPassword}`；审计 `user.create {username, deptCode, role}`（不含明文密码） |
+| 错误分支 | `422/1003` 用户名口径 / 角色枚举外 / 部门编码无效；`409/3005` 用户名已存在（并发撞 users_username_key 唯一索引同码兜底，见错误码表） |
+
+#### 4.7.3 PATCH /api/admin/users/{id}/status — 启用 / 禁用
+
+| 项 | 说明 |
+|----|------|
+| 请求体 | `isActive`（bool：false=禁用 / true=启用） |
+| 成功响应 | `200`，`data: {id, isActive}`；禁用即时失效（§5.6：下次请求 `401/2003`）；审计 `user.toggle {from, to}` |
+| 错误分支 | `422/1003` 禁用自己（防自锁，"不能禁用当前登录账号"）；`404/1003` 用户不存在 |
+
+#### 4.7.4 POST /api/admin/users/{id}/reset-password — 重置密码
+
+| 项 | 说明 |
+|----|------|
+| 一次性密码语义 | 新初始密码同 4.7.2 口径（16 位无歧义随机、仅响应体一次展示）；重置同时清零失败计数并解除锁定、置 `mustChangePassword=true` 强制首登改密 |
+| 成功响应 | `200`，`data: {id, initialPassword}`；审计 `user.reset_password`（不含明文） |
+| 错误分支 | `404/1003` 用户不存在 |
+
+### 4.8 审计日志查询（W4 后端追加，F-802，/api/admin/audit-logs）
+
+audit_logs 只增不改（F-801），两端点均只读、不留审计；筛选经共享依赖解析、两端口径一致且全参数绑定。
+
+#### 4.8.1 GET /api/admin/audit-logs — 审计列表
+
+| 项 | 说明 |
+|----|------|
+| 查询参数 | `actorId`（≥1，可选）、`action`（精确匹配，可选）、`objectType`（精确匹配，可选）、`dateFrom` / `dateTo`（YYYY-MM-DD，UTC 整日边界，dateTo 含当日，可选）、`page`（≥1，默认 1）、`pageSize`（1-100，默认 20） |
+| 成功响应 | `200`，`data: {items, total, page, pageSize}`，created_at 降序（同刻 id 降序兜底）。items 项字段：`id, actorUsername, action, objectType, objectId, detail（JSONB 原样，键序不保证）, ip, createdAt` |
+
+#### 4.8.2 GET /api/admin/audit-logs/export — CSV 导出
+
+| 项 | 说明 |
+|----|------|
+| 查询参数 | 同 4.8.1 筛选条件（无分页） |
+| 成功响应 | `200`，`text/csv` 流式响应（StreamingResponse 逐行推送，不整表载内存）：UTF-8 BOM 适配 Excel、中文列头（时间/操作人/动作/对象类型/对象ID/IP/详情，detail 为紧凑 JSON 字符串列）；`Content-Disposition: attachment; filename="audit-yyyymmdd.csv"`；行数超 10 万截断并以 `X-Truncated: true` 响应头标注（内存放大保护，截断判定用同 WHERE 计数） |
 
