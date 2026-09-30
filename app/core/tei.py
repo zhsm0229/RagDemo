@@ -102,16 +102,20 @@ class TeiReranker:
         self.transport: httpx.BaseTransport | None = transport
 
     def rerank(self, query: str, docs: list[str]) -> list[float]:
-        """相关性重排：POST /rerank，响应按 index 还原输入顺序，逐个 sigmoid(score)。"""
+        """相关性重排：POST /rerank，响应按 index 还原输入顺序，逐个 sigmoid(score)。
+
+        真实 TEI 响应为裸数组 [{index, score}]（2026-09-30 对接 cpu-1.9.2 实测）；
+        {"results": [...]} 包裹形态保留兼容（历史替身/代理网关可能加包裹）。"""
         payload: dict[str, object] = {"query": query, "texts": docs}
         response = _post_with_retry(
             self.base_url, self.timeout_s, "/rerank", payload, self.transport
         )
         body = _parse_json(response, "rerank")
-        if not isinstance(body, dict) or not isinstance(body.get("results"), list):
-            raise UpstreamError("tei rerank 响应形状不符（缺少 results 列表）")
+        items = body.get("results") if isinstance(body, dict) else body
+        if not isinstance(items, list):
+            raise UpstreamError("tei rerank 响应形状不符（缺少结果数组）")
         scores: list[float | None] = [None] * len(docs)
-        for item in body["results"]:
+        for item in items:
             if not isinstance(item, dict):
                 raise UpstreamError("tei rerank 结果项不是对象")
             index, score = item.get("index"), item.get("score")
