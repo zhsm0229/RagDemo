@@ -16,6 +16,7 @@ from datetime import datetime
 from secrets import choice
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.clock import Clock, get_clock
@@ -102,7 +103,14 @@ def create_user(
         {"username": username, "deptCode": dept_code, "role": role},  # 不含明文密码
         clock=effective_clock,
     )
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        # 并发抢注同名兜底（DOC-06 同款）：预查重只挡提交前可见的重复，查重通过后、
+        # 提交前的并发半边在此撞 users_username_key，回滚并转 409；只捕
+        # IntegrityError 一族，其余异常绝不吞。回滚即丢弃半程写入（用户行+审计）。
+        db.rollback()
+        raise ApiError(ERR_DUPLICATE_USER, f"用户名已存在：{username}", 409) from exc
     return {"id": user.id, "initialPassword": initial_password}
 
 

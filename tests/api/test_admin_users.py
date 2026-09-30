@@ -135,6 +135,43 @@ def test_create_duplicate_username_conflict_409(client, session) -> None:
     assert count == 1
 
 
+# 服务内 rollback 会拆掉会话与夹具外部事务的关联（ingest.py:278 记录的 join-external
+# 已知交互），用例卸载时 conftest 的 transaction.rollback() 发 SAWarning——按用例收窄静默
+@pytest.mark.filterwarnings("ignore::sqlalchemy.exc.SAWarning")
+def test_create_duplicate_race_at_commit_maps_409(client, session, monkeypatch) -> None:
+    """并发抢注兜底（DOC-06 同款，终审 M-2）：预查重通过后、提交前对手抢注同名
+    ——commit 撞 users_username_key 的 IntegrityError 映射 409/3005 而非 500，
+    回滚零痕迹（新号行与审计一并丢弃）。用审计写入点作钩子在预查后插同名行。"""
+    from app.services import users_admin
+
+    admin_login(client, session)
+    real_record_audit = users_admin.record_audit
+
+    def race_insert(db, *args, **kwargs):
+        outcome = real_record_audit(db, *args, **kwargs)  # 先走原审计（内含 flush）
+        dept = db.scalars(select(Department).where(Department.code == "service")).one()
+        db.add(
+            User(
+                username="竞态撞名者",
+                password_hash=hash_password("rival-password-1"),
+                dept_id=dept.id,
+                role="member",
+            )
+        )  # 审计 flush 之后才插抢注行：其 INSERT 推迟到 commit 的 flush 执行，
+        return outcome  # 冲突恰好落在被 try/except 包住的 commit 语句（复现并发半边）
+
+    monkeypatch.setattr(users_admin, "record_audit", race_insert)
+    resp = create_user(client, username="竞态撞名者")
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["code"] == ERR_DUPLICATE_USER
+    assert "已存在" in body["message"]
+    count = session.scalar(  # 读回：rollback 后两行同名（新号+抢注者）均不落库
+        select(func.count()).select_from(User).where(User.username == "竞态撞名者")
+    )
+    assert count == 0
+
+
 @pytest.mark.parametrize(
     "bad_username", ["张", "a" * 33, "张三@mail", "客服 张三", "客服_张三", "ab-cd", ""]
 )
