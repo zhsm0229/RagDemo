@@ -1,6 +1,6 @@
 # 运维手册（Runbook）
 
-> 状态：骨架版（W3 Task 13 产出）。备份/恢复流程按 standards §18 于 **W5 演练定稿**，其余章节随里程碑增量补全（§18.4：启动停止 / 备份恢复 / 常见故障 / 合规轨道切换 / 端口核查）。
+> 状态：W3 Task 13 产出骨架，W5 Task 6 定稿备份/恢复章节（第 3 节，§18）；W5 Task 8 增串库双向演练章节（第 5 节，T9 执行）。演练实测数据待 T9 恢复演练后回填 3.4。其余章节随里程碑增量补全（§18.4：启动停止 / 备份恢复 / 常见故障 / 合规轨道切换 / 端口核查）。
 > 部署形态：单机 Docker Compose，4 核 16G VM（§12.5）。所有命令在仓库根目录执行（Windows Git Bash 或部署机 bash）。
 
 ## 1. 主栈启停
@@ -113,11 +113,125 @@ docker compose -f deploy/docker-compose.ragflow.yml up -d
 
 compose 中 `${RAGFLOW_IMAGE:-infiniflow/ragflow:v0.19.1}` 的 tag 默认值保留作可读回退，部署机以 `.env` 的 digest 引用为准。
 
-## 3. 备份 / 恢复
+## 3. 备份 / 恢复（§18，W5 T6 定稿）
 
-- 规范指针：standards §18——PostgreSQL 每日 `pg_dump` 全量保留 7 天（备份目录权限 0700）、上传目录每日同步、恢复目标 **RPO ≤ 24h / RTO ≤ 2h**、`.env` 凭据副本托管密码管理器。
-- **状态：W5 演练定稿**——具体备份脚本、恢复步骤、演练实测数据（RPO/RTO 实际值）在 W5 恢复演练后回填本节（§18.3：演练步骤写入 runbook，runbook 先于演练产出，故先立本占位）。
-- RAGFlow 基线环境不做备份（一次性对照数据，销毁重建，见 2.5）。
+- 规范指针：standards §18——PostgreSQL 每日 `pg_dump` 全量保留 7 天（备份目录权限 0700）、上传目录每日备份、恢复目标 **RPO ≤ 24h / RTO ≤ 2h**（§18.3）、`.env` 凭据副本托管密码管理器。
+- **安全须知（§18.1）：备份含全部问答与文档内容，访问权限同生产库**——备份只落独立目录（本方案 `./backups`，脚本已 `chmod 700`），禁止放入 Web 可访问路径或全员可见共享位置；`.env`（含密钥）不在备份内，副本托管密码管理器。
+- 备份范围 = 主库 `rag`（容器 `ragdemo-pg`）+ 上传目录 `./data/uploads`（`STORAGE_DIR` 默认值）。`ragdemo-pg-test`（`rag_test`，5434 端口）是独立测试实例，**不在备份范围**；RAGFlow 基线环境不做备份（一次性对照数据，销毁重建，见 2.5）。
+- 备份统一走 `deploy/backup.sh`（顶部参数化区可按环境覆盖容器名/库名/目录/保留期），每步带 `[backup]` 时间戳日志，任一步失败非零退出。
+
+### 3.1 每日自动备份（调度示例）
+
+Windows（装有 Git Bash 的开发/演示机；在 cmd 执行，Git Bash 与仓库路径按实际调整）：
+
+```bat
+schtasks /Create /TN "ragdemo-daily-backup" /SC DAILY /ST 02:30 /TR "\"C:\Program Files\Git\bin\bash.exe\" -c 'cd /d/Project/ZCodeProject/RagDemo && mkdir -p backups && ./deploy/backup.sh >> backups/backup-cron.log 2>&1'"
+```
+
+Linux（部署机；`crontab -e` 追加一行，仓库路径按实际调整）：
+
+```bash
+30 2 * * * cd /opt/ragdemo && mkdir -p backups && ./deploy/backup.sh >> backups/backup-cron.log 2>&1
+```
+
+- 两版均为每日 02:30 执行，日志追加到 `backups/backup-cron.log`（backup.sh 的保留期清理只删 `*.gz`，该日志需手工定期清理）。
+- 前置：`ragdemo-pg` 在运行且 healthy（`docker inspect -f '{{.State.Health.Status}}' ragdemo-pg`）；失败先查上述日志，再手工按 3.2 复现。
+- 登记核查：Windows `schtasks /Query /TN "ragdemo-daily-backup"`；Linux `crontab -l`。
+
+### 3.2 手动备份
+
+```bash
+bash deploy/backup.sh
+```
+
+- 产物：`backups/rag-YYYYMMDD-HHMMSS.sql.gz`（主库全量 dump，gzip 在宿主侧管道完成）+ `backups/uploads-YYYYMMDD-HHMMSS.tar.gz`（上传目录归档；目录不存在时警告跳过）；结束自动清理超过 7 天的 `backups/*.gz`。
+- 备份目录 `backups/` 已加入 `.gitignore`（备份含全部问答与文档内容，禁止入库，§18.1），勿移出该忽略项。
+- 备份后速检：`ls -lh backups/`——当日 `.sql.gz` 必须非 0 字节；**没做过恢复读回验证的备份不算可用备份**——至少在每次演练时按 3.3(a) 验证一轮。
+
+### 3.3 恢复步骤（两种口径，动手前先确认口径）
+
+两种口径共用前置：`ragdemo-pg` 在运行；先定位目标备份文件（默认取最新一份，也可手工指定）：
+
+```bash
+BK="$(ls -t backups/rag-*.sql.gz | head -n1)"     # 主库备份，如 backups/rag-20260930-023000.sql.gz
+BU="$(ls -t backups/uploads-*.tar.gz | head -n1)" # 上传目录备份
+echo "BK=$BK BU=$BU"
+```
+
+#### (a) 恢复到新建验证库（演练 / 校验备份可用性，不影响生产数据）
+
+```bash
+# 1. 建验证库（幂等：先删同名残留）
+docker exec ragdemo-pg psql -U rag -c "DROP DATABASE IF EXISTS rag_restore"
+docker exec ragdemo-pg psql -U rag -c "CREATE DATABASE rag_restore"
+
+# 2. 恢复（ON_ERROR_STOP=1：任一 SQL 失败即非零退出，不得静默半成功）
+gunzip -c "$BK" | docker exec -i ragdemo-pg psql -v ON_ERROR_STOP=1 -U rag -d rag_restore
+
+# 3. 读回核对：表清单应与生产库一致，核心表行数应与备份时点一致
+docker exec ragdemo-pg psql -U rag -d rag_restore -c "\dt"
+docker exec ragdemo-pg psql -U rag -d rag_restore -c "SELECT count(*) FROM documents"
+docker exec ragdemo-pg psql -U rag -d rag_restore -c "SELECT count(*) FROM qa_pairs"
+docker exec ragdemo-pg psql -U rag -d rag_restore -c "SELECT count(*) FROM messages"
+
+# 4. 与备份时点记录的行数比对（三表同第 3 步口径；演练当天如有新增写入，恢复库行数 ≤ 生产库属正常，差值 = 备份后增量）
+docker exec ragdemo-pg psql -U rag -d rag -c "SELECT count(*) FROM documents"
+docker exec ragdemo-pg psql -U rag -d rag -c "SELECT count(*) FROM qa_pairs"
+docker exec ragdemo-pg psql -U rag -d rag -c "SELECT count(*) FROM messages"
+
+# 5. 演练结束清理验证库
+docker exec ragdemo-pg psql -U rag -c "DROP DATABASE rag_restore"
+```
+
+uploads 侧核对：`tar -tzf "$BU" | head` 能列出 `uploads/...` 文件即归档完好；正式演练时抽一个文件解出比对内容。
+
+#### (b) 覆盖生产库（灾难恢复；先停写、后覆盖、再冒烟）
+
+> **【危险】覆盖生产库前必须确认已有一次成功备份——本节会先 DROP 生产库 `rag`。没有非 0 字节的 `rag-*.sql.gz` 时禁止执行本节，先走 3.3(a) 验证库口径排查备份可用性。**
+
+```bash
+# 0. 前置检查：目标备份存在且非 0 字节；停机窗口与相关方已确认
+ls -lh backups/rag-*.sql.gz
+
+# 1. 停写入方（app 容器并入主栈后生效；并入前确认无业务写入在跑）
+docker compose stop app
+
+# 2. 重建生产库（连 postgres 维护库执行；WITH (FORCE) 断开残留连接，PG15 支持）
+docker exec ragdemo-pg psql -U rag -d postgres -c "DROP DATABASE IF EXISTS rag WITH (FORCE)"
+docker exec ragdemo-pg psql -U rag -d postgres -c "CREATE DATABASE rag"
+
+# 3. 恢复主库（ON_ERROR_STOP=1：任一 SQL 失败即非零退出——灾难恢复的"成功"信号必须可靠，不得静默半成功）
+gunzip -c "$BK" | docker exec -i ragdemo-pg psql -v ON_ERROR_STOP=1 -U rag -d rag
+
+# 4. 恢复上传目录（归档内含 uploads/ 一级目录，解到其父目录 ./data）
+mkdir -p ./data
+tar -xzf "$BU" -C ./data
+
+# 5. 起服务 + 冒烟
+docker compose up -d
+docker compose ps   # 应全部 healthy
+# 冒烟：登录工作台发起一次问答，确认回答带可核对引用；app 并入后增加 curl -f http://127.0.0.1/healthz（§12.2）
+
+# 6. 读回核对（对 -d rag 执行，行数与备份时点一致）
+docker exec ragdemo-pg psql -U rag -d rag -c "SELECT count(*) FROM documents"
+docker exec ragdemo-pg psql -U rag -d rag -c "SELECT count(*) FROM qa_pairs"
+```
+
+- 红线（与第 1 节一致）：本节 `DROP`/`CREATE` 只针对库 `rag`，禁止波及 `rag_test`；全程禁止 `docker compose down -v`（会删 `pgdata` 业务数据卷）。
+
+### 3.4 演练记录表（§18.3，实测回填）
+
+| 日期 | 类型 | 备份大小 | 恢复耗时 | RTO | RPO | 执行人 | 备注 |
+|---|---|---|---|---|---|---|---|
+| （示例）2026-09-30 | 验证库恢复 | 12 MB | 8 分钟 | 12 分钟 | 20 小时 | 张三 | 示例行：RTO=恢复+冒烟端到端时长，RPO=距上次成功备份的数据窗口；正式记录自 W5 T9 演练起填 |
+
+- 类型口径：`验证库恢复` = 3.3(a)，常规演练；`生产覆盖演练` = 3.3(b)，需审批与停机窗口。
+
+### 3.5 RPO / RTO 目标声明（§18.3）
+
+- **RPO ≤ 24 小时**：由每日 02:30 全量备份决定，最大数据丢失窗口 ≈ 24 小时（上次成功备份到故障点之间新增的数据）。
+- **RTO ≤ 2 小时**：定位备份 → 3.3 恢复 → 起服务 → 冒烟核对的端到端时长上限。
+- 实测值：**待 W5 T9 恢复演练回填**（实测写入 3.4 记录表；超出目标须先整改备份/恢复方案再定稿）。
 
 ## 4. 端口暴露核查清单（§12.2，每次发布 / 基线启停后执行）
 
@@ -136,3 +250,50 @@ ss -tlnp   # 或 netstat -tlnp
 - [ ] es01/mysql/minio/valkey（9200/3306/9000/9001/6379）无任何宿主发布
 - [ ] 防火墙/安全组仅放行 80、9380（22 运维端口按 IT 策略另行管理）
 - [ ] 核查结果异常时：先 `docker compose down` 对应栈收敛端口，再排查是谁改了 compose
+
+## 5. 串库双向演练（W5 T8 产出流程，T9 执行）
+
+目的：双向走查串库拒答——客服视角问人力题、人力视角问客服题都必须拒答（检索边界恒 [视角部门, 全员]，F-502；产品红线"知识不足必须拒答"的部门维度）；同时用全员对照题防"全部拒答也全绿"的假阴性。题库由 `tests/fixtures/tools/make_crosstalk_suite.py` 生成，共 24 行：人力制度类串库拒答题 10 条 + 客服售后类串库拒答题 10 条 + 全员对照事实题 4 条，题目均以"演练用合成题"标注（与真实题库区分，演练后可按此前缀识别清理）。
+
+### 5.1 前置（每次演练执行）
+
+```bash
+# 0. 主栈已启动（第 1 节）；测试/演示环境（test_mode，stub LLM）
+#    题库生成器 import 后端常量，须在项目 venv 内执行（make install / uv sync --extra dev）
+
+# 1. 生成题库（生成物不入库，放临时目录；可重复运行，覆盖输出）
+python tests/fixtures/tools/make_crosstalk_suite.py -o /tmp/crosstalk.xlsx
+
+# 2. 生成对照语料（4 条对照题的期望答案取自该文档固定文本）
+python tests/fixtures/tools/make_sample_docx.py   # 写出 tests/fixtures/samples/sample.docx
+```
+
+- **上传对照语料**：管理后台 → 知识库·文档管理 → ＋上传文档，把 sample.docx 上传为**全员**部门文档（标题如"串库演练对照语料"），等状态 ready。语料缺失或内容改动 = 对照题必假阴性（命中不了期望关键词）。
+- 题库无单题删除接口，重复导入会累积同题并进入后续所有跑分：重复演练前由运维清理 `eval_questions`（软删 `is_active` 或清表，经 DBA 确认）再重新导入；演练断言按"题面部门 + 题型"分组核对，不依赖 run 总数恰为 24。
+
+### 5.2 导入题库
+
+管理后台 → 评测管理 → "评测题库"页签 → **Excel 导入题目** 上传 crosstalk.xlsx（或 `POST /api/admin/eval-questions/import`），成功返回 `imported: 24`。行级错误整批退回（422）——生成器产物若报错说明后端模板已漂移，先跑 `pytest tests/unit/test_crosstalk_suite.py` 定位。
+
+### 5.3 客服视角跑分
+
+1. "跑分记录"页签 → **发起跑分**：任务名称 `串库演练-客服视角-<日期>`，视角部门=客服（`perspectiveDeptCode: "service"`）。
+2. 轮询 `GET /api/admin/eval-runs/{id}`（前端每 10 秒自动刷新）至 `status=done`，逐题核对 detail：
+   - **题面部门=人力的 10 条（cross_reject）**：`autoJudgment` 全部 correct（回答逐字等于拒答话术"知识库中未找到相关内容"）——**串库拒答 10/10，漏一条即串库漏洞**：停止演练，排查检索部门过滤（`app/services/retrieval.py` 的 dept 边界与 F-502 口径）。
+   - **题面部门=全员的 4 条对照题**：回答应含期望答案关键词（出自对照语料）→ "评测题库"录分入口人工评判 correct（`POST /api/admin/eval-runs/{id}/judgments`）。`autoJudgment=pending` 属预期：非拒答题不自动判，判定协议第 3 条。
+   - 题面部门=客服的 10 条：库内无客服语料时同样拒答、auto correct 属预期（stub 演练形态）；部署机若已灌客服语料，命中回答记 auto wrong 属预期（本视角内应答），人工评判 correct 覆写即可。
+3. 人工录分后点**报告**核对分组口径（byDept / byQtype），报告页与 `GET /api/admin/eval-runs/{id}/report` 响应一并归档。
+
+### 5.4 人力视角跑分（对称）
+
+重复 5.3：任务名称 `串库演练-人力视角-<日期>`，视角部门=人力（`perspectiveDeptCode: "hr"`）。断言对称——**题面部门=客服的 10 条 100% 拒答** + 全员对照 4 条人工 correct。两轮全绿 = 双向隔离成立。
+
+### 5.5 存档与登记
+
+- 跑分结果天然存档于 `eval_runs`：收口即锁定 config 快照 9 字段（model / promptVersion / qaThreshold / refuseThreshold / efSearch / topK / topN / temperature / manifestVersion），防跨跑对比被阈值调整污染；审计 `eval.run` / `eval.judge` 留痕（§23）。
+- **stub 模式口径**：串库拒答由检索 SQL 的部门过滤结构性保证（越界文档根本不进候选，与 embedding 质量无关），本演练验证的是导入 → 跑分 → 判定 → 存档的流程链路；**真实阈值下的拒答边界须在部署机以真实 embedding + 真实语料复测**（届时人力/客服语料都在库，断言不变：越视角组全拒、对照组全中）。
+- 结果登记表（一行 = 一次跑分；正式记录自 T9 演练起填）：
+
+| 日期 | run ID | 视角 | 串库组拒答 | 对照组人工判 | accuracy | 执行人 | 备注 |
+|---|---|---|---|---|---|---|---|
+| （示例）2026-09-30 | 12 | 客服 | 人力题 10/10 | 4/4 correct | 1.0000 | 张三 | 示例行：accuracy 取录分收口后 summary；串库组按题面部门核对 |
