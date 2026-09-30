@@ -22,6 +22,7 @@ from app.core.errors import ERR_FORBIDDEN, ERR_PARAM_INVALID
 from app.core.llm import StubEmbedder
 from app.db.models import AuditLog, Department, QaPair, User
 from app.services.retrieval import match_qa
+from tests.conftest import login_as
 
 # ---------- 构造与登录辅助（口径同 tests/api/test_admin_qa_import.py） ----------
 
@@ -43,14 +44,10 @@ def make_user(session, username: str, password: str, role: str) -> User:
     return user
 
 
-def login(client, username: str, password: str):
-    return client.post("/api/auth/login", json={"username": username, "password": password})
-
-
 def admin_login(client, session) -> int:
     """创建并登录 admin（cookie 由 client 保持），返回其 user id 供审计断言。"""
     user = make_user(session, "qamadmin", "right-one", role="admin")
-    assert login(client, "qamadmin", "right-one").status_code == 200
+    assert login_as(client, "qamadmin", "right-one").status_code == 200
     return user.id
 
 
@@ -419,7 +416,7 @@ def test_三操作成功后_问答精确缓存整清(qa_client, session):
 def test_成员角色访问管理端点_403(qa_client, session):
     """member 角色：列表/停用/编辑/删除均 403/2004（admin-only）。"""
     make_user(session, "qammember", "right-one", role="member")
-    assert login(qa_client, "qammember", "right-one").status_code == 200
+    assert login_as(qa_client, "qammember", "right-one").status_code == 200
 
     assert qa_client.get("/api/admin/qa-pairs").status_code == 403
     patch = qa_client.patch("/api/admin/qa-pairs/1/status", json={"status": "disabled"})

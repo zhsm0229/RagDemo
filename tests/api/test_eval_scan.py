@@ -17,10 +17,11 @@ refuse 题全档拒答（0.40 档 refuseRate=0.25 只可能来自它）、跳过
 from decimal import Decimal
 
 from sqlalchemy import select
-from test_admin_eval_import import admin_login, login, make_user
+from test_admin_eval_import import admin_login, make_user
 
 from app.core.errors import ERR_EVAL_STATE, ERR_FORBIDDEN, ERR_NOT_FOUND
 from app.db.models import AuditLog, EvalRun
+from tests.conftest import login_as
 
 # ---------------------------------------------------------------------------
 # 造数助手：合成 9 键逐题明细 + done/running run 行（扫描只读 detail）
@@ -406,7 +407,7 @@ def test_寻址不存在404_成员角色403(client, session):
     assert missing.json()["message"] == "评测任务不存在"
 
     make_user(session, "evalmember", "right-one", role="member")
-    assert login(client, "evalmember", "right-one").status_code == 200
+    assert login_as(client, "evalmember", "right-one").status_code == 200
     forbidden = _scan(client, 1)
     assert forbidden.status_code == 403
     assert forbidden.json()["code"] == ERR_FORBIDDEN

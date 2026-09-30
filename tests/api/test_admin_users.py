@@ -58,7 +58,6 @@ def make_user(
     return user
 
 
-
 def admin_login(client, session: Session) -> User:
     """创建并登录 admin（cookie 由 client 保持），返回该用户供 actor 断言。"""
     admin = make_user(session, "useradmin", "right-one", role="admin")

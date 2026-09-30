@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import ERR_FORBIDDEN, ERR_NOT_FOUND, ERR_PARAM_INVALID, ERR_UNAUTHENTICATED
 from app.db.models import Conversation, Department, Message, User
+from tests.conftest import login_as
 
 _MSG_NOT_FOUND = "提问记录不存在"
 _ITEM_KEYS = {
@@ -88,10 +89,6 @@ def make_user(session: Session, username: str, password: str, dept_code: str, ro
     session.add(user)
     session.flush()
     return user
-
-
-def login(client, username: str, password: str):
-    return client.post("/api/auth/login", json={"username": username, "password": password})
 
 
 def _ask(
@@ -248,7 +245,7 @@ def test_list_filters_over_mixed_dataset(client, session) -> None:
     """① 逐筛选断言：无条件全量 DESC（is_eval 不可见）；部门/日期范围/是否点踩及
     组合各命中精确 id 集；列表项键集合全等、q1 项逐字段全等（questionPreview 恰 50 字）。"""
     d = _seed_dataset(session)
-    assert login(client, "admin_w3", "right-one").status_code == 200
+    assert login_as(client, "admin_w3", "right-one").status_code == 200
     full_order = [d.q4.id, d.q3.id, d.q2.id, d.q1.id, d.q5.id]  # created_at DESC
 
     data = _get_data(client)
@@ -300,7 +297,7 @@ def test_list_pagination_and_param_bounds(client, session) -> None:
     """② 5 条 + pageSize=2：total=5，第 1/2 页各 2 条、第 3 页恰 1 条（DESC 切片）；
     page 0 / pageSize 0/101 / 非法日期 → 422/1003 字段级指名。"""
     d = _seed_dataset(session)
-    assert login(client, "admin_w3", "right-one").status_code == 200
+    assert login_as(client, "admin_w3", "right-one").status_code == 200
     expected = [d.q4.id, d.q3.id, d.q2.id, d.q1.id, d.q5.id]
 
     page1 = _get_data(client, {"page": 1, "pageSize": 2})
@@ -333,7 +330,7 @@ def test_detail_reads_back_citations_tokens_and_404_shapes(client, session) -> N
     tokens/latency/cacheHit/反馈三列逐字段；assistant 消息 id / 评测 user 消息 /
     不存在 id → 404/3003 同文案。"""
     d = _seed_dataset(session)
-    assert login(client, "admin_w3", "right-one").status_code == 200
+    assert login_as(client, "admin_w3", "right-one").status_code == 200
 
     resp = client.get(f"/api/admin/messages/{d.q1.id}")
     assert resp.status_code == 200
@@ -377,7 +374,7 @@ def test_interrupted_question_detail_has_null_assistant(client, session) -> None
     """④ 中断问题（占位行 is_active=false 被软删）详情：user 段照常、assistant 为
     null；列表项该问 answerType/hasCitations/feedback 记 None/false（配对落空）。"""
     d = _seed_dataset(session)
-    assert login(client, "admin_w3", "right-one").status_code == 200
+    assert login_as(client, "admin_w3", "right-one").status_code == 200
 
     resp = client.get(f"/api/admin/messages/{d.q4.id}")
 
@@ -409,7 +406,7 @@ def test_member_and_anonymous_are_rejected(client, session) -> None:
         assert (resp.status_code, resp.json()["code"]) == (401, ERR_UNAUTHENTICATED)
 
     make_user(session, "plain_member", "right-one", "service", role="member")
-    assert login(client, "plain_member", "right-one").status_code == 200
+    assert login_as(client, "plain_member", "right-one").status_code == 200
     member_list = client.get("/api/admin/messages")
     member_detail = client.get(f"/api/admin/messages/{d.q1.id}")
     for resp in (member_list, member_detail):

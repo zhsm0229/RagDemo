@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import ERR_FORBIDDEN, ERR_PARAM_INVALID, ERR_UNAUTHENTICATED
 from app.db.models import Chunk, Department, Document, User
+from tests.conftest import login_as
 
 _CHUNK_VEC = [0.0] * 1024  # 清单判定不涉向量运算：零向量直插满足 NOT NULL（W3 手法）
 _DOC_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -42,14 +43,10 @@ def make_user(session: Session, username: str, dept_code: str, role: str) -> Use
     return user
 
 
-def login(client: TestClient, username: str, password: str):
-    return client.post("/api/auth/login", json={"username": username, "password": password})
-
-
 def _as_admin(client: TestClient, session: Session) -> None:
     """建 admin（免首登改密）并登录；每用例独立建号避免用户名冲突。"""
     make_user(session, "zrc_admin", "all", role="admin")
-    assert login(client, "zrc_admin", "right-one").status_code == 200
+    assert login_as(client, "zrc_admin", "right-one").status_code == 200
 
 
 def _make_doc(
@@ -288,6 +285,6 @@ def test_匿名与成员角色访问清单被拒(client, session) -> None:
     assert (resp.status_code, resp.json()["code"]) == (401, ERR_UNAUTHENTICATED)
 
     make_user(session, "zrc_member", "service", role="member")
-    assert login(client, "zrc_member", "right-one").status_code == 200
+    assert login_as(client, "zrc_member", "right-one").status_code == 200
     resp = client.get(_LIST_URL)
     assert (resp.status_code, resp.json()["code"]) == (403, ERR_FORBIDDEN)

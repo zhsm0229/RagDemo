@@ -26,6 +26,7 @@ from app.core.llm import DEFAULT_CHAT_CHUNKS, StubEmbedder, StubLLMProvider, Stu
 from app.db.models import Chunk, Conversation, Department, Document, Message, QaPair, User
 from app.main import app
 from app.rag.prompt import REFUSAL_TEXT
+from tests.conftest import login_as
 
 QUESTION = "公司年假有多少天"
 CHUNK_TEXT = "年假按工龄五到十天"
@@ -50,10 +51,6 @@ def make_user(session: Session, username: str, password: str, role: str) -> User
     session.add(user)
     session.flush()
     return user
-
-
-def login(client, username: str, password: str):
-    return client.post("/api/auth/login", json={"username": username, "password": password})
 
 
 def post_chat(client, question: str, conversation_id: int | None = None):
@@ -141,7 +138,7 @@ def test_rag_stream_full_event_order_and_message_persisted(chat_client, session)
     user = make_user(session, "raguser", "right-one", role="member")
     chunk = _seed_rag_chunk(session, user)
     _override_reranker_high()
-    assert login(chat_client, "raguser", "right-one").status_code == 200
+    assert login_as(chat_client, "raguser", "right-one").status_code == 200
 
     resp = post_chat(chat_client, QUESTION)
 
@@ -187,7 +184,7 @@ def test_rag_stream_full_event_order_and_message_persisted(chat_client, session)
 def test_first_question_sets_conversation_title_truncated(chat_client, session) -> None:
     """conversationId 为空新建会话：title 取首问前 20 字（长问题截断），读回验证。"""
     user = make_user(session, "titleuser", "right-one", role="member")
-    assert login(chat_client, "titleuser", "right-one").status_code == 200
+    assert login_as(chat_client, "titleuser", "right-one").status_code == 200
     question = "请告诉我公司年假的具体天数规定和申请流程说明"
 
     resp = post_chat(chat_client, question)
@@ -206,7 +203,7 @@ def test_reused_conversation_retitle_from_first_question(chat_client, session) -
     """复用 POST /api/conversations 所建会话（title=DB 默认"新会话"）发起首轮提问：
     事务①补题 question[:20]（长问题截断），读回验证。"""
     make_user(session, "reusetitle", "right-one", role="member")
-    assert login(chat_client, "reusetitle", "right-one").status_code == 200
+    assert login_as(chat_client, "reusetitle", "right-one").status_code == 200
     created = chat_client.post("/api/conversations")
     assert created.status_code == 200
     conversation_id = created.json()["data"]["id"]
@@ -224,7 +221,7 @@ def test_reused_conversation_retitle_from_first_question(chat_client, session) -
 def test_second_question_does_not_retitle_reused_conversation(chat_client, session) -> None:
     """二轮提问不再改题：首轮已把默认题补成首问前 20 字，二轮问题不同也不覆盖。"""
     make_user(session, "reusetitle2", "right-one", role="member")
-    assert login(chat_client, "reusetitle2", "right-one").status_code == 200
+    assert login_as(chat_client, "reusetitle2", "right-one").status_code == 200
     created = chat_client.post("/api/conversations")
     conversation_id = created.json()["data"]["id"]
     first_question = "公司年假有多少天"
@@ -244,7 +241,7 @@ def test_second_question_does_not_retitle_reused_conversation(chat_client, sessi
 def test_refuse_stream_exact_order_and_refusal_text(chat_client, session) -> None:
     """空知识库拒答：citations 空列表也发；token 逐字 REFUSAL_TEXT；done refused=true。"""
     make_user(session, "refuseuser", "right-one", role="member")
-    assert login(chat_client, "refuseuser", "right-one").status_code == 200
+    assert login_as(chat_client, "refuseuser", "right-one").status_code == 200
 
     resp = post_chat(chat_client, "完全无关的天书问题")
 
@@ -275,7 +272,7 @@ def test_interrupted_stream_marks_placeholder_inactive_and_retry_creates_new_pai
         session, session.scalars(select(User).where(User.username == "breakuser")).one()
     )
     _override_reranker_high()
-    assert login(chat_client, "breakuser", "right-one").status_code == 200
+    assert login_as(chat_client, "breakuser", "right-one").status_code == 200
     app.state.chat_deps.llm = StubLLMProvider(break_after=1)
 
     resp = post_chat(chat_client, QUESTION)
@@ -319,7 +316,7 @@ def test_prepare_upstream_failure_marks_placeholder_interrupted(chat_client, ses
     """prepare 阶段 embed 故障（事务①已提交）：500 兜底响应，assistant 占位行读回
     is_active=false——不留幽灵行混入后续 history 改写上下文；user 行不受牵连。"""
     make_user(session, "ghostuser", "right-one", role="member")
-    assert login(chat_client, "ghostuser", "right-one").status_code == 200
+    assert login_as(chat_client, "ghostuser", "right-one").status_code == 200
     app.state.chat_deps.embedder = StubEmbedder(fail_times=1)
 
     resp = post_chat(chat_client, QUESTION)  # 新会话无历史：改写短路，embed 首调即抛
@@ -344,7 +341,7 @@ def test_prepare_upstream_failure_marks_placeholder_interrupted(chat_client, ses
 def test_question_length_and_blank_rejected_field_level(chat_client, session) -> None:
     """2001 字与全空白：均 422/1003 且 data 指名 question 字段；未落任何会话/消息。"""
     make_user(session, "limituser", "right-one", role="member")
-    assert login(chat_client, "limituser", "right-one").status_code == 200
+    assert login_as(chat_client, "limituser", "right-one").status_code == 200
 
     too_long = post_chat(chat_client, "字" * 2001)
     blank = post_chat(chat_client, "   \n\t ")
@@ -364,7 +361,7 @@ def test_question_length_and_blank_rejected_field_level(chat_client, session) ->
 def test_daily_limit_third_request_rejected_429(chat_client, session) -> None:
     """daily_question_limit=2（Settings 覆盖）：前两次成功各自计数，第 3 次 429/3002。"""
     make_user(session, "quotauer", "right-one", role="member")
-    assert login(chat_client, "quotauer", "right-one").status_code == 200
+    assert login_as(chat_client, "quotauer", "right-one").status_code == 200
     app.state.chat_deps.settings = app.state.chat_deps.settings.model_copy(
         update={"daily_question_limit": 2}
     )
@@ -387,10 +384,10 @@ def test_other_users_conversation_rejected_404(chat_client, session) -> None:
     """用户 B 携带用户 A 的 conversationId 提问：404/3003，A 的会话零写入。"""
     make_user(session, "owneruser", "right-one", role="member")
     make_user(session, "otheruser", "right-two", role="member")
-    assert login(chat_client, "owneruser", "right-one").status_code == 200
+    assert login_as(chat_client, "owneruser", "right-one").status_code == 200
     assert post_chat(chat_client, QUESTION).status_code == 200
     conversation = _conversation_row(session)
-    assert login(chat_client, "otheruser", "right-two").status_code == 200  # 切换登录态
+    assert login_as(chat_client, "otheruser", "right-two").status_code == 200  # 切换登录态
 
     resp = post_chat(chat_client, "我也想问", conversation_id=conversation.id)
 
@@ -410,7 +407,7 @@ def test_second_identical_question_hits_cache_without_generation(chat_client, se
     user = make_user(session, "cacheuser", "right-one", role="member")
     _seed_rag_chunk(session, user)
     _override_reranker_high()
-    assert login(chat_client, "cacheuser", "right-one").status_code == 200
+    assert login_as(chat_client, "cacheuser", "right-one").status_code == 200
 
     first = post_chat(chat_client, QUESTION)
     second = post_chat(chat_client, QUESTION)
@@ -498,7 +495,7 @@ def test_multi_turn_rewrite_hits_qa_on_rewritten_question_and_history_capped(
     _override_reranker_high()
     recording = _RecordingRewriteLLM()
     app.state.chat_deps.llm = recording  # 定制 deps：改写恒产出 REWRITTEN（W1 app.state 模式）
-    assert login(chat_client, "multiturn", "right-one").status_code == 200
+    assert login_as(chat_client, "multiturn", "right-one").status_code == 200
 
     responses = [post_chat(chat_client, QUESTIONS[0])]
     responses += [
@@ -596,17 +593,17 @@ def test_confirm_clears_exact_cache_and_next_question_regenerates(chat_client, s
     _seed_rag_chunk(session, user)
     pending = _seed_pending_confirm_doc(session, user)
     _override_reranker_high()
-    assert login(chat_client, "cacheconfirm", "right-one").status_code == 200
+    assert login_as(chat_client, "cacheconfirm", "right-one").status_code == 200
     assert post_chat(chat_client, QUESTION).status_code == 200
     assert post_chat(chat_client, QUESTION).status_code == 200
     assert app.state.chat_deps.llm.stream_calls == 1  # 预热：第二问命中缓存
 
-    assert login(chat_client, "cacheadmin1", "right-two").status_code == 200  # 切 admin
+    assert login_as(chat_client, "cacheadmin1", "right-two").status_code == 200  # 切 admin
     resp = chat_client.post(f"/api/documents/{pending.id}/confirm")
 
     assert resp.status_code == 200
     assert resp.json()["data"] == {"id": pending.id, "isActive": True}
-    assert login(chat_client, "cacheconfirm", "right-one").status_code == 200  # 切回提问者
+    assert login_as(chat_client, "cacheconfirm", "right-one").status_code == 200  # 切回提问者
     third = post_chat(chat_client, QUESTION)
 
     assert third.status_code == 200
@@ -622,17 +619,17 @@ def test_retry_clears_exact_cache_and_next_question_regenerates(chat_client, ses
     _seed_rag_chunk(session, user)
     failed = _seed_failed_doc(session, user)
     _override_reranker_high()
-    assert login(chat_client, "cacheretry", "right-one").status_code == 200
+    assert login_as(chat_client, "cacheretry", "right-one").status_code == 200
     assert post_chat(chat_client, QUESTION).status_code == 200
     assert post_chat(chat_client, QUESTION).status_code == 200
     assert app.state.chat_deps.llm.stream_calls == 1
 
-    assert login(chat_client, "cacheadmin2", "right-two").status_code == 200
+    assert login_as(chat_client, "cacheadmin2", "right-two").status_code == 200
     resp = chat_client.post(f"/api/documents/{failed.id}/retry")
 
     assert resp.status_code == 200
     assert resp.json()["data"]["status"] == "failed"  # 编排确实重跑（文件缺失仍失败）
-    assert login(chat_client, "cacheretry", "right-one").status_code == 200  # 切回提问者
+    assert login_as(chat_client, "cacheretry", "right-one").status_code == 200  # 切回提问者
     third = post_chat(chat_client, QUESTION)
 
     assert third.status_code == 200

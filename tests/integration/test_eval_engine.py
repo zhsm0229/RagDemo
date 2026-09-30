@@ -46,6 +46,7 @@ from app.rag.prompt import REFUSAL_TEXT
 from app.services import eval_engine, eval_service
 from app.services.chat import ChatDeps
 from app.services.chat_cache import DailyCounter, ExactCache, HitCounter
+from tests.conftest import login_as
 
 # ---------------------------------------------------------------------------
 # 种子与装配助手（ORM 直插，先例 tests/integration/test_chat_flow.py）
@@ -452,10 +453,6 @@ def make_user(session: Session, username: str, password: str, role: str) -> User
     return user
 
 
-def login(client: TestClient, username: str, password: str):  # type: ignore[no-untyped-def]
-    return client.post("/api/auth/login", json={"username": username, "password": password})
-
-
 @pytest.fixture()
 def eval_client(session: Session, monkeypatch: pytest.MonkeyPatch):
     """评测跑分 API 客户端：get_db 覆写 + TEST_MODE（lifespan 装 Stub 三件套）+ 引擎
@@ -485,7 +482,7 @@ def test_创建跑分_202与审计读回及GET接线(eval_client: TestClient, se
     """⑦ POST 202 {id} + 审计 eval.run {runId,name,perspective}；空题库跑完 done
     （TestClient 同步执行后台任务）；GET 列表/详情/404 接线读回。"""
     make_user(session, "evalrunadmin", "right-one", role="admin")
-    assert login(eval_client, "evalrunadmin", "right-one").status_code == 200
+    assert login_as(eval_client, "evalrunadmin", "right-one").status_code == 200
 
     resp = eval_client.post(
         "/api/admin/eval-runs", json={"name": "上线前回归", "perspectiveDeptCode": "hr"}
@@ -549,7 +546,7 @@ def test_创建跑分_202与审计读回及GET接线(eval_client: TestClient, se
 def test_未知视角部门_422部门数据未初始化(eval_client: TestClient, session: Session) -> None:
     """rider②（跑分侧）：perspectiveDeptCode 未播种 → 422"部门数据未初始化"，不建 run。"""
     make_user(session, "evalrunadmin2", "right-one", role="admin")
-    assert login(eval_client, "evalrunadmin2", "right-one").status_code == 200
+    assert login_as(eval_client, "evalrunadmin2", "right-one").status_code == 200
 
     resp = eval_client.post(
         "/api/admin/eval-runs", json={"name": "坏视角", "perspectiveDeptCode": "finance"}

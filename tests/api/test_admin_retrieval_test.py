@@ -32,6 +32,7 @@ from app.core.errors import ERR_FORBIDDEN, ERR_PARAM_INVALID
 from app.core.llm import StubEmbedder, StubReranker, sigmoid
 from app.db.models import Chunk, Department, Document, QaPair, User
 from app.services.retrieval import normalize_question, search_chunks
+from tests.conftest import login_as
 
 # ---------- 构造与登录辅助（口径同 tests/api/test_admin_qa_manage.py） ----------
 
@@ -53,14 +54,10 @@ def make_user(session: Session, username: str, password: str, role: str) -> User
     return user
 
 
-def login(client: TestClient, username: str, password: str):
-    return client.post("/api/auth/login", json={"username": username, "password": password})
-
-
 def admin_login(client: TestClient, session: Session) -> None:
     """创建并登录 admin（cookie 由 client 保持）。"""
     make_user(session, "rtadmin", "right-one", role="admin")
-    assert login(client, "rtadmin", "right-one").status_code == 200
+    assert login_as(client, "rtadmin", "right-one").status_code == 200
 
 
 def _dept_ids(session: Session) -> dict[str, int]:
@@ -442,7 +439,7 @@ def test_检索测试不写命中计数(rt_client, session):
 def test_成员角色访问检索测试_403(rt_client, session):
     """⑤ member 角色：403/2004（admin-only 调参工具）。"""
     make_user(session, "rtmember", "right-one", role="member")
-    assert login(rt_client, "rtmember", "right-one").status_code == 200
+    assert login_as(rt_client, "rtmember", "right-one").status_code == 200
     resp = _post_test(rt_client, "任意问题", "service")
     assert resp.status_code == 403
     assert resp.json()["code"] == ERR_FORBIDDEN

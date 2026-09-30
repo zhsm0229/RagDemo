@@ -24,6 +24,7 @@ from app.core.config import get_settings
 from app.core.errors import ERR_FORBIDDEN, ERR_PARAM_INVALID
 from app.db.models import AuditLog, Department, Document, User
 from app.services import zip_import
+from tests.conftest import login_as
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
@@ -79,14 +80,10 @@ def make_user(session: Session, username: str, password: str, role: str) -> User
     return user
 
 
-def login(client, username: str, password: str):
-    return client.post("/api/auth/login", json={"username": username, "password": password})
-
-
 def admin_login(client, session: Session) -> User:
     """创建并登录 admin（cookie 由 client 保持），返回用户便于断言 owner/审计 actor。"""
     user = make_user(session, "zipadmin", "right-one", role="admin")
-    assert login(client, "zipadmin", "right-one").status_code == 200
+    assert login_as(client, "zipadmin", "right-one").status_code == 200
     return user
 
 
@@ -420,7 +417,7 @@ def test_zip_corrupt_archive_422(client, session, sandbox_storage, test_mode):
 def test_zip_member_forbidden(client, session, sandbox_storage):
     """member 调用批量导入：403/2004（admin-only，同单文件上传口径）。"""
     make_user(session, "zipmember", "right-one", role="member")
-    assert login(client, "zipmember", "right-one").status_code == 200
+    assert login_as(client, "zipmember", "right-one").status_code == 200
     resp = post_zip(client, make_zip({"service_手册_20260901.docx": _docx_bytes("手册")}))
     assert resp.status_code == 403
     assert resp.json()["code"] == ERR_FORBIDDEN

@@ -43,7 +43,6 @@ def make_user(session: Session, username: str, dept_code: str, role: str) -> Use
     return user
 
 
-
 def _as_admin(client, session: Session) -> None:
     """建 admin（免首登改密）并登录；每个用例独立建号避免用户名冲突。"""
     make_user(session, "admin_w3", "all", role="admin")

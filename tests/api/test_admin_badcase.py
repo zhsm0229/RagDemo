@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import ERR_FORBIDDEN, ERR_NOT_FOUND, ERR_PARAM_INVALID, ERR_UNAUTHENTICATED
 from app.db.models import AuditLog, Conversation, Department, Message, User
+from tests.conftest import login_as
 
 _MSG_NOT_FOUND = "点踩记录不存在"
 _ITEM_KEYS = {
@@ -61,10 +62,6 @@ def make_user(session: Session, username: str, password: str, dept_code: str, ro
     session.add(user)
     session.flush()
     return user
-
-
-def login(client, username: str, password: str):
-    return client.post("/api/auth/login", json={"username": username, "password": password})
 
 
 def _at(day: int, hour: int) -> datetime:
@@ -230,7 +227,7 @@ def test_list_down_queue_filters_uniqueness_and_fields(client, session) -> None:
     列表项键集合全等、b1 项逐字段全等（questionPreview 恰 50 字）；一条回答一条
     记录不重复。"""
     d = _seed_dataset(session)
-    assert login(client, "admin_b9", "right-one").status_code == 200
+    assert login_as(client, "admin_b9", "right-one").status_code == 200
     desc_all = [d.b3.id, d.b2.id, d.b1.id]  # created_at DESC
 
     data = _get_data(client)
@@ -275,7 +272,7 @@ def test_patch_updates_status_audit_note_readback(client, session) -> None:
     422/1003 字段级指名 note（ADM-03 冻结基线：忽略必填理由，规格优先于计划），
     带 note → 200 且审计含 note。"""
     d = _seed_dataset(session)
-    assert login(client, "admin_b9", "right-one").status_code == 200
+    assert login_as(client, "admin_b9", "right-one").status_code == 200
 
     resp = client.patch(
         f"/api/admin/badcases/{d.b1.id}",
@@ -348,7 +345,7 @@ def test_patch_note_boundaries_ignore_requires_and_fixed_optional(client, sessio
     422/1003 指名 note；'已修语料' + 超 500 字 note → 422（给了也 ≤500）；无 note →
     200 且审计 note=null（可选）；恰 500 字 note → 200 且审计原文读回（§21.5 边界）。"""
     d = _seed_dataset(session)
-    assert login(client, "admin_b9", "right-one").status_code == 200
+    assert login_as(client, "admin_b9", "right-one").status_code == 200
 
     for payload in (
         {"badcaseStatus": "已忽略", "note": "边" * 501},  # 超长
@@ -394,7 +391,7 @@ def test_patch_invalid_status_422_and_non_badcase_404(client, session) -> None:
     字段级指名 badcaseStatus；寻址宇宙外（不存在 id / 点赞消息 / 评测点踩）→
     404/3003 同文案"点踩记录不存在"；全部失败形态零写入（状态与审计均不动）。"""
     d = _seed_dataset(session)
-    assert login(client, "admin_b9", "right-one").status_code == 200
+    assert login_as(client, "admin_b9", "right-one").status_code == 200
 
     for payload in (
         {"badcaseStatus": "已删除"},
@@ -455,7 +452,7 @@ def test_admin_ignore_then_user_down_keeps_ignored_but_comment_updates(client, s
         answer_type="rag",
     )
 
-    assert login(client, "alice_link", "right-one").status_code == 200
+    assert login_as(client, "alice_link", "right-one").status_code == 200
     first = client.post(
         f"/api/messages/{answer.id}/feedback",
         json={"feedback": "down", "category": "答案错误", "comment": "第一版备注"},
@@ -463,14 +460,14 @@ def test_admin_ignore_then_user_down_keeps_ignored_but_comment_updates(client, s
     assert first.status_code == 200
     assert first.json()["data"]["badcaseStatus"] == "待处理"
 
-    assert login(client, "admin_link", "right-one").status_code == 200
+    assert login_as(client, "admin_link", "right-one").status_code == 200
     patched = client.patch(
         f"/api/admin/badcases/{answer.id}", json={"badcaseStatus": "已忽略", "note": "产品已知问题"}
     )
     assert patched.status_code == 200
     assert patched.json()["data"] == {"messageId": answer.id, "badcaseStatus": "已忽略"}
 
-    assert login(client, "alice_link", "right-one").status_code == 200
+    assert login_as(client, "alice_link", "right-one").status_code == 200
     again = client.post(
         f"/api/messages/{answer.id}/feedback",
         json={"feedback": "down", "category": "引用无关", "comment": "第二版备注"},
@@ -478,7 +475,7 @@ def test_admin_ignore_then_user_down_keeps_ignored_but_comment_updates(client, s
     assert again.status_code == 200
     assert again.json()["data"]["badcaseStatus"] == "已忽略"  # 终态不被用户重开（W3 裁决）
 
-    assert login(client, "admin_link", "right-one").status_code == 200
+    assert login_as(client, "admin_link", "right-one").status_code == 200
     items = _get_data(client, {"badcaseStatus": "已忽略"})["items"]
     assert len(items) == 1
     assert items[0] == {
@@ -508,7 +505,7 @@ def test_member_and_anonymous_are_rejected(client, session) -> None:
         assert (resp.status_code, resp.json()["code"]) == (401, ERR_UNAUTHENTICATED)
 
     make_user(session, "plain_member", "right-one", "service", role="member")
-    assert login(client, "plain_member", "right-one").status_code == 200
+    assert login_as(client, "plain_member", "right-one").status_code == 200
     forbidden = (
         client.get("/api/admin/badcases"),
         client.patch(f"/api/admin/badcases/{d.b1.id}", json={"badcaseStatus": "已忽略"}),

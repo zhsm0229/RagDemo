@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from app.core.errors import ERR_NOT_FOUND, ERR_PARAM_INVALID, ERR_UNAUTHENTICATED
 from app.core.llm import StubEmbedder
 from app.db.models import Chunk, Department, Document, QaPair, User
+from tests.conftest import login_as
 
 _MSG_NOT_FOUND = "引用不存在或无权访问"
 
@@ -42,10 +43,6 @@ def make_user(session: Session, username: str, password: str, dept_code: str) ->
     session.add(user)
     session.flush()
     return user
-
-
-def login(client: TestClient, username: str, password: str):
-    return client.post("/api/auth/login", json={"username": username, "password": password})
 
 
 def _dept_ids(session: Session) -> dict[str, int]:
@@ -157,7 +154,7 @@ def test_doc_citation_returns_full_payload(client, session) -> None:
     """doc 引用：六键全，title 取文档规范标题，page/titlePath 取块定位信息。"""
     chunk = _seed(session)["service_chunk"]
     make_user(session, "serviceuser", "right-one", "service")
-    assert login(client, "serviceuser", "right-one").status_code == 200
+    assert login_as(client, "serviceuser", "right-one").status_code == 200
     resp = _get(client, "doc", chunk.id)
     assert resp.status_code == 200
     assert resp.json()["data"] == {
@@ -174,7 +171,7 @@ def test_qa_citation_maps_answer_and_question(client, session) -> None:
     """qa 引用：answer 映射 content、question 映射 title，page/titlePath 恒空。"""
     qa = _seed(session)["service_qa"]
     make_user(session, "serviceuser", "right-one", "service")
-    assert login(client, "serviceuser", "right-one").status_code == 200
+    assert login_as(client, "serviceuser", "right-one").status_code == 200
     resp = _get(client, "qa", qa.id)
     assert resp.status_code == 200
     assert resp.json()["data"] == {
@@ -195,11 +192,11 @@ def test_all_dept_content_visible_to_any_dept_user(client, session) -> None:
     seeds = _seed(session)
     make_user(session, "serviceuser", "right-one", "service")
     make_user(session, "hruser", "right-one", "hr")
-    assert login(client, "serviceuser", "right-one").status_code == 200
+    assert login_as(client, "serviceuser", "right-one").status_code == 200
     resp = _get(client, "doc", seeds["all_chunk"].id)
     assert resp.status_code == 200
     assert resp.json()["data"]["content"] == "安全须知正文原文"
-    assert login(client, "hruser", "right-one").status_code == 200
+    assert login_as(client, "hruser", "right-one").status_code == 200
     resp = _get(client, "qa", seeds["all_qa"].id)
     assert resp.status_code == 200
     assert resp.json()["data"]["content"] == "安全须知答案原文"
@@ -213,11 +210,11 @@ def test_cross_dept_citation_rejected_with_unified_message(client, session) -> N
     seeds = _seed(session)
     make_user(session, "serviceuser", "right-one", "service")
     make_user(session, "hruser", "right-one", "hr")
-    assert login(client, "hruser", "right-one").status_code == 200
+    assert login_as(client, "hruser", "right-one").status_code == 200
     resp = _get(client, "doc", seeds["service_chunk"].id)
     assert resp.status_code == 404
     assert resp.json() == {"code": ERR_NOT_FOUND, "message": _MSG_NOT_FOUND, "data": None}
-    assert login(client, "serviceuser", "right-one").status_code == 200
+    assert login_as(client, "serviceuser", "right-one").status_code == 200
     resp = _get(client, "qa", seeds["hr_qa"].id)
     assert resp.status_code == 404
     assert resp.json() == {"code": ERR_NOT_FOUND, "message": _MSG_NOT_FOUND, "data": None}
@@ -227,7 +224,7 @@ def test_missing_citation_404_same_message(client, session) -> None:
     """不存在的 refId：404/3003 同文案（与无权访问不可区分，不给探测空间）。"""
     _seed(session)
     make_user(session, "serviceuser", "right-one", "service")
-    assert login(client, "serviceuser", "right-one").status_code == 200
+    assert login_as(client, "serviceuser", "right-one").status_code == 200
     resp = _get(client, "doc", 999999)
     assert resp.status_code == 404
     assert resp.json() == {"code": ERR_NOT_FOUND, "message": _MSG_NOT_FOUND, "data": None}
@@ -257,7 +254,7 @@ def test_content_outside_retrieval_surface_not_readable(client, session) -> None
         title_path="第一章 归档",
     )
     make_user(session, "serviceuser", "right-one", "service")
-    assert login(client, "serviceuser", "right-one").status_code == 200
+    assert login_as(client, "serviceuser", "right-one").status_code == 200
     for ref_type, ref_id in (
         ("doc", dead_chunk.id),
         ("qa", disabled_qa.id),
@@ -275,7 +272,7 @@ def test_content_outside_retrieval_surface_not_readable(client, session) -> None
 def test_ref_type_outside_enum_422(client, session) -> None:
     """refType 枚举外：422/1003（FastAPI Literal 校验，非业务 404）。"""
     make_user(session, "serviceuser", "right-one", "service")
-    assert login(client, "serviceuser", "right-one").status_code == 200
+    assert login_as(client, "serviceuser", "right-one").status_code == 200
     resp = _get(client, "video", 1)
     assert resp.status_code == 422
     assert resp.json()["code"] == ERR_PARAM_INVALID

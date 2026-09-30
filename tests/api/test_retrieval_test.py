@@ -22,6 +22,7 @@ from app.core.config import get_settings
 from app.core.llm import StubEmbedder, StubReranker
 from app.db.models import Chunk, Department, Document, User
 from app.services.retrieval import normalize_question, search_chunks
+from tests.conftest import login_as
 
 
 def make_user(session: Session, username: str, password: str, role: str) -> User:
@@ -44,12 +45,7 @@ def make_user(session: Session, username: str, password: str, role: str) -> User
 def admin_login(client: TestClient, session: Session) -> None:
     """创建并登录 admin（cookie 由 client 保持）。"""
     make_user(session, "f1011admin", "right-one", role="admin")
-    assert (
-        client.post(
-            "/api/auth/login", json={"username": "f1011admin", "password": "right-one"}
-        ).status_code
-        == 200
-    )
+    assert login_as(client, "f1011admin", "right-one").status_code == 200
 
 
 def _dept_ids(session: Session) -> dict[str, int]:

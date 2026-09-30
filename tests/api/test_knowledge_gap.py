@@ -26,6 +26,7 @@ from app.core.errors import ERR_FORBIDDEN, ERR_PARAM_INVALID, ERR_UNAUTHENTICATE
 from app.core.security import hash_password
 from app.db.models import Conversation, Department, Message, User
 from app.main import app
+from tests.conftest import login_as
 
 _BASE = "/api/admin/knowledge-gap"
 
@@ -59,14 +60,10 @@ def make_user(
     return user
 
 
-def login(client, username: str, password: str):
-    return client.post("/api/auth/login", json={"username": username, "password": password})
-
-
 def admin_login(client, session: Session) -> User:
     """创建并登录 admin（cookie 由 client 保持）。"""
     admin = make_user(session, "缺口管理员", "right-one", role="admin")
-    assert login(client, "缺口管理员", "right-one").status_code == 200
+    assert login_as(client, "缺口管理员", "right-one").status_code == 200
     return admin
 
 
@@ -346,7 +343,7 @@ def test_export_truncates_with_header_flag(client, session, monkeypatch) -> None
 def test_member_forbidden_and_anonymous_unauthorized(client, session) -> None:
     """member 调周榜/导出：一律 403/2004；未登录（无 cookie）一律 401/2003。"""
     make_user(session, "普通成员", "right-one", role="member")
-    assert login(client, "普通成员", "right-one").status_code == 200
+    assert login_as(client, "普通成员", "right-one").status_code == 200
     for path in (_BASE, f"{_BASE}/export"):
         resp = client.get(path)
         assert resp.status_code == 403

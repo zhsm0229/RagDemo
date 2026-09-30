@@ -19,6 +19,7 @@ from sqlalchemy import func, select
 from app.core.errors import ERR_FORBIDDEN, ERR_PARAM_INVALID
 from app.db.models import AuditLog, Department, EvalQuestion, User
 from app.services.xlsx_io import read_rows
+from tests.conftest import login_as
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 _HEADERS = ["部门", "问题", "期望答案", "来源", "题型"]
@@ -44,14 +45,10 @@ def make_user(session, username: str, password: str, role: str) -> User:
     return user
 
 
-def login(client, username: str, password: str):
-    return client.post("/api/auth/login", json={"username": username, "password": password})
-
-
 def admin_login(client, session) -> None:
     """创建并登录 admin（cookie 由 client 保持），失败即失败在显式断言。"""
     make_user(session, "evaladmin", "right-one", role="admin")
-    assert login(client, "evaladmin", "right-one").status_code == 200
+    assert login_as(client, "evaladmin", "right-one").status_code == 200
 
 
 def _xlsx(rows: list[list[object]]) -> bytes:
@@ -286,7 +283,7 @@ def test_空表导入_报文件无数据(client, session):
 def test_成员角色访问导入与模板_403(client, session):
     """member 角色：导入与模板下载均 403/2004（admin-only）。"""
     make_user(session, "evalmember", "right-one", role="member")
-    assert login(client, "evalmember", "right-one").status_code == 200
+    assert login_as(client, "evalmember", "right-one").status_code == 200
 
     resp = post_import(client, [["客服", "问题", "答案", "", "factual"]])
     assert resp.status_code == 403

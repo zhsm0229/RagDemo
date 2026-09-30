@@ -21,6 +21,7 @@ from sqlalchemy import func, select
 
 from app.core.errors import ERR_FORBIDDEN, ERR_PARAM_INVALID
 from app.db.models import AuditLog, Department, QaPair, User
+from tests.conftest import login_as
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 _HEADERS = ["问题", "答案", "状态"]
@@ -46,14 +47,10 @@ def make_user(session, username: str, password: str, role: str) -> User:
     return user
 
 
-def login(client, username: str, password: str):
-    return client.post("/api/auth/login", json={"username": username, "password": password})
-
-
 def admin_login(client, session) -> None:
     """创建并登录 admin（cookie 由 client 保持），失败即失败在显式断言。"""
     make_user(session, "qaadmin", "right-one", role="admin")
-    assert login(client, "qaadmin", "right-one").status_code == 200
+    assert login_as(client, "qaadmin", "right-one").status_code == 200
 
 
 def _xlsx(rows: list[list[object]]) -> bytes:
@@ -329,7 +326,7 @@ def test_导入三百零一行_embed分批256与45(qa_client, session, monkeypat
 def test_成员角色访问导入与模板_403(qa_client, session):
     """member 角色：导入与模板下载均 403/2004（admin-only）。"""
     make_user(session, "qamember", "right-one", role="member")
-    assert login(qa_client, "qamember", "right-one").status_code == 200
+    assert login_as(qa_client, "qamember", "right-one").status_code == 200
 
     resp = post_import(qa_client, [["问题", "答案", "enabled"]])
     assert resp.status_code == 403

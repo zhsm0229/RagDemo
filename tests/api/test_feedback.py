@@ -41,7 +41,6 @@ def make_user(session: Session, username: str, password: str) -> User:
     return user
 
 
-
 def new_conversation(client) -> int:
     """新建空会话并返回 id（POST /api/conversations → data.id）。"""
     resp = client.post("/api/conversations")

@@ -20,7 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
-from test_admin_eval_import import admin_login, login, make_user
+from test_admin_eval_import import admin_login, make_user
 
 from app.core.assembly import load_prompt_pack
 from app.core.clock import FakeClock
@@ -31,6 +31,7 @@ from app.db.models import AuditLog, Department, EvalQuestion, EvalRun, User
 from app.services import eval_engine, eval_service
 from app.services.chat import ChatDeps
 from app.services.chat_cache import DailyCounter, ExactCache, HitCounter
+from tests.conftest import login_as
 
 # ---------------------------------------------------------------------------
 # 造数与装配助手（直调引擎先例 tests/integration/test_eval_engine.py）
@@ -322,7 +323,7 @@ def test_录分审计读回(client, session):
 def test_成员角色录分与报告_403(client, session):
     """member：录分与报告均 403/2004（AdminUser 门，路由参数校验前先挡）。"""
     make_user(session, "evalmember", "right-one", role="member")
-    assert login(client, "evalmember", "right-one").status_code == 200
+    assert login_as(client, "evalmember", "right-one").status_code == 200
 
     resp = _judge(client, 1, [(1, "correct")])
     assert resp.status_code == 403

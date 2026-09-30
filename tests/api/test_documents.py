@@ -27,6 +27,7 @@ from app.core.errors import (
     ERR_UNSUPPORTED_FORMAT,
 )
 from app.db.models import AuditLog, Department, Document, User
+from tests.conftest import login_as
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
@@ -82,14 +83,10 @@ def make_user(session: Session, username: str, password: str, role: str) -> User
     return user
 
 
-def login(client, username: str, password: str):
-    return client.post("/api/auth/login", json={"username": username, "password": password})
-
-
 def admin_login(client, session: Session) -> None:
     """创建并登录 admin（cookie 由 client 保持），失败即失败在显式断言。"""
     make_user(session, "docadmin", "right-one", role="admin")
-    resp = login(client, "docadmin", "right-one")
+    resp = login_as(client, "docadmin", "right-one")
     assert resp.status_code == 200
 
 
@@ -247,7 +244,7 @@ def test_upload_compliance_unconfirmed_422(client, session, sandbox_storage, tes
 def test_member_forbidden_on_all_document_endpoints(client, session, sandbox_storage):
     """member 调用上传/列表/重试/确认：一律 403/2004（admin-only）。"""
     make_user(session, "docmember", "right-one", role="member")
-    assert login(client, "docmember", "right-one").status_code == 200
+    assert login_as(client, "docmember", "right-one").status_code == 200
 
     assert post_document(client).status_code == 403
     resp = client.get("/api/documents")
@@ -393,7 +390,7 @@ def test_confirm_activates_pending_document(client, session, sandbox_storage, te
     assert item["isActive"] is False  # 敏感命中 → 待确认
 
     make_user(session, "docadmin2", "right-two", role="admin")
-    assert login(client, "docadmin2", "right-two").status_code == 200  # 切换为确认者登录态
+    assert login_as(client, "docadmin2", "right-two").status_code == 200  # 切换为确认者登录态
     resp = client.post(f"/api/documents/{data['id']}/confirm")
     assert resp.status_code == 200
     assert resp.json()["data"] == {"id": data["id"], "isActive": True}

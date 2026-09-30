@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.core.errors import ERR_FORBIDDEN
 from app.db.models import Department, User
 from app.services.metadata_suggest import SuggestedMeta, parse_filename_metadata
+from tests.conftest import login_as
 
 # ---------- 构造与登录辅助（口径同 test_zip_import.py） ----------
 
@@ -39,14 +40,10 @@ def make_user(session: Session, username: str, password: str, role: str) -> User
     return user
 
 
-def login(client: TestClient, username: str, password: str):
-    return client.post("/api/auth/login", json={"username": username, "password": password})
-
-
 def admin_login(client: TestClient, session: Session) -> None:
     """创建并登录 admin（cookie 由 client 保持）。"""
     make_user(session, "msadmin", "right-one", role="admin")
-    assert login(client, "msadmin", "right-one").status_code == 200
+    assert login_as(client, "msadmin", "right-one").status_code == 200
 
 
 def post_suggest(client: TestClient, filename: str):
@@ -128,7 +125,7 @@ def test_suggest_returns_empty_suggestion_on_bad_naming(client, session) -> None
 def test_suggest_member_forbidden(client, session) -> None:
     """member 调用建议端点：403/2004（AdminUser 门，§F-1008 防越权注入）。"""
     make_user(session, "msmember", "right-one", role="member")
-    assert login(client, "msmember", "right-one").status_code == 200
+    assert login_as(client, "msmember", "right-one").status_code == 200
     resp = post_suggest(client, "service_手册_20260901.docx")
     assert resp.status_code == 403
     assert resp.json()["code"] == ERR_FORBIDDEN
