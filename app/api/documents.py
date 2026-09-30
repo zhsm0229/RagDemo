@@ -22,10 +22,10 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import AdminUser, DbSession
+from app.core.assembly import build_embedder
 from app.core.clock import get_clock
 from app.core.config import get_settings
 from app.core.errors import ERR_PARAM_INVALID, ApiError
-from app.core.llm import StubEmbedder
 from app.core.storage import LocalFileStorage
 from app.db.base import SessionLocal
 from app.db.models import Department, Document
@@ -70,11 +70,11 @@ def _resolve_dept(db: Session, code: str) -> int:
 
 
 def _build_deps() -> IngestDeps:
-    """异步段依赖包（装配口径同 T13）：embedder 暂为确定性 Stub，W2 激活 TeiEmbedder 后替换。"""
+    """异步段依赖包（装配口径同 T13）：embedder 走装配工厂（真实 TEI；test_mode 回 Stub）。"""
     settings = get_settings()
     return IngestDeps(
         parser_settings=settings,
-        embedder=StubEmbedder(),
+        embedder=build_embedder(settings),
         clock=get_clock(),
         storage=LocalFileStorage(settings.storage_dir),
     )
