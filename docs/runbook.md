@@ -1,6 +1,6 @@
 # 运维手册（Runbook）
 
-> 状态：骨架版（W3 Task 13 产出）。备份/恢复流程按 standards §18 于 **W5 演练定稿**，其余章节随里程碑增量补全（§18.4：启动停止 / 备份恢复 / 常见故障 / 合规轨道切换 / 端口核查）。
+> 状态：W3 Task 13 产出骨架，W5 Task 6 定稿备份/恢复章节（第 3 节，§18）；演练实测数据待 T9 恢复演练后回填 3.4。其余章节随里程碑增量补全（§18.4：启动停止 / 备份恢复 / 常见故障 / 合规轨道切换 / 端口核查）。
 > 部署形态：单机 Docker Compose，4 核 16G VM（§12.5）。所有命令在仓库根目录执行（Windows Git Bash 或部署机 bash）。
 
 ## 1. 主栈启停
@@ -113,11 +113,123 @@ docker compose -f deploy/docker-compose.ragflow.yml up -d
 
 compose 中 `${RAGFLOW_IMAGE:-infiniflow/ragflow:v0.19.1}` 的 tag 默认值保留作可读回退，部署机以 `.env` 的 digest 引用为准。
 
-## 3. 备份 / 恢复
+## 3. 备份 / 恢复（§18，W5 T6 定稿）
 
-- 规范指针：standards §18——PostgreSQL 每日 `pg_dump` 全量保留 7 天（备份目录权限 0700）、上传目录每日同步、恢复目标 **RPO ≤ 24h / RTO ≤ 2h**、`.env` 凭据副本托管密码管理器。
-- **状态：W5 演练定稿**——具体备份脚本、恢复步骤、演练实测数据（RPO/RTO 实际值）在 W5 恢复演练后回填本节（§18.3：演练步骤写入 runbook，runbook 先于演练产出，故先立本占位）。
-- RAGFlow 基线环境不做备份（一次性对照数据，销毁重建，见 2.5）。
+- 规范指针：standards §18——PostgreSQL 每日 `pg_dump` 全量保留 7 天（备份目录权限 0700）、上传目录每日备份、恢复目标 **RPO ≤ 24h / RTO ≤ 2h**（§18.3）、`.env` 凭据副本托管密码管理器。
+- **安全须知（§18.1）：备份含全部问答与文档内容，访问权限同生产库**——备份只落独立目录（本方案 `./backups`，脚本已 `chmod 700`），禁止放入 Web 可访问路径或全员可见共享位置；`.env`（含密钥）不在备份内，副本托管密码管理器。
+- 备份范围 = 主库 `rag`（容器 `ragdemo-pg`）+ 上传目录 `./data/uploads`（`STORAGE_DIR` 默认值）。`ragdemo-pg-test`（`rag_test`，5434 端口）是独立测试实例，**不在备份范围**；RAGFlow 基线环境不做备份（一次性对照数据，销毁重建，见 2.5）。
+- 备份统一走 `deploy/backup.sh`（顶部参数化区可按环境覆盖容器名/库名/目录/保留期），每步带 `[backup]` 时间戳日志，任一步失败非零退出。
+
+### 3.1 每日自动备份（调度示例）
+
+Windows（装有 Git Bash 的开发/演示机；在 cmd 执行，Git Bash 与仓库路径按实际调整）：
+
+```bat
+schtasks /Create /TN "ragdemo-daily-backup" /SC DAILY /ST 02:30 /TR "\"C:\Program Files\Git\bin\bash.exe\" -c 'cd /d/Project/ZCodeProject/RagDemo && mkdir -p backups && ./deploy/backup.sh >> backups/backup-cron.log 2>&1'"
+```
+
+Linux（部署机；`crontab -e` 追加一行，仓库路径按实际调整）：
+
+```bash
+30 2 * * * cd /opt/ragdemo && mkdir -p backups && ./deploy/backup.sh >> backups/backup-cron.log 2>&1
+```
+
+- 两版均为每日 02:30 执行，日志追加到 `backups/backup-cron.log`（backup.sh 的保留期清理只删 `*.gz`，该日志需手工定期清理）。
+- 前置：`ragdemo-pg` 在运行且 healthy（`docker inspect -f '{{.State.Health.Status}}' ragdemo-pg`）；失败先查上述日志，再手工按 3.2 复现。
+- 登记核查：Windows `schtasks /Query /TN "ragdemo-daily-backup"`；Linux `crontab -l`。
+
+### 3.2 手动备份
+
+```bash
+bash deploy/backup.sh
+```
+
+- 产物：`backups/rag-YYYYMMDD-HHMMSS.sql.gz`（主库全量 dump，gzip 在宿主侧管道完成）+ `backups/uploads-YYYYMMDD-HHMMSS.tar.gz`（上传目录归档；目录不存在时警告跳过）；结束自动清理超过 7 天的 `backups/*.gz`。
+- 备份后速检：`ls -lh backups/`——当日 `.sql.gz` 必须非 0 字节；**没做过恢复读回验证的备份不算可用备份**——至少在每次演练时按 3.3(a) 验证一轮。
+
+### 3.3 恢复步骤（两种口径，动手前先确认口径）
+
+两种口径共用前置：`ragdemo-pg` 在运行；先定位目标备份文件（默认取最新一份，也可手工指定）：
+
+```bash
+BK="$(ls -t backups/rag-*.sql.gz | head -n1)"     # 主库备份，如 backups/rag-20260930-023000.sql.gz
+BU="$(ls -t backups/uploads-*.tar.gz | head -n1)" # 上传目录备份
+echo "BK=$BK BU=$BU"
+```
+
+#### (a) 恢复到新建验证库（演练 / 校验备份可用性，不影响生产数据）
+
+```bash
+# 1. 建验证库（幂等：先删同名残留）
+docker exec ragdemo-pg psql -U rag -c "DROP DATABASE IF EXISTS rag_restore"
+docker exec ragdemo-pg psql -U rag -c "CREATE DATABASE rag_restore"
+
+# 2. 恢复
+gunzip -c "$BK" | docker exec -i ragdemo-pg psql -U rag -d rag_restore
+
+# 3. 读回核对：表清单应与生产库一致，核心表行数应与备份时点一致
+docker exec ragdemo-pg psql -U rag -d rag_restore -c "\dt"
+docker exec ragdemo-pg psql -U rag -d rag_restore -c "SELECT count(*) FROM documents"
+docker exec ragdemo-pg psql -U rag -d rag_restore -c "SELECT count(*) FROM qa_pairs"
+docker exec ragdemo-pg psql -U rag -d rag_restore -c "SELECT count(*) FROM conversations"
+
+# 4. 与生产库同口径比对（结果应一致）
+docker exec ragdemo-pg psql -U rag -d rag -c "SELECT count(*) FROM documents"
+docker exec ragdemo-pg psql -U rag -d rag -c "SELECT count(*) FROM qa_pairs"
+
+# 5. 演练结束清理验证库
+docker exec ragdemo-pg psql -U rag -c "DROP DATABASE rag_restore"
+```
+
+uploads 侧核对：`tar -tzf "$BU" | head` 能列出 `uploads/...` 文件即归档完好；正式演练时抽一个文件解出比对内容。
+
+#### (b) 覆盖生产库（灾难恢复；先停写、后覆盖、再冒烟）
+
+> **【危险】覆盖生产库前必须确认已有一次成功备份——本节会先 DROP 生产库 `rag`。没有非 0 字节的 `rag-*.sql.gz` 时禁止执行本节，先走 3.3(a) 验证库口径排查备份可用性。**
+
+```bash
+# 0. 前置检查：目标备份存在且非 0 字节；停机窗口与相关方已确认
+ls -lh backups/rag-*.sql.gz
+
+# 1. 停写入方（app 容器并入主栈后生效；并入前确认无业务写入在跑）
+docker compose stop app
+
+# 2. 重建生产库（连 postgres 维护库执行；WITH (FORCE) 断开残留连接，PG15 支持）
+docker exec ragdemo-pg psql -U rag -d postgres -c "DROP DATABASE IF EXISTS rag WITH (FORCE)"
+docker exec ragdemo-pg psql -U rag -d postgres -c "CREATE DATABASE rag"
+
+# 3. 恢复主库
+gunzip -c "$BK" | docker exec -i ragdemo-pg psql -U rag -d rag
+
+# 4. 恢复上传目录（归档内含 uploads/ 一级目录，解到其父目录 ./data）
+mkdir -p ./data
+tar -xzf "$BU" -C ./data
+
+# 5. 起服务 + 冒烟
+docker compose up -d
+docker compose ps   # 应全部 healthy
+# 冒烟：登录工作台发起一次问答，确认回答带可核对引用；app 并入后增加 curl -f http://127.0.0.1/healthz（§12.2）
+
+# 6. 读回核对（对 -d rag 执行，行数与备份时点一致）
+docker exec ragdemo-pg psql -U rag -d rag -c "SELECT count(*) FROM documents"
+docker exec ragdemo-pg psql -U rag -d rag -c "SELECT count(*) FROM qa_pairs"
+```
+
+- 红线（与第 1 节一致）：本节 `DROP`/`CREATE` 只针对库 `rag`，禁止波及 `rag_test`；全程禁止 `docker compose down -v`（会删 `pgdata` 业务数据卷）。
+
+### 3.4 演练记录表（§18.3，实测回填）
+
+| 日期 | 类型 | 备份大小 | 恢复耗时 | RTO | RPO | 执行人 | 备注 |
+|---|---|---|---|---|---|---|---|
+| （示例）2026-09-30 | 验证库恢复 | 12 MB | 8 分钟 | 12 分钟 | 20 小时 | 张三 | 示例行：RTO=恢复+冒烟端到端时长，RPO=距上次成功备份的数据窗口；正式记录自 W5 T9 演练起填 |
+
+- 类型口径：`验证库恢复` = 3.3(a)，常规演练；`生产覆盖演练` = 3.3(b)，需审批与停机窗口。
+
+### 3.5 RPO / RTO 目标声明（§18.3）
+
+- **RPO ≤ 24 小时**：由每日 02:30 全量备份决定，最大数据丢失窗口 ≈ 24 小时（上次成功备份到故障点之间新增的数据）。
+- **RTO ≤ 2 小时**：定位备份 → 3.3 恢复 → 起服务 → 冒烟核对的端到端时长上限。
+- 实测值：**待 W5 T9 恢复演练回填**（实测写入 3.4 记录表；超出目标须先整改备份/恢复方案再定稿）。
 
 ## 4. 端口暴露核查清单（§12.2，每次发布 / 基线启停后执行）
 
