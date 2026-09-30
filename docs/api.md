@@ -1,8 +1,8 @@
-# RagDemo 接口文档（W1 - W4）
+# RagDemo 接口文档（W1 - W5）
 
 > 依据 `docs/standards.md` §3（API 接口规范）编写，随代码演进（§19.1 文档随代码）。
-> 覆盖 `app/api/` 当前全部路由：auth 4 个、documents 6 个、chat 1 个、conversations 4 个、citations 1 个、messages（feedback）1 个、admin 管理端 27 个（问答对 6、评测 8、提问记录与 badcase 4、检索测试 1、概览与健康度 2、用户管理 4、审计查询 2），共 44 个端点。
-> 最后更新：W5 Task 2（qa-pairs 列表 DTO 补 deptCode 成 9 键；§4.3/§4.5 补"包含已删除会话的消息"口径句；§2.9 部门段双收中文，与 §2.10 同源别名表）。
+> 覆盖 `app/api/` 当前全部路由：auth 4 个、documents 6 个、chat 1 个、conversations 4 个、citations 1 个、messages（feedback）1 个、admin 管理端 30 个（问答对 6、评测 8、提问记录与 badcase 4、检索测试 1、概览与健康度 3（含零召回块下钻）、用户管理 4、审计查询 2、知识缺口报告 2），共 47 个端点。
+> 最后更新：W5 Task 5 台账翻转（计数 44→47：W5 新增知识缺口报告 2 端点，见 §4.9；零召回块下钻 `GET /api/admin/zero-recall-chunks` 1 端点，见 §4.5.3；§4.4.1 docs 项补 hitCount/lastHitAt 历史召回统计两键）。
 
 ## 1. 通用约定
 
@@ -407,7 +407,7 @@ SSE 事件 DTO 字段表（**逐字引自 standards §3 第 6 条**）：
 | 请求体 | `question`（strip 后 1-2000 字）、`deptCode`（枚举 service / hr / all，检索视角；admin 任意视角，但检索 SQL 恒带部门过滤） |
 | 成功响应 | `200`，`data: {qa, docs, thresholds}`——重放检索管道（normalize → embed → 问答对匹配 → 向量检索 → 重排折叠），qa 与 docs 两路结果并呈互不短路 |
 | qa 字段 | `{id, question, similarity, thresholdPassed}` 或 null——similarity 为 **embedding 余弦**（qa 口径，对照当前 qa 阈值；低于阈值即返回 null，命中时 thresholdPassed 恒 true）。**两套分数口径不互比**：qa 的余弦与 docs 的 rerank 分分属不同空间（standards §4.4） |
-| docs 项字段 | `{chunkId, documentTitle, page, titlePath, rerankScore, recallCosine, thresholdPassed, folded}`——**rerankScore 为 rerank sigmoid 分、recallCosine 为召回阶段余弦**，两套分数分字段呈列；folded=true 标记进 top_n 但被折叠丢弃的块（调参需可见）；thresholdPassed 对照当前 Settings 阈值逐块标记 |
+| docs 项字段 | `{chunkId, documentTitle, page, titlePath, rerankScore, recallCosine, thresholdPassed, folded, hitCount, lastHitAt}`——**rerankScore 为 rerank sigmoid 分、recallCosine 为召回阶段余弦**，两套分数分字段呈列；folded=true 标记进 top_n 但被折叠丢弃的块（调参需可见）；thresholdPassed 对照当前 Settings 阈值逐块标记；hitCount/lastHitAt 为该块历史召回统计（F-1011 读现列回显：lastHitAt ISO8601，null=从未召回；本端点只读不写计数，不污染 §4.5 零召回榜） |
 | thresholds | `{qa, refuse}` 当前生效阈值（config 缺省 0.85 / 0.55） |
 | 副作用 | 无：不调 LLM、不写召回计数（不污染零召回榜）、只读不落审计 |
 | 错误分支 | `422/1003` question 长度非法（field 级）、deptCode 枚举外 |
@@ -429,6 +429,18 @@ SSE 事件 DTO 字段表（**逐字引自 standards §3 第 6 条**）：
 | 项 | 说明 |
 |----|------|
 | 成功响应 | `200`，`data: {totalDocs, readyCount, readyRate, pendingConfirm, zeroRecall, expiringSoon}`——`zeroRecall` 零召回文档榜：is_active+ready 且建档严格早于 30 天前、且近 30 天无任一 chunk 被命中（文档级反连接，恰在 30 天线的命中即算近期）；项 `{id, title, deptCode, createdAt}` 按建档升序。`expiringSoon` 待过期清单：expiry_date ≤ 今天+7 天且未删除（**含已到期未下线**）；项 `{id, title, expiryDate}` |
+
+#### 4.5.3 GET /api/admin/zero-recall-chunks — 零召回块清单（W5 后端追加，F-1011）
+
+| 项 | 说明 |
+|----|------|
+| 权限 | 仅 admin（AdminUser）；member 一律 `403/2004`，未登录 `401/2003`（§1.1 全端点口径） |
+| 查询参数 | `days`（1-365，缺省 30，与 §4.5.2 文档级零召回榜同值，可调宽供运营排查）、`page`（≥1，缺省 1）、`pageSize`（1-100，缺省 20）（§1.2 分页口径） |
+| 成功响应 | `200`，`data: {items, total, page, pageSize}`（§1.2 列表口径）；items 按 createdAt 降序（同刻 id 降序兜底），total 为 WHERE 全量计数 |
+| items 项字段 | `{chunkId, documentTitle, deptCode, titlePath, contentPreview, createdAt}`——contentPreview 服务端截断 50 字（预览列不整段拖表）；createdAt 为块建档时刻（ISO8601） |
+| 入列口径 | §4.5.2 `zeroRecall` 零召回文档榜的块级下钻（同一口径的文档级/块级两面）：块 `lastHitAt` 为 null（从未召回）或早于 now−days 即入列，恰压 days 线算近期不入列；文档闸与文档级逐字一致（is_active+ready），块侧另加块级 is_active（停用块同样不可被召回） |
+| 副作用 | 无：只读、不写召回计数（不污染零召回榜）、不落审计 |
+| 错误分支 | `422/1003` 查询参数越界（days/page/pageSize field 级） |
 
 ### 4.6 提问记录保留策略（非端点，后台任务）
 

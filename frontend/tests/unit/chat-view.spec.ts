@@ -31,6 +31,10 @@ import {
   waitFor,
 } from './helpers/chat-mock'
 
+// SSE 流时序用例（等待多帧事件）在 CI/慢机上可能超过默认 5s 单测超时（T3 评审裁定
+// 与其余 9 个重型 view spec 对齐补设；chat-stream-robustness 拆分文件维持现状）
+vi.setConfig({ testTimeout: 30_000 })
+
 beforeEach(() => {
   vi.stubGlobal('fetch', fetchMock)
   // jsdom 未实现 scrollIntoView（角标→面板滚动定位用）
