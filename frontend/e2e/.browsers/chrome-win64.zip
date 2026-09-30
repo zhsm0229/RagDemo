@@ -1,0 +1,144 @@
+<!DOCTYPE html><html data-critters-container=""><head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge,chrome=1">
+    <base href="/mirror/">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1.0, user-scalable=no">
+    <meta http-equiv="Cache-Control" content="public, max-age=31536000">
+    <meta name="keywords" content="镜像,镜像站,软件开发,编译构建,maven,npm,pypi,nuget,php,rubygem,sbt,操作系统">
+    <meta name="description" content="华为云DevCloud团队提供的全类型镜像站服务，提供主流开发语言组件、操作系统、常用工具和库等镜像，极速下载，全站CDN，官方合作。">
+    <link rel="icon" type="image/x-icon" href="//devcloud-res.hc-cdn.com/MirrorPortal-CDN/2026.8.3/hws/favicon.ico">
+
+    <script>
+      const $favicon = document.querySelector('link[rel="icon"]');
+      let locationHost = window.location.host;
+      if (
+        (locationHost.indexOf('xfusion.com') > -1 ||
+          locationHost.indexOf('beta2.huawei.com') > -1 ||
+          locationHost.indexOf('heds-beta2.huawei.com') > -1) &&
+        $favicon
+      ) {
+        $favicon.href = null;
+      }
+    </script>
+
+    <script>
+      window.devEnvName = 'hws';
+      window.header_url = 'is_global';
+      window.app_cookie_prefix = 'cftk';
+      window.oversea = '';
+      window.platform = 'devcloud';
+      window.appName = 'mirror';
+      window.globalVars = JSON.parse('{"Portal_devEnv_name":" hws","__POWERED_BY_DRAGONFLY__":true}');
+    </script>
+
+    <script>
+      window.devEnvName = 'Portal_devEnv_name';
+
+      window.inhuaweiEnable = String(window.platform === 'clouddragon');
+      localStorage.setItem('inhuaweiEnable', window.inhuaweiEnable);
+
+      localStorage.setItem('newVersion', 'true');
+      window.isNewVisionFeedback = localStorage.getItem('isNewVisionFeedback');
+      if (window.isNewVisionFeedback === 'false' || window.isNewVisionFeedback == null) {
+        localStorage.setItem('newVersion', 'true');
+      }
+
+      window.isNewVersion = localStorage.getItem('newVersion');
+    </script>
+  <style>@import"https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&display=swap";html{line-height:1.15;-webkit-text-size-adjust:100%}body{margin:0}body{margin:0;padding:0;color:#252b3a;color:var(--devui-text,#252b3a);font-size:12px;font-size:var(--devui-font-size,12px);font-family:Helvetica,Arial,PingFangSC-Regular,Hiragino Sans GB,Microsoft YaHei,\5fae\8f6f\96c5\9ed1,HarmonyOS Sans SC,HarmonyOS Sans,Microsoft JhengHei;line-height:1.5;line-height:var(--devui-line-height-base,1.5)}*,:after,:before{box-sizing:border-box}@charset "UTF-8"</style><link rel="stylesheet" href="//devcloud-res.hc-cdn.com/MirrorPortal-CDN/2026.8.3/hws/styles.e83ac7a353358616.css" media="print" onload="this.media='all'"><noscript><link rel="stylesheet" href="//devcloud-res.hc-cdn.com/MirrorPortal-CDN/2026.8.3/hws/styles.e83ac7a353358616.css"></noscript><script>
+window['cftk_cookie_key_cf2']='devclouddevuibjtcftk';
+window['headerapp_resource']={
+  "dir": "//devcloud-res.hc-cdn.com/HeaderAppCDN/26.9.1/hws/",
+  "version": "26.9.1",
+  "config": {
+    "isOversea": "",
+    "isOverseaPackage": "",
+    "purchaseDetailUrl": "",
+    "feedbackScripts": "https://res.hc-cdn.com/NPS-component/1.0.5/hws/nps-feedback.js",
+    "professionalServiceUrl": "https://console.huaweicloud.com/professionalService",
+    "aiAssistantUrl": "https://www.huaweicloud.com/ai-assistant/index.html",
+    "feedbackUrl": "https://bbs.huaweicloud.com/suggestion/new",
+    "DevUIAdminServiceIam5Regions": "cn-north-1,cn-north-4,cn-southwest-2,cn-east-2,cn-south-1,cn-east-3",
+    "DevCloudConsoleIam5Regions": "",
+    "ProjectServiceIam5Regions": "cn-north-1,cn-north-4,cn-southwest-2,cn-east-2,cn-south-1,cn-east-3",
+    "AutoCreateAgencyRegions": "",
+    "pipelineV3": "7ef5803328114cbbbadc30c2057862d1,8ccd6f01701e400390e192d571a215a6,912fa9bb8a104c26b65971fe2508a251,45c78aba7ad541c4a4e3d64085fc0339,a51f1204e8e24def8766ea096b1e5958,0ca8884dc1f349c4a8b3bf5cf80063ea,0af84c1502f447fa9c2fa18083fbb87e,ee4ba570b0b5477bb7873030000d3146",
+    "pipelineV5": "CODEARTSPIPELINEAgencyFullPolicy",
+    "deployV3": "8ccd6f01701e400390e192d571a215a6,912fa9bb8a104c26b65971fe2508a251,45c78aba7ad541c4a4e3d64085fc0339,a51f1204e8e24def8766ea096b1e5958",
+    "deployV5": "CodeArtsDeployServiceAgencyPolicy",
+    "buildV3": "a51f1204e8e24def8766ea096b1e5958,0ca8884dc1f349c4a8b3bf5cf80063ea",
+    "buildV5": "CodeArtsBuildAgencyFullPolicy",
+    "devucV3": "bf5675bbcbe0470686fad6c1e53b4a60",
+    "devucV5": "DevUCServiceAgencyPolicy",
+    "checkV5": "CodeArtsCheckAgencyFullPolicy",
+    "repoV5": "CodeArtsRepoAgencyWebhookPolicy",
+    "supportIam5": "true",
+    "supportAutoCreateAgency": "true",
+    "workspaceXWhiteList": "afc4784e64d146549764787876c60856,aae03ca0d6814951980945b6eeca56cd,f65db0e9f7a04bbf85cb2b80bd4f84c6,40593b93eed64b62bab232f7877c08d0,91e65278dfc84e1eb657d26209edd54b,09cad66b4a80f4690f88c019cc4a6740",
+    "supportNewSetting": "",
+    "MenuIam5Regions": "",
+    "envName": "ENV_NAME",
+    "panguWhiteList": "cn-north-7,cn-north-5,cn-north-4",
+    "codeArtsWhiteList": "cn-north-7,cn-north-5,cn-north-4,cn-north-1,cn-east-3,cn-east-2,cn-south-1,cn-northeast-1,cn-south-2,cn-southwest-2,la-north-2,ap-southeast-3",
+    "codeArtsDoerUrl": "https://developer.huaweicloud.com/codeartsco.html?source=dmzntgwcl&sourcead=dmzntgwclmd",
+    "codeArtsTrialProductId": "OFFI900205974560108550",
+    "codeAgentTrialProductId": "OFFI1296473119762554880",
+    "isInternational": ""
+  }
+};
+window['service_cf3_config']={"codeartsDoerStatement":"https://www.huaweicloud.com/declaration/tsa-codearts-doer.html","skillAddBaseUrl":"https://mirrors.huaweicloud.com/artifactory/skills-local","envInfoId":"devcloud","codeartsDoerOfficialSite":"https://codearts.huaweicloud.com","codeartsDoerPackage":"https://codearts.huaweicloud.com/pricing.html","codeartsDoerDownloadIde":"https://codearts.huaweicloud.com/download.html","furion_app_id":"5B69D9AB5FF940F685E4E36C0487350D","enable":{"skills":false,"showCodeartsDoerDialog":true,"huaweiskill":false},"codeartsDoerUpgradePackage":"https://console.huaweicloud.com/devcloud/?locale=zh-cn#/codearts-doer/list","guide":{"rubygemsDownloadLink":"https://rubygems.org/pages/download?locale=zh-CN","jenkinsUpdatesCenterJSONPath":"/jenkins/updates/current/update-center.json","rubyPath":"/ruby/ruby/","cannComTypes":"PyPI,Docker,Debian,RPM,RUN","rubygemsBundlerConfigLink":"https://bundler.io/v1.16/man/bundle-config.1.html#MIRRORS-OF-GEM-SOURCES"},"skillMdBaseUrl":"https://mirrors.huaweicloud.com/artifactory/skills-local","skillNpmRegistry":"https://mirrors.huaweicloud.com/artifactory/api/npm/npm-public/","furion_cdn_url":"https://devcloud-res.hc-cdn.com/FurionSdkCDN/1.0.22/furion-cdn.min.js","baseUrlCDN":"https://repo.huaweicloud.com","skillRepos":[{"iconSrc":"anthropics.png","icon":"github","id":"anthropics","label":"anthropics/skills","href":"https://github.com/anthropics/skills"},{"iconSrc":"openclaw.png","icon":"github","id":"openclaw","label":"openclaw/skills","href":"https://github.com/openclaw/skills"},{"iconSrc":"zai-org.png","icon":"github","id":"glm","label":"zaiorg/skills","href":"https://github.com/zai-org/GLM-skills/"},{"icon":"codehub","id":"codeagent","label":"huawei/skills","href":"https://open.codehub.huawei.com/innersource/CodeAgent-Extensions_G/CodeAgent-Skills/files?ref=master"},{"iconSrc":"mattpocock.png","icon":"github","id":"mattpocock","label":"mattpocock/skills","href":"https://github.com/mattpocock/skills.git"},{"iconSrc":"openai.png","icon":"github","id":"openai","label":"openai/skills","href":"https://github.com/openai/skills"},{"iconSrc":"MiniMax-AI.png","icon":"github","id":"minimaxai","label":"minimaxai/skills","href":"https://github.com/MiniMax-AI/skills.git"},{"iconSrc":"slavingia.png","icon":"github","id":"slavingia","label":"slavingia/skills","href":"https://github.com/slavingia/skills.git"},{"iconSrc":"huggingface.png","icon":"github","id":"huggingface","label":"huggingface/skills","href":"https://github.com/huggingface/skills.git"},{"iconSrc":"antfu.png","icon":"github","id":"antfu","label":"antfu/skills","href":"https://github.com/antfu/skills.git"}],"codeartsDoerEnterDoer":"https://codearts.huaweicloud.com/portal/settings/subscription?locale=zh-cn","isSupportExternalLink":true,"devcloud_url":"https://devcloud.huaweicloud.com","codeartsDoerDoc":"https://support.huaweicloud.com/productdesc-codeartsagent/codeartsagent_pd_0001.html","register_url":"https://reg.huaweicloud.com/registerui/cn/register.html?locale=zh-cn","codeartsDoerViewOrder":"https://account.huaweicloud.com/usercenter/?locale=zh-cn#/userindex/myOrder","nps":{"surveyId":"hwcloudbusurvey_key_fbd25bdbdb87","contactId":"global","serviceName":"CodeArts-Mirror","serviceId":"CS12020808","script":"https://res.hc-cdn.com/NPS-component/1.0.5/hws/nps-feedback.js"},"codeartsDoerCookiesDomain":".huaweicloud.com","homeUrl":"https://www.huaweicloud.com/","baseUrl":"https://mirrors.huaweicloud.com","centralRepoDomain":"ascend.devcloud.huaweicloud.com","private_url":"https://devcloud.cn-north-4.huaweicloud.com/cloudartifact/repository/maven"};
+</script>
+</head>
+
+  <body class="prerender-auto-height">
+    <!--insertHeaderScriptHere-->
+    <!--FurionScriptBegin-->
+		<script>if(window.service_cf3_config.furion_app_id &&
+    window.service_cf3_config.furion_cdn_url){!function(x,n){window[n]=window[n]||{};window[n].config={"appId":window.service_cf3_config.furion_app_id,"setting":"perf,uba,jsTrack,api,longtask,rtti"};var o=document.createElement('script');o.src=x,o.async=!0;
+  var d=document.body.firstChild;document.body.insertBefore(o,d);}(window.service_cf3_config.furion_cdn_url,'__fr');}</script>
+<!--FurionScriptEnd-->
+
+   <!--insertOnloadScriptHere-->
+   <script>
+    function isExecuteInsertInto() {
+      return (
+        !window?.service_cf3_config?.envInfoId ||
+        window?.service_cf3_config?.envInfoId !== 'codearts' ||
+        window?.service_cf3_config?.envInfoId !== 'heds' ||
+        window?.service_cf3_config?.envInfoId !== 'hedsTest'
+      );
+    }
+
+    if (isExecuteInsertInto() && !location.host.includes('dev.huawei')) {
+      const uemLoadingRate = window.service_cf3_config?.uem_loading_rate ?? 100;
+      const random = Math.floor(Math.random() * 100) + 1;
+      if (random <= uemLoadingRate) {
+        window.uemBetaAppId = 'a2f87770efd837b54f4c50ddcfe8c3cc';
+        window.uemProdAppId = 'a419e557b46b7fb81b7681a6a250909d';
+        const uemUrl = '//devcloud-res.hc-cdn.com/MirrorPortal-CDN/2026.8.3/hws/UEM_V4.js';
+        let script = document.createElement('script');
+        script.src = uemUrl;
+        script.async = true;
+        let firstChild = document.body.firstChild;
+        document.body.insertBefore(script, firstChild);
+      }
+
+      if(window.inhuaweiEnable === 'true') {
+        const importMap = {
+          "imports": {
+              "vue": "//devcloud-res.hc-cdn.com/MirrorPortal-CDN/2026.8.3/hws/vue.esm-browser.prod.js",
+              "echarts": "//devcloud-res.hc-cdn.com/MirrorPortal-CDN/2026.8.3/hws/echarts.esm.js"
+          }
+        };
+        const importMapScript = document.createElement('script');
+        importMapScript.type = 'importmap';
+        importMapScript.async = true;
+        importMapScript.textContent = JSON.stringify(importMap, null, 2);
+        document.body.appendChild(importMapScript);
+      }
+    }
+  </script>
+    <app-root devui-devcloud-version="17.1.8" devui-assets-version="4.14.3" devcloud-console-version="7.3.14" devui-material-cli-version="1.73.3" ng-devui-version="17.121.0"></app-root>
+  <script src="//devcloud-res.hc-cdn.com/MirrorPortal-CDN/2026.8.3/hws/runtime.1f72070ca0917fce.js" type="module"></script><script src="//devcloud-res.hc-cdn.com/MirrorPortal-CDN/2026.8.3/hws/polyfills.b5661aac9b6ab64a.js" type="module"></script><script src="//devcloud-res.hc-cdn.com/MirrorPortal-CDN/2026.8.3/hws/main.dd87a002313c9570.js" type="module"></script>
+
+</body></html>

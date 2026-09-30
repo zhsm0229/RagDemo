@@ -123,9 +123,9 @@ def test_authorization_header_only_when_api_key_non_empty() -> None:
         captured["authorization"] = request.headers.get("authorization")
         return httpx.Response(200, content=_sse("[DONE]"), headers=_SSE_HEADERS)
 
-    with_key = _provider(handler, api_key="sk-secret-1")
+    with_key = _provider(handler, api_key="stub-key-0001")
     assert list(with_key.chat_stream(_MESSAGES, max_tokens=16)) == []
-    assert captured["authorization"] == "Bearer sk-secret-1"  # api_key 非空才带 Bearer 头
+    assert captured["authorization"] == "Bearer stub-key-0001"  # api_key 非空才带 Bearer 头
 
     captured.clear()
     without_key = _provider(handler, api_key="")

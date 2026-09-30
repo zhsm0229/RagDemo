@@ -134,7 +134,7 @@ describe('发放账号（初始密码一次性展示）', () => {
 
   it('空用户名提交被拦（validators §21.3 口径，零 POST）；部门未选同样拦截', async () => {
     backend.users = [userItem()]
-    backend.createResult = { id: 201, initialPassword: 'InitPass123456' }
+    backend.createResult = { id: 201, initialPassword: 'mock-initial-pass' }
     const wrapper = await mountUsers()
     const dialog = await openCreate(wrapper)
 
@@ -155,7 +155,7 @@ describe('发放账号（初始密码一次性展示）', () => {
 
   it('提交 201：POST body {username, deptCode, role}；弹初始密码对话框 readOnly 可复制；回第 1 页刷新', async () => {
     backend.users = Array.from({ length: 25 }, (_, i) => userItem({ username: `用户${i}` }))
-    backend.createResult = { id: 201, initialPassword: 'InitPass123456' }
+    backend.createResult = { id: 201, initialPassword: 'mock-initial-pass' }
     const wrapper = await mountUsers()
     await wrapper.find('.btn-next').trigger('click')
     await flushPromises()
@@ -179,11 +179,11 @@ describe('发放账号（初始密码一次性展示）', () => {
     expect(dialog.props('visible')).toBe(false)
     const pwd = wrapper.findComponent(PasswordDialog)
     expect(pwd.props('visible')).toBe(true)
-    expect(pwd.props('password')).toBe('InitPass123456')
+    expect(pwd.props('password')).toBe('mock-initial-pass')
     // §8.8 readOnly 置灰可复制：值可见输入框带 readonly 属性 + 复制按钮
     const input = pwd.find('input[aria-label="初始密码"]')
     expect(input.attributes('readonly')).toBeDefined()
-    expect((input.element as HTMLInputElement).value).toBe('InitPass123456')
+    expect((input.element as HTMLInputElement).value).toBe('mock-initial-pass')
     expect(pwd.text()).toContain('关闭后不可再查看')
     // §22.3 新增回第 1 页刷新
     await waitFor(() => lastListCall().endsWith('page=1&pageSize=20'), '回第 1 页刷新')
@@ -191,7 +191,7 @@ describe('发放账号（初始密码一次性展示）', () => {
 
   it('复制按钮：Clipboard API 可用时写入明文；不可用时提示手动复制', async () => {
     backend.users = [userItem()]
-    backend.createResult = { id: 202, initialPassword: 'CopyMe12345678' }
+    backend.createResult = { id: 202, initialPassword: 'mock-copy-me-pass' }
     const wrapper = await mountUsers()
     const dialog = await openCreate(wrapper)
     await dialog.find('input[placeholder="2-32 位，支持中文、字母、数字"]').setValue('新员工小张')
@@ -213,7 +213,7 @@ describe('发放账号（初始密码一次性展示）', () => {
     try {
       await clickBtn(pwd.findAll('button'), '复制')
       await flushPromises()
-      expect(writeText).toHaveBeenCalledWith('CopyMe12345678')
+      expect(writeText).toHaveBeenCalledWith('mock-copy-me-pass')
     } finally {
       delete (navigator as { clipboard?: unknown }).clipboard
     }
@@ -221,7 +221,7 @@ describe('发放账号（初始密码一次性展示）', () => {
 
   it('关闭初始密码对话框后明文即弃（password 清空、不可再打开回看）', async () => {
     backend.users = [userItem()]
-    backend.createResult = { id: 203, initialPassword: 'OnceOnly1234567' }
+    backend.createResult = { id: 203, initialPassword: 'mock-once-pass' }
     const wrapper = await mountUsers()
     const dialog = await openCreate(wrapper)
     await dialog.find('input[placeholder="2-32 位，支持中文、字母、数字"]').setValue('新员工小张')
@@ -303,7 +303,7 @@ describe('禁用/启用与重置密码', () => {
 
   it('重置密码：popconfirm 确认 → POST reset-password → 新初始密码一次性展示', async () => {
     backend.users = [userItem()]
-    backend.resetResult = { id: backend.users[0]!.id, initialPassword: 'ResetPass123456' }
+    backend.resetResult = { id: backend.users[0]!.id, initialPassword: 'mock-reset-pass' }
     const wrapper = await mountUsers()
     await confirmPopconfirm(wrapper.find('.el-table__row'), '重置密码')
     await flushPromises()
@@ -311,7 +311,7 @@ describe('禁用/启用与重置密码', () => {
     expect(backend.resetCalls).toEqual([backend.users[0]!.id])
     const pwd = wrapper.findComponent(PasswordDialog)
     expect(pwd.props('visible')).toBe(true)
-    expect(pwd.props('password')).toBe('ResetPass123456')
+    expect(pwd.props('password')).toBe('mock-reset-pass')
   })
 })
 
@@ -339,7 +339,7 @@ describe('api 层契约（路径/方法/参数钉死）', () => {
       makeResponse(201, 'application/json', {
         code: 0,
         message: 'ok',
-        data: { id: 9, initialPassword: 'Abcdefgh123456xy' },
+        data: { id: 9, initialPassword: 'mock-abcd-pass' },
       }),
     )
     vi.stubGlobal('fetch', fetchStub)

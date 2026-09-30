@@ -11,3 +11,7 @@ coverage
 .idea
 .vscode/*
 !.vscode/extensions.json
+
+# Playwright E2E 产物与登录态
+.auth/
+.artifacts/
