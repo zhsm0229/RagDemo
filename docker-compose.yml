@@ -27,18 +27,17 @@ services:
       POSTGRES_DB: rag_test
 
   # TEI embedding（BGE-M3，dim=1024）。宿主 8081 被本机其他项目占用，dev 映射 8091；
-  # 生产 VM 无冲突时按 standards §12.2 映射回 8081。模型经 hf-mirror 预热进卷，避免每次启动重下。
+  # 生产 VM 无冲突时按 standards §12.2 映射回 8081。模型经 make-dev-models 预热到
+  # ./data/tei-models（TEI 自带下载器与 hf-mirror 不兼容：不回 content-range 头），
+  # --model-id 指本地路径完全绕开在线下载；data/ 已被 gitignore。
   tei-embed:
     image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.2
     container_name: ragdemo-tei-embed
-    command: ["--model-id", "BAAI/bge-m3", "--pooling", "cls"]
+    command: ["--model-id", "/data/bge-m3", "--pooling", "cls", "--max-batch-tokens", "2048"]
     ports:
       - "8091:80"
-    environment:
-      HF_ENDPOINT: https://hf-mirror.com
-      HUGGINGFACE_HUB_CACHE: /data/hub
     volumes:
-      - tei-models:/data
+      - ./data/tei-models:/data
     mem_limit: 3g
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost/health || exit 1"]
@@ -51,15 +50,12 @@ services:
   tei-rerank:
     image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.2
     container_name: ragdemo-tei-rerank
-    command: ["--model-id", "BAAI/bge-reranker-v2-m3"]
+    command: ["--model-id", "/data/bge-reranker-v2-m3", "--max-batch-tokens", "2048"]
     ports:
       - "8082:80"
-    environment:
-      HF_ENDPOINT: https://hf-mirror.com
-      HUGGINGFACE_HUB_CACHE: /data/hub
     volumes:
-      - tei-models:/data
-    mem_limit: 3g
+      - ./data/tei-models:/data
+    mem_limit: 4.5g  # candle 加载+warmup 峰值高（无 onnx 导出，唯一后端），需 4.5g
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost/health || exit 1"]
       interval: 10s
@@ -90,7 +86,37 @@ services:
       retries: 60
       start_period: 15m
 
+  # 应用（§12.2 容器清单核心）：uvicorn + 前端 dist 单容器，启动即迁移（entrypoint）。
+  # 连接串覆盖为 compose 内网主机名；其余配置继承 .env（密钥不落 compose，§12.7）。
+  # TEST_MODE=true 供 CI E2E L1 确定性层（生产必须 false，§2.6）。
+  # TEI 不设硬依赖：无 TEI 时服务仍可起（登录/文档管理可用，问答在装配层报上游错误），
+  # 避免本机双 TEI 十分钟级加载阻塞全栈启动。
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ragdemo-app
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg://rag:rag@pg:5432/rag
+      STATIC_DIR: /srv/ragdemo/static
+      TEST_MODE: ${TEST_MODE:-false}
+    env_file:
+      - .env
+    volumes:
+      - uploads:/srv/ragdemo/data
+    depends_on:
+      pg:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz', timeout=3).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
 volumes:
   pgdata:
-  tei-models:
   mineru-models:
+  uploads:
