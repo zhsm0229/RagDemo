@@ -5,6 +5,8 @@
  * 守卫刷新页面后经 ensureLoaded() 拉取一次；拉取失败（401/2003 等）视为未登录走 /login。
  * me 请求静默（silent），避免未登录访问业务页时弹全局错误提示。
  * 后端无 logout 端点（api.md 34 端点无登出），登出仅前端清态，jwt Cookie 由后端到期回收。
+ * 会话失效跳转不在此处处理：401/2003 由 client 单点通知装配层（router/unauthorized.ts）
+ * 统一清态回登录页，本 store 的 catch 只兜网络/5xx 等非 401 失败，避免守卫期未捕获异常。
  */
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
@@ -24,7 +26,11 @@ export const useAuthStore = defineStore('auth', () => {
     return get<UserInfo>('/auth/me', { silent: true })
   }
 
-  /** 每次会话只探一次 me；失败即按未登录处理（守卫统一重定向） */
+  /**
+   * 每次会话只探一次 me；失败即按未登录处理（守卫统一重定向）。
+   * 401/2003 的登出+跳转已收敛到全局通道（client → router/unauthorized.ts），
+   * 此处 catch 仅兜非 401 失败（网络/5xx），与全局 logout 的清态重复是无害冗余。
+   */
   async function ensureLoaded(): Promise<void> {
     if (loaded.value) return
     loaded.value = true

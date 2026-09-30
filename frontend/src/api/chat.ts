@@ -14,7 +14,9 @@ import {
   FALLBACK_MESSAGE,
   NETWORK_ERROR_CODE,
   NETWORK_ERROR_MESSAGE,
+  UNAUTHORIZED_CODE,
   get,
+  notifyUnauthorized,
   post,
   request,
 } from './client'
@@ -121,7 +123,11 @@ export async function streamChat(
 
   const contentType = res.headers.get('content-type') ?? ''
   if (!res.ok || !contentType.includes('text/event-stream')) {
-    throw await toEnvelopeError(res)
+    const error = await toEnvelopeError(res)
+    // 开流前会话失效（401/2003）走与 request 相同的全局通道（W4 终审 I ③）；
+    // 流中 error 事件（5001 等）经 dispatch 下发，不经此路径、不触发登出
+    if (res.status === 401 || error.code === UNAUTHORIZED_CODE) notifyUnauthorized()
+    throw error
   }
 
   const reader = res.body?.getReader()

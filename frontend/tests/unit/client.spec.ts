@@ -1,6 +1,6 @@
 /**
  * client 单测：统一信封解包、业务错误抛出与 ElMessage 兜底开关、credentials、
- * 网络层失败/中断/非 JSON 兜底（mock fetch，不发真请求）。
+ * 网络层失败/中断/非 JSON 兜底、全局 401/2003 未授权通道触发（mock fetch，不发真请求）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -14,13 +14,15 @@ import {
   ApiClientError,
   BAD_RESPONSE_CODE,
   NETWORK_ERROR_CODE,
+  UNAUTHORIZED_CODE,
   request,
+  setUnauthorizedHandler,
 } from '@/api/client'
 
 const fetchMock = vi.fn()
 
-function envelopeResponse(payload: unknown): Response {
-  return { ok: true, status: 200, json: async () => payload } as unknown as Response
+function envelopeResponse(payload: unknown, status = 200): Response {
+  return { ok: status < 400, status, json: async () => payload } as unknown as Response
 }
 
 beforeEach(() => {
@@ -28,6 +30,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  setUnauthorizedHandler(null)
   vi.unstubAllGlobals()
   vi.clearAllMocks()
 })
@@ -129,5 +132,67 @@ describe('request 网络层与异常响应兜底', () => {
       },
     } as unknown as Response)
     await expect(request('/conversations')).rejects.toMatchObject({ code: BAD_RESPONSE_CODE })
+  })
+})
+
+describe('全局未授权通道（W4 终审 I ③：HTTP 401 或业务码 2003 → 装配层回调）', () => {
+  it('HTTP 401 + 业务码 2003：回调触发一次，且仍抛 ApiClientError(2003)', async () => {
+    const onUnauthorized = vi.fn()
+    setUnauthorizedHandler(onUnauthorized)
+    fetchMock.mockResolvedValue(
+      envelopeResponse({ code: 2003, message: '未登录', data: null }, 401),
+    )
+    await expect(request('/conversations')).rejects.toMatchObject({ code: UNAUTHORIZED_CODE })
+    expect(onUnauthorized).toHaveBeenCalledTimes(1)
+  })
+
+  it('业务码 2003 即使 HTTP 200 同样触发回调（双保险通道）', async () => {
+    const onUnauthorized = vi.fn()
+    setUnauthorizedHandler(onUnauthorized)
+    fetchMock.mockResolvedValue(envelopeResponse({ code: 2003, message: '未登录', data: null }))
+    await expect(request('/auth/me', { silent: true })).rejects.toMatchObject({ code: 2003 })
+    expect(onUnauthorized).toHaveBeenCalledTimes(1)
+  })
+
+  it('HTTP 401 无信封（网关剥体）同样触发回调，照常抛 BAD_RESPONSE_CODE 兜底', async () => {
+    const onUnauthorized = vi.fn()
+    setUnauthorizedHandler(onUnauthorized)
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 401,
+      json: async () => {
+        throw new SyntaxError('Unexpected token < in JSON')
+      },
+    } as unknown as Response)
+    await expect(request('/conversations')).rejects.toMatchObject({ code: BAD_RESPONSE_CODE })
+    expect(onUnauthorized).toHaveBeenCalledTimes(1)
+  })
+
+  it('登录失败 401/2001 同样触发回调（client 无路由感知，是否跳转由装配层按当前路由裁决）', async () => {
+    const onUnauthorized = vi.fn()
+    setUnauthorizedHandler(onUnauthorized)
+    fetchMock.mockResolvedValue(
+      envelopeResponse({ code: 2001, message: '用户名或密码错误', data: null }, 401),
+    )
+    await expect(request('/auth/login', { method: 'POST', silent: true })).rejects.toMatchObject({
+      code: 2001,
+    })
+    expect(onUnauthorized).toHaveBeenCalledTimes(1)
+  })
+
+  it('普通业务错误（1003）不触发回调', async () => {
+    const onUnauthorized = vi.fn()
+    setUnauthorizedHandler(onUnauthorized)
+    fetchMock.mockResolvedValue(envelopeResponse({ code: 1003, message: '参数错误', data: null }))
+    await expect(request('/documents')).rejects.toMatchObject({ code: 1003 })
+    expect(onUnauthorized).not.toHaveBeenCalled()
+  })
+
+  it('未注册回调时仅照常抛错，不崩溃', async () => {
+    setUnauthorizedHandler(null)
+    fetchMock.mockResolvedValue(
+      envelopeResponse({ code: 2003, message: '未登录', data: null }, 401),
+    )
+    await expect(request('/conversations')).rejects.toMatchObject({ code: 2003 })
   })
 })

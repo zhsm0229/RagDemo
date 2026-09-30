@@ -4,7 +4,9 @@
  */
 import { createRouter, createWebHistory } from 'vue-router'
 import MainLayout from '@/layout/MainLayout.vue'
+import { setUnauthorizedHandler } from '@/api/client'
 import { resolveGuard } from '@/router/guards'
+import { createUnauthorizedHandler } from '@/router/unauthorized'
 import { useAuthStore } from '@/stores/auth'
 
 import LoginView from '@/views/LoginView.vue'
@@ -101,5 +103,9 @@ router.beforeEach(async (to) => {
     mustChangePassword: auth.mustChangePassword,
   })
 })
+
+// 全局 401 单点装配（W4 终审 I 项③）：任意 API 401/2003 → 清登录态 → 回登录页
+// （决策纯函数在 unauthorized.ts 可单测；决策依据与防循环口径见该模块注释）
+setUnauthorizedHandler(createUnauthorizedHandler(router))
 
 export default router
