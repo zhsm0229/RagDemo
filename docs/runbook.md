@@ -1,6 +1,6 @@
 # 运维手册（Runbook）
 
-> 状态：W3 Task 13 产出骨架，W5 Task 6 定稿备份/恢复章节（第 3 节，§18）；演练实测数据待 T9 恢复演练后回填 3.4。其余章节随里程碑增量补全（§18.4：启动停止 / 备份恢复 / 常见故障 / 合规轨道切换 / 端口核查）。
+> 状态：W3 Task 13 产出骨架，W5 Task 6 定稿备份/恢复章节（第 3 节，§18）；W5 Task 8 增串库双向演练章节（第 5 节，T9 执行）。演练实测数据待 T9 恢复演练后回填 3.4。其余章节随里程碑增量补全（§18.4：启动停止 / 备份恢复 / 常见故障 / 合规轨道切换 / 端口核查）。
 > 部署形态：单机 Docker Compose，4 核 16G VM（§12.5）。所有命令在仓库根目录执行（Windows Git Bash 或部署机 bash）。
 
 ## 1. 主栈启停
@@ -250,3 +250,50 @@ ss -tlnp   # 或 netstat -tlnp
 - [ ] es01/mysql/minio/valkey（9200/3306/9000/9001/6379）无任何宿主发布
 - [ ] 防火墙/安全组仅放行 80、9380（22 运维端口按 IT 策略另行管理）
 - [ ] 核查结果异常时：先 `docker compose down` 对应栈收敛端口，再排查是谁改了 compose
+
+## 5. 串库双向演练（W5 T8 产出流程，T9 执行）
+
+目的：双向走查串库拒答——客服视角问人力题、人力视角问客服题都必须拒答（检索边界恒 [视角部门, 全员]，F-502；产品红线"知识不足必须拒答"的部门维度）；同时用全员对照题防"全部拒答也全绿"的假阴性。题库由 `tests/fixtures/tools/make_crosstalk_suite.py` 生成，共 24 行：人力制度类串库拒答题 10 条 + 客服售后类串库拒答题 10 条 + 全员对照事实题 4 条，题目均以"演练用合成题"标注（与真实题库区分，演练后可按此前缀识别清理）。
+
+### 5.1 前置（每次演练执行）
+
+```bash
+# 0. 主栈已启动（第 1 节）；测试/演示环境（test_mode，stub LLM）
+#    题库生成器 import 后端常量，须在项目 venv 内执行（make install / uv sync --extra dev）
+
+# 1. 生成题库（生成物不入库，放临时目录；可重复运行，覆盖输出）
+python tests/fixtures/tools/make_crosstalk_suite.py -o /tmp/crosstalk.xlsx
+
+# 2. 生成对照语料（4 条对照题的期望答案取自该文档固定文本）
+python tests/fixtures/tools/make_sample_docx.py   # 写出 tests/fixtures/samples/sample.docx
+```
+
+- **上传对照语料**：管理后台 → 知识库·文档管理 → ＋上传文档，把 sample.docx 上传为**全员**部门文档（标题如"串库演练对照语料"），等状态 ready。语料缺失或内容改动 = 对照题必假阴性（命中不了期望关键词）。
+- 题库无单题删除接口，重复导入会累积同题并进入后续所有跑分：重复演练前由运维清理 `eval_questions`（软删 `is_active` 或清表，经 DBA 确认）再重新导入；演练断言按"题面部门 + 题型"分组核对，不依赖 run 总数恰为 24。
+
+### 5.2 导入题库
+
+管理后台 → 评测管理 → "评测题库"页签 → **Excel 导入题目** 上传 crosstalk.xlsx（或 `POST /api/admin/eval-questions/import`），成功返回 `imported: 24`。行级错误整批退回（422）——生成器产物若报错说明后端模板已漂移，先跑 `pytest tests/unit/test_crosstalk_suite.py` 定位。
+
+### 5.3 客服视角跑分
+
+1. "跑分记录"页签 → **发起跑分**：任务名称 `串库演练-客服视角-<日期>`，视角部门=客服（`perspectiveDeptCode: "service"`）。
+2. 轮询 `GET /api/admin/eval-runs/{id}`（前端每 10 秒自动刷新）至 `status=done`，逐题核对 detail：
+   - **题面部门=人力的 10 条（cross_reject）**：`autoJudgment` 全部 correct（回答逐字等于拒答话术"知识库中未找到相关内容"）——**串库拒答 10/10，漏一条即串库漏洞**：停止演练，排查检索部门过滤（`app/services/retrieval.py` 的 dept 边界与 F-502 口径）。
+   - **题面部门=全员的 4 条对照题**：回答应含期望答案关键词（出自对照语料）→ "评测题库"录分入口人工评判 correct（`POST /api/admin/eval-runs/{id}/judgments`）。`autoJudgment=pending` 属预期：非拒答题不自动判，判定协议第 3 条。
+   - 题面部门=客服的 10 条：库内无客服语料时同样拒答、auto correct 属预期（stub 演练形态）；部署机若已灌客服语料，命中回答记 auto wrong 属预期（本视角内应答），人工评判 correct 覆写即可。
+3. 人工录分后点**报告**核对分组口径（byDept / byQtype），报告页与 `GET /api/admin/eval-runs/{id}/report` 响应一并归档。
+
+### 5.4 人力视角跑分（对称）
+
+重复 5.3：任务名称 `串库演练-人力视角-<日期>`，视角部门=人力（`perspectiveDeptCode: "hr"`）。断言对称——**题面部门=客服的 10 条 100% 拒答** + 全员对照 4 条人工 correct。两轮全绿 = 双向隔离成立。
+
+### 5.5 存档与登记
+
+- 跑分结果天然存档于 `eval_runs`：收口即锁定 config 快照 9 字段（model / promptVersion / qaThreshold / refuseThreshold / efSearch / topK / topN / temperature / manifestVersion），防跨跑对比被阈值调整污染；审计 `eval.run` / `eval.judge` 留痕（§23）。
+- **stub 模式口径**：串库拒答由检索 SQL 的部门过滤结构性保证（越界文档根本不进候选，与 embedding 质量无关），本演练验证的是导入 → 跑分 → 判定 → 存档的流程链路；**真实阈值下的拒答边界须在部署机以真实 embedding + 真实语料复测**（届时人力/客服语料都在库，断言不变：越视角组全拒、对照组全中）。
+- 结果登记表（一行 = 一次跑分；正式记录自 T9 演练起填）：
+
+| 日期 | run ID | 视角 | 串库组拒答 | 对照组人工判 | accuracy | 执行人 | 备注 |
+|---|---|---|---|---|---|---|---|
+| （示例）2026-09-30 | 12 | 客服 | 人力题 10/10 | 4/4 correct | 1.0000 | 张三 | 示例行：accuracy 取录分收口后 summary；串库组按题面部门核对 |
