@@ -1,14 +1,15 @@
 <script setup lang="ts">
 /**
- * P10 运营概览（ui-spec §八，对照原型 OverviewView，F-704/F-1009）：
+ * P10 运营概览（ui-spec §八，对照原型 OverviewView，F-704/F-1009/F-1010）：
  * 统计卡四张（提问/命中率/拒答率/点踩率，el-statistic——deviations #3 正式实现
  * 组件库约束）+ days 切换（近1天/近7天，api.md §4.5.1 仅两档）+ byDept 表格
- * （原型 token 条形图改表格 tokens 列，不引图表依赖，deviations #46）+ 健康度
- * 面板（就绪率进度条/待确认/零召回榜/待过期清单，行点击跳 P3 文档管理；
- * 原型"最近 badcase"列表与"知识缺口卡"无对应端点，#46 顺延）。
+ * （原型 token 条形图改表格 tokens 列，不引图表依赖，deviations #46）+ 知识缺口
+ * TOP 卡片（F-1010，原型缺口卡无端点顺延至 W5 补齐，组件 KnowledgeGapCard）
+ * + 健康度面板（就绪率进度条/待确认/零召回榜/待过期清单，行点击跳 P3 文档管理）。
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import KnowledgeGapCard from '@/components/overview/KnowledgeGapCard.vue'
 import { getHealth, getOverview, type HealthData, type OverviewData } from '@/api/overview'
 import { deptCodeLabel } from '@/components/admin/options'
 
@@ -126,6 +127,8 @@ function expiryClass(expiryDate: string): string {
         </el-table-column>
       </el-table>
     </section>
+
+    <KnowledgeGapCard />
 
     <section v-if="health" class="panel" data-test="health-panel">
       <h4>语料健康度</h4>

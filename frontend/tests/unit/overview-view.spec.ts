@@ -1,13 +1,15 @@
 /**
- * P10 运营概览集成测试：挂载即拉概览（days=1）与健康度、统计卡四张（提问数/
- * 命中率/拒答率/点踩率，比率 0-1 → 百分比 1 位小数）、days 切换（近1天/近7天，
- * api.md §4.5.1 仅两档）、byDept 表格（部门中文/tokens）、健康度面板（就绪率
+ * P10 运营概览集成测试：挂载即拉概览（days=1）与健康度与知识缺口周榜（F-1010）、
+ * 统计卡四张（提问数/命中率/拒答率/点踩率，比率 0-1 → 百分比 1 位小数）、days 切换
+ * （近1天/近7天，api.md §4.5.1 仅两档）、byDept 表格（部门中文/tokens）、知识缺口
+ * TOP 卡片（top10 表格/周切换 0/-1/-2/导出 CSV blob/空态引导）、健康度面板（就绪率
  * 进度条/待确认数/零召回榜/待过期清单，行点击跳转 P3 文档管理）、api 层契约钉死。
  */
-import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { DOMWrapper, flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { exportKnowledgeGap, getKnowledgeGap } from '@/api/knowledgeGap'
 import { getHealth, getOverview } from '@/api/overview'
 import OverviewView from '@/views/OverviewView.vue'
 
@@ -53,6 +55,19 @@ const healthData = {
   ],
 }
 
+/** 12 个去重拒答问题：卡片只展示 top10（total=12 触发"还有更多"提示） */
+const gapData = {
+  items: [
+    { question: '缺口问题0', count: 30 },
+    { question: '缺口问题1', count: 20 },
+    { question: '缺口问题2', count: 10 },
+    ...Array.from({ length: 9 }, (_, i) => ({ question: `缺口问题${i + 3}`, count: 1 })),
+  ],
+  total: 12,
+  weekStart: '2026-09-28T00:00:00+00:00',
+  weekEnd: '2026-10-05T00:00:00+00:00',
+}
+
 function okEnvelope(data: unknown): Response {
   return {
     ok: true,
@@ -62,10 +77,31 @@ function okEnvelope(data: unknown): Response {
   } as unknown as Response
 }
 
+function csvResponse(headers: Record<string, string>): Response {
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: (name: string) => headers[name.toLowerCase()] ?? null },
+    blob: async () => new Blob(['问题,出现次数\n'], { type: 'text/csv' }),
+    json: async () => {
+      throw new Error('no json body')
+    },
+  } as unknown as Response
+}
+
 function routeFetch(url: string): Response {
   if (url === '/api/admin/overview?days=1') return okEnvelope(overviewData)
   if (url === '/api/admin/overview?days=7') return okEnvelope(overviewData)
   if (url === '/api/admin/health') return okEnvelope(healthData)
+  if (url === '/api/admin/knowledge-gap?weekOffset=0') return okEnvelope(gapData)
+  if (url === '/api/admin/knowledge-gap?weekOffset=-1') return okEnvelope(gapData)
+  if (url === '/api/admin/knowledge-gap?weekOffset=-2') return okEnvelope(gapData)
+  if (url.startsWith('/api/admin/knowledge-gap/export')) {
+    return csvResponse({
+      'content-disposition': 'attachment; filename="knowledge-gap-20260928.csv"',
+      'x-truncated': 'false',
+    })
+  }
   throw new Error(`unexpected fetch: ${url}`)
 }
 
@@ -80,19 +116,38 @@ class ResizeObserverStub {
 // el-table × el-statistic 的挂载在 CI/慢机上可能超过默认 5s 单测超时
 vi.setConfig({ testTimeout: 30_000 })
 
+const origCreateUrl = URL.createObjectURL
+const origRevokeUrl = URL.revokeObjectURL
+
 beforeEach(() => {
   vi.stubGlobal('fetch', fetchMock)
   vi.stubGlobal('ResizeObserver', ResizeObserverStub)
   fetchMock.mockImplementation(routeFetch)
   pushSpy.mockClear()
+  URL.createObjectURL = vi.fn(() => 'blob:mock-url')
+  URL.revokeObjectURL = vi.fn()
+  // a[download].click() 在 jsdom 触发 navigation 报错噪音，静默并保留断言能力
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
 })
 
 afterEach(() => {
   while (mounted.length > 0) mounted.pop()?.unmount()
+  URL.createObjectURL = origCreateUrl
+  URL.revokeObjectURL = origRevokeUrl
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
   vi.clearAllMocks()
 })
+
+/** 轮询等待下拉等 teleport 内容渲染（同 helpers/users-mock.waitFor 口径） */
+async function waitFor(cond: () => boolean, label: string): Promise<void> {
+  const deadline = Date.now() + 4000
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error(`waitFor timeout: ${label}`)
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    await flushPromises()
+  }
+}
 
 async function mountOverview(): Promise<VueWrapper> {
   const wrapper = mount(OverviewView, {
@@ -104,9 +159,11 @@ async function mountOverview(): Promise<VueWrapper> {
 }
 
 describe('统计卡与 days 切换', () => {
-  it('挂载即拉 overview?days=1 与 health；四卡渲染提问数与百分比（1 位小数）', async () => {
+  it('挂载即拉 overview?days=1 / health / 知识缺口周榜三接口；四卡渲染提问数与百分比（1 位小数）', async () => {
     const wrapper = await mountOverview()
+    // 缺口卡为子组件：Vue 先挂子组件再走父 onMounted，故其取数最先发起
     expect(fetchMock.mock.calls.map((c) => String(c[0]))).toEqual([
+      '/api/admin/knowledge-gap?weekOffset=0',
       '/api/admin/overview?days=1',
       '/api/admin/health',
     ])
@@ -147,6 +204,64 @@ describe('按部门表格', () => {
   })
 })
 
+describe('知识缺口卡片（F-1010）', () => {
+  it('top10 表格渲染问题/出现次数（count 降序前 10）；total 超出 10 提示导出可看全部', async () => {
+    const wrapper = await mountOverview()
+    const panel = wrapper.find('[data-test="gap-panel"]')
+    expect(panel.find('h4').text()).toContain('知识缺口 TOP')
+    const rows = panel.findAll('.el-table__row')
+    expect(rows).toHaveLength(10) // 端点取前 50，卡片只展示 top10
+    expect(rows[0]!.text()).toContain('缺口问题0')
+    expect(rows[0]!.text()).toContain('30')
+    expect(rows[9]!.text()).toContain('缺口问题9')
+    expect(panel.text()).toContain('共 12 个去重问题')
+  })
+
+  it('周切换下拉：选上周 → GET weekOffset=-1，卡片标题随切换更新', async () => {
+    const wrapper = await mountOverview()
+    const panel = wrapper.find('[data-test="gap-panel"]')
+    await panel.find('.el-select__wrapper').trigger('click')
+    await waitFor(() => document.querySelector('.el-select-dropdown__item') !== null, '下拉渲染')
+    const option = [...document.querySelectorAll('.el-select-dropdown__item')].find((el) =>
+      el.textContent?.includes('上周'),
+    )!
+    await new DOMWrapper(option).trigger('click')
+    await flushPromises()
+    expect(
+      fetchMock.mock.calls.some((c) => String(c[0]) === '/api/admin/knowledge-gap?weekOffset=-1'),
+    ).toBe(true)
+    expect(wrapper.find('[data-test="gap-panel"]').text()).toContain('上周')
+  })
+
+  it('导出 CSV：fetch blob → a[download] 触发，文件名取 Content-Disposition；未截断无提示', async () => {
+    const wrapper = await mountOverview()
+    await wrapper.find('[data-test="gap-export-btn"]').trigger('click')
+    await flushPromises()
+    const exportCall = fetchMock.mock.calls.find((c) => String(c[0]).includes('/export'))!
+    expect(String(exportCall[0])).toBe('/api/admin/knowledge-gap/export?weekOffset=0')
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(1)
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:mock-url')
+    const anchor = vi.spyOn(HTMLAnchorElement.prototype, 'click').mock
+      .instances[0] as HTMLAnchorElement
+    expect(anchor.href).toBe('blob:mock-url')
+    expect(anchor.download).toBe('knowledge-gap-20260928.csv')
+    expect(wrapper.find('[data-test="gap-export-note"]').exists()).toBe(false)
+  })
+
+  it('空态引导：窗口内无拒答时展示"暂无拒答——运行评测或等待用户提问"', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).startsWith('/api/admin/knowledge-gap?')) {
+        return okEnvelope({ ...gapData, items: [], total: 0 })
+      }
+      return routeFetch(String(url))
+    })
+    const wrapper = await mountOverview()
+    const panel = wrapper.find('[data-test="gap-panel"]')
+    expect(panel.text()).toContain('暂无拒答——运行评测或等待用户提问')
+    expect(panel.findAll('.el-table__row')).toHaveLength(0)
+  })
+})
+
 describe('语料健康度面板', () => {
   it('就绪率进度条/待确认数/零召回榜/待过期清单渲染；待过期行点击跳转 P3 文档管理', async () => {
     const wrapper = await mountOverview()
@@ -168,6 +283,30 @@ describe('语料健康度面板', () => {
 })
 
 describe('api 层契约（路径/参数钉死）', () => {
+  it('getKnowledgeGap 周偏移拼参；exportKnowledgeGap 走独立 fetch 并解析文件名与截断头', async () => {
+    const gapStub = vi.fn<(url: string, init?: RequestInit) => Promise<Response>>(async () =>
+      okEnvelope(gapData),
+    )
+    vi.stubGlobal('fetch', gapStub)
+    await getKnowledgeGap(0)
+    expect(String(gapStub.mock.calls[0]![0])).toBe('/api/admin/knowledge-gap?weekOffset=0')
+    await getKnowledgeGap(-1)
+    expect(String(gapStub.mock.calls[1]![0])).toBe('/api/admin/knowledge-gap?weekOffset=-1')
+    const exportStub = vi.fn<(url: string, init?: RequestInit) => Promise<Response>>(async () =>
+      csvResponse({
+        'content-disposition': 'attachment; filename="knowledge-gap-20260928.csv"',
+        'x-truncated': 'true',
+      }),
+    )
+    vi.stubGlobal('fetch', exportStub)
+    const result = await exportKnowledgeGap(-2)
+    expect(String(exportStub.mock.calls[0]![0])).toBe(
+      '/api/admin/knowledge-gap/export?weekOffset=-2',
+    )
+    expect(result.filename).toBe('knowledge-gap-20260928.csv')
+    expect(result.truncated).toBe(true)
+  })
+
   it('getOverview 仅 1|7 两档拼参；getHealth 固定路径', async () => {
     const fetchStub = vi.fn<(url: string, init?: RequestInit) => Promise<Response>>(async () =>
       okEnvelope(overviewData),

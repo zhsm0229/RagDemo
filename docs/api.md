@@ -491,3 +491,26 @@ audit_logs 只增不改（F-801），两端点均只读、不留审计；筛选�
 | 查询参数 | 同 4.8.1 筛选条件（无分页） |
 | 成功响应 | `200`，`text/csv` 流式响应（StreamingResponse 逐行推送，不整表载内存）：UTF-8 BOM 适配 Excel、中文列头（时间/操作人/动作/对象类型/对象ID/IP/详情，detail 为紧凑 JSON 字符串列）；`Content-Disposition: attachment; filename="audit-yyyymmdd.csv"`；行数超 10 万截断并以 `X-Truncated: true` 响应头标注（内存放大保护，截断判定用同 WHERE 计数） |
 
+
+### 4.9 知识缺口报告（W5 后端追加，F-1010，/api/admin/knowledge-gap）
+
+拒答问题按周聚合榜（前端 P10"知识缺口 TOP"卡片数据源）。口径：messages 中
+role='user' AND is_eval=false 的用户问题，LATERAL 配对其同会话中 id 大于问题行且
+最小的 assistant 行（最小 id 配对同 4.3 提问记录；assistant 侧同样滤 is_eval），
+配对回答活跃且 answer_type='refuse' 即记一次缺口（中断/无回答不算拒答）；按问题
+原文分组 count 降序。周界按 UTC 周一 00:00（weekOffset=0 为本周，负数回看），
+过滤 [weekStart, weekEnd) 左闭右开。两端点均只读、不留审计，筛选口径一致。
+
+#### 4.9.1 GET /api/admin/knowledge-gap — 知识缺口周榜
+
+| 项 | 说明 |
+|----|------|
+| 查询参数 | `weekOffset`（0 与负整数，-11..0：0=本周、-1=上周……默认 0，越界 422/1003） |
+| 成功响应 | `200`，`data: {items, total, weekStart, weekEnd}`。items 至多 50 项按 count 降序（同数按问题文本升序兜底），项字段：`question`（用户问题原文）、`count`（窗口内该问题拒答次数）；`total` 为窗口内去重问题总数（可大于 items 长度）；`weekStart` / `weekEnd` 为聚合窗口 ISO 字符串（左闭右开） |
+
+#### 4.9.2 GET /api/admin/knowledge-gap/export — CSV 导出
+
+| 项 | 说明 |
+|----|------|
+| 查询参数 | 同 4.9.1 `weekOffset` |
+| 成功响应 | `200`，`text/csv` 流式响应（逐行推送，不整表载内存）：UTF-8 BOM 适配 Excel、中文列头（问题/出现次数）；聚合口径同 4.9.1 但不限前 50；问题列首字符为 = + - @ 等公式触发符时前置制表符强制按文本解释（CSV 公式注入防御）；`Content-Disposition: attachment; filename="knowledge-gap-yyyymmdd.csv"`（取注入时钟当日）；行数超 10 万截断并以 `X-Truncated: true` 响应头标注（内存放大保护，截断判定用同窗口计数） |
