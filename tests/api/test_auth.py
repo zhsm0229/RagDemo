@@ -225,6 +225,29 @@ def test_disabled_user_rejected_with_old_cookie(client, session) -> None:
     assert resp.json()["code"] == 2003
 
 
+# ---------- 终审 I-1：禁用用户登录本身也拒绝（验密后置门，防探测） ----------
+
+
+def test_disabled_user_login_rejected_same_2003_message(client, session) -> None:
+    """禁用用户 login（密码正确）：401/2003「未登录或登录已过期」，与
+    get_current_user 的禁用口径同码同文案（不区分原因，无可探测差异）；拒绝路径
+    不落 last_login、不动计数；正常用户登录不受影响。"""
+    disabled = make_user(session, "被禁登录者", "right-one")
+    disabled.is_active = False
+    session.flush()
+    resp = login(client, "被禁登录者", "right-one")
+    assert resp.status_code == 401
+    body = resp.json()
+    assert body["code"] == 2003
+    assert body["message"] == "未登录或登录已过期"
+    session.refresh(disabled)  # 读回：拒绝路径零状态写入
+    assert disabled.is_active is False
+    assert disabled.failed_attempts == 0
+    assert disabled.last_login_at is None
+    make_user(session, "在职登录者", "right-one")  # 同批次正常用户不受牵连
+    assert login(client, "在职登录者", "right-one").status_code == 200
+
+
 # ---------- 用例表 7：无 cookie / 坏 cookie ----------
 
 

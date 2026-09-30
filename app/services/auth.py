@@ -21,6 +21,7 @@ from app.core.errors import (
     ERR_INVALID_CREDENTIALS,
     ERR_PARAM_INVALID,
     ERR_RATE_LIMITED,
+    ERR_UNAUTHENTICATED,
     ApiError,
 )
 from app.core.security import create_token, hash_password, verify_password
@@ -36,6 +37,9 @@ ACTION_LOCK: str = "lock"  # 达上限：写 locked_until 持久锁
 
 _MSG_BAD_CREDENTIALS = "用户名或密码错误"
 _MSG_LOCKED = "账号已锁定，请 15 分钟后重试或联系管理员解锁"
+# 禁用拒绝文案与 api/deps.py 的 get_current_user 同源同文案（§5.6 不区分原因，防探测）；
+# services 不得反向 import api 层，故此处按同值重写（改动须两处同步）。
+_MSG_UNAUTHENTICATED = "未登录或登录已过期"
 
 # AUTH-08 时序拉平基准：未知用户名路径也跑一次同成本 bcrypt 校验（bcrypt 12 轮），
 # 使"用户不存在"与"密码错误"的响应耗时同量级，无法从耗时差枚举用户名。
@@ -105,12 +109,13 @@ def login(
     max_attempts: int = MAX_LOGIN_ATTEMPTS,
     clock: Clock | None = None,
 ) -> tuple[User, str]:
-    """登录：限流 → 72 字节上限 → 查用户 → 锁定门 → 验密 → 签发 JWT。
+    """登录：限流 → 72 字节上限 → 查用户 → 锁定门 → 验密 → 禁用门 → 签发 JWT。
 
     成功清零计数并签发 access_token_expire_minutes 有效期令牌（本函数 commit）；
     失败路径先落计数/锁定与审计再抛 ApiError，保证状态与留痕一致。未知用户名
     与密码错误同码同文案且同验密耗时（AUTH-08：前者作用于 _DUMMY_HASH）；
-    计数只对真实存在的账号累计。
+    计数只对真实存在的账号累计。禁用门置于验密之后（终审 I-1）：放验密前
+    会变成凭用户名探测禁用状态的 oracle，验密后与 2003 同码同文案拒绝。
     """
     effective_clock = clock if clock is not None else get_clock()
     now = effective_clock.now()
@@ -127,6 +132,8 @@ def login(
         raise ApiError(ERR_ACCOUNT_LOCKED, _MSG_LOCKED, 401, data=_locked_payload(user))
     if not verify_password(password, user.password_hash):
         _register_failure(session, user, ip, max_attempts, now, effective_clock)
+    if not user.is_active:  # 终审 I-1：拒绝路径零写入（不碰计数/last_login/审计）
+        raise ApiError(ERR_UNAUTHENTICATED, _MSG_UNAUTHENTICATED, 401)
     user.failed_attempts = 0
     user.locked_until = None
     user.last_login_at = now

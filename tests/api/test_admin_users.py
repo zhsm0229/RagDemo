@@ -273,6 +273,11 @@ def test_disable_immediately_revokes_and_audits(client, session) -> None:
     assert denied.status_code == 401
     assert denied.json()["code"] == ERR_UNAUTHENTICATED
 
+    relogin = login(member_client, "被禁员工", "right-one")  # 重新登录同样拒绝（终审 I-1）
+    assert relogin.status_code == 401
+    assert relogin.json()["code"] == ERR_UNAUTHENTICATED
+    assert relogin.json()["message"] == "未登录或登录已过期"
+
     session.refresh(member)
     assert member.is_active is False  # 读回：落库
     audits = session.scalars(select(AuditLog).where(AuditLog.action == "user.toggle")).all()
