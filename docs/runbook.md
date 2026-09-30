@@ -294,6 +294,7 @@ python tests/fixtures/tools/make_sample_docx.py   # 写出 tests/fixtures/sample
 
 - 跑分结果天然存档于 `eval_runs`：收口即锁定 config 快照 9 字段（model / promptVersion / qaThreshold / refuseThreshold / efSearch / topK / topN / temperature / manifestVersion），防跨跑对比被阈值调整污染；审计 `eval.run` / `eval.judge` 留痕（§23）。
 - **stub 模式口径（T9 实测修订）**：检索部门过滤的结构性保证已验证——边界内语料齐备时双向引用零越界（Run A，dev 库 run 1/2）；空范围时串库组双向 10/10 拒答（Run B，隔离库 rag_test_b run 1/2）。**stub rerank 分为伪随机值，"越视角题 100% 拒答"在边界内有语料时不可作 stub 判据**（Run A 实测 0/20 拒答、以占位文案作答 auto wrong 属预期）；**真实阈值下的拒答边界须在部署机以真实 embedding + 真实语料复测**（届时人力/客服语料都在库，断言恢复为：越视角组 100% 拒答、对照组全中）。
+- **真实模式复测口径（2026-09-30 部署验收实测，runbook §5.5 预设与实际差异勘误）**：试点库实际构成 = 客服手册 + 全员手册（同内容双部门发布）+ 全员对照语料，**hr 语料缺位**——"人力/客服语料都在库"预设不成立，越界断言按机检 chunk→dept 仍可执行（界=[视角部门, 全员]）。实测（真实 TEI bge-m3 + DeepSeek + refuseThreshold=0.55）：**越界引用 0/19** ✓；越视角组拒答 **7/9**（2 例漏拒：rerank 0.6509/0.6578，撞上全员手册「考勤与休假」章——hr 主题语义天然重叠）；对照组实答 2/2 内容正确。**漏拒带（0.65+）与对照命中带（0.63-0.71）重叠，单一 refuseThreshold 无法同时满足"漏拒=0"与"对照全中"**——阈值维持 0.55 不动，漏拒治理走语料侧（hr 主题章节从全员/客服手册剥离或 qa 优先命中），详见 `.superpowers/sdd/2026-09-30-w5-hardening/deploy-acceptance-report.md` §5.2。运维注意：真实跑分对 rerank 吞吐敏感，部署机 `.env` 已调高 TEI 超时（embed 60s / rerank 120s），rerank 批量负载饱和时整题会以 infra error 收口（detail.error 留痕，autoJudgment=pending）——跑分窗口应避开批量解析/embedding 作业。
 - 结果登记表（一行 = 一次跑分；T9 演练已填，库=主库 rag 除注明外）：
 
 | 日期 | run ID | 视角 | 串库组拒答 | 对照组人工判 | accuracy | 执行人 | 备注 |
@@ -303,3 +304,5 @@ python tests/fixtures/tools/make_sample_docx.py   # 写出 tests/fixtures/sample
 | 2026-09-30 | 2 | 人力 | 客服题 0/10（stub 占位作答，预期内） | 4/4 correct（answerType 均 rag） | 0.1667 | T9 测试者（AI） | Run A 对称：引用零越界 ✓（0 条 service 块）；byDept: hr 0 / service 0 / all 1.0 |
 | 2026-09-30 | 1（rag_test_b） | 客服 | 人力题 10/10 | 对照组拒答挂人工（空范围无对照语料，不录分） | 0.8333 | T9 测试者（AI） | Run B 场景二：空范围机制验证（隔离库，演练后已清理数据） |
 | 2026-09-30 | 2（rag_test_b） | 人力 | 客服题 10/10 | 对照组拒答挂人工（同上） | 0.8333 | T9 测试者（AI） | Run B 对称：byQtype cross_reject accuracy 1.0 |
+| 2026-09-30 | 1 | 客服 | 人力题 7/9 拒答（2 漏拒 rerank 0.6509/0.6578；另 1 题 rerank 超时 infra err） | 对照 2/2 录分 correct（另 2 题 rerank 超时挂人工） | 0.7500 | 部署验收（AI） | 真实 embedding 复测：越界引用 0/19 机检 ✓、config 快照 9 字段落档；漏拒根因=全员手册「考勤与休假」语义重叠，阈值/语料治理结论见验收报告 §5.2；执行窗口撞 rerank 批量负载 |
+| 2026-09-30 | 3 | 人力 | 客服题实得 2/2 拒答（q11/q18，auto correct）；其余 22 题全部 rerank 超时 infra err（21:09-22:44 执行窗口与用户批量作业撞车，TEI rerank 队列 8-12 深） | 对照组 0/4 实答（全 infra err，无可录分） | 0.0833（失真：infra err 记 pending 计 0） | 部署验收（AI） | hr 视角对称矩阵被负载摧毁，**有效样本 2/24、方向正确但不足判据，留负载解除后复测**；accuracy 0.0833 不具评价意义；复测口径：避开批量解析/embedding 窗口（见 §5.5 真实模式复测口径注） |
