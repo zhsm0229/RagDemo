@@ -19,8 +19,9 @@ from typing import NamedTuple
 _DATE_PATTERNS = (re.compile(r"[0-9]{8}"), re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}"))
 
 # 部门别名 → 编码（编码与中文双收）：镜像种子枚举 service/hr/all，防越权注入的
-# 第一道闸——枚举之外（如 legal）不映射即整体不符
-_DEPT_ALIASES: dict[str, str] = {
+# 第一道闸——枚举之外（如 legal）不映射即整体不符。zip 批量导入（F-1007）共用本表
+# 归一部门段，两入口口径单一事实源，改动只落此处
+DEPT_ALIASES: dict[str, str] = {
     "service": "service",
     "客服": "service",
     "hr": "hr",
@@ -50,7 +51,7 @@ def parse_filename_metadata(filename: str) -> SuggestedMeta | None:
     if not left or not _valid_date_token(date_token):
         return None
     dept_token, sep, title = left.partition("_")
-    dept_code = _DEPT_ALIASES.get(dept_token)
+    dept_code = DEPT_ALIASES.get(dept_token)
     if not sep or not title or dept_code is None:
         return None
     return SuggestedMeta(dept_code, title, _parse_date(date_token))

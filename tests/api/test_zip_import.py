@@ -234,6 +234,65 @@ def test_zip_bad_naming_skipped_metadata_not_ingested(client, session, sandbox_s
     assert session.scalar(select(func.count()).select_from(Document)) == 1
 
 
+# ---------- 中文部门别名条目 → 归一编码 accepted（与 metadata-suggest 同源别名表） ----------
+
+
+def test_zip_chinese_dept_entries_accepted_normalized_to_code(
+    client, session, sandbox_storage, test_mode
+):
+    """中文部门别名条目（客服_/人力_/全员_）：归一为库内编码后照常 accepted 落库，
+    dept_id 读回与别名一一对应（双收中文与编码，口径同 metadata-suggest）。"""
+    admin_login(client, session)
+    resp = post_zip(
+        client,
+        make_zip(
+            {
+                "客服_客服话术_20260901.docx": _docx_bytes("话术"),
+                "人力_考勤制度_20260901.docx": _docx_bytes("考勤"),
+                "全员_安全须知_20260901.docx": _docx_bytes("安全"),
+            }
+        ),
+    )
+    assert resp.status_code == 202
+    data = resp.json()["data"]
+    assert (data["accepted"], data["rejected"], data["skipped"]) == (3, 0, 0)
+
+    expected = {
+        "客服_客服话术_20260901.docx": ("客服话术", "service"),
+        "人力_考勤制度_20260901.docx": ("考勤制度", "hr"),
+        "全员_安全须知_20260901.docx": ("安全须知", "all"),
+    }
+    for name, (title, code) in expected.items():
+        item = _result_by_name(data, name)
+        assert item["status"] == "accepted"
+        doc = session.get(Document, item["documentId"])
+        assert doc.title == title
+        assert doc.dept_id == _dept_id(session, code)  # 归一编码后仍过库内枚举闸
+
+
+def test_zip_unknown_dept_message_pins_both_name_and_code(
+    client, session, sandbox_storage, test_mode
+):
+    """部门枚举外条目：skipped_metadata 原因逐字断言新文案（中文名与编码双列，
+    与别名表口径一致），不入库。"""
+    admin_login(client, session)
+    resp = post_zip(
+        client,
+        make_zip({"legal_制度_20260901.docx": _docx_bytes("法务")}),
+    )
+    assert resp.status_code == 202
+    data = resp.json()["data"]
+    assert (data["accepted"], data["skipped"]) == (0, 1)
+    item = _result_by_name(data, "legal_制度_20260901.docx")
+    assert item["status"] == "skipped_metadata"
+    assert item["reason"] == (
+        "元数据待补：文件名须为 部门_主题_日期 格式"
+        "（部门须为：客服/人力/全员 或 service/hr/all，日期 YYYYMMDD 或 YYYY-MM-DD）"
+    )
+    assert "documentId" not in item
+    assert session.scalar(select(func.count()).select_from(Document)) == 0
+
+
 # ---------- §6.3：嵌套 zip 整包拒收 ----------
 
 

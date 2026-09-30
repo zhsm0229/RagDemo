@@ -102,7 +102,7 @@ def qa_client(test_mode, client):
 
 def test_列表分页与created_at降序及DTO键集(qa_client, session):
     """① 3 行数据 pageSize=2：page1 取最新 2 行、page2 取最旧 1 行、total=3；
-    列表项键集恰为 {id,deptId,question,answer,status,batchNo,createdAt,isActive}。"""
+    列表项键集恰为 {id,deptId,deptCode,question,answer,status,batchNo,createdAt,isActive}。"""
     embedder = StubEmbedder()
     admin_login(qa_client, session)
     for seq, text_ in enumerate(["问题甲", "问题乙", "问题丙"], start=1):
@@ -123,6 +123,7 @@ def test_列表分页与created_at降序及DTO键集(qa_client, session):
     assert set(data["items"][0]) == {
         "id",
         "deptId",
+        "deptCode",
         "question",
         "answer",
         "status",
@@ -172,6 +173,27 @@ def test_列表过滤_部门状态关键字且百分号下划线按字面匹配(
     bad = qa_client.get("/api/admin/qa-pairs", params={"status": "off"})
     assert bad.status_code == 422
     assert bad.json()["code"] == ERR_PARAM_INVALID
+
+
+# ---------- ① 列表：DTO deptCode 值正确（join departments，非种子序推导） ----------
+
+
+def test_列表DTO含deptCode且按部门行取值正确(qa_client, session):
+    """① 列表项 deptCode 逐行取库内编码：三部门各一行，deptCode 与 deptId 同源一致
+    （join departments 取 code，前端不再依赖种子序 id 推导部门名）。"""
+    embedder = StubEmbedder()
+    admin_login(qa_client, session)
+    seeded = [
+        (_seed_qa(session, "客服部门问题", "答案S", embedder, dept_code="service"), "service"),
+        (_seed_qa(session, "人力部门问题", "答案H", embedder, dept_code="hr"), "hr"),
+        (_seed_qa(session, "全员部门问题", "答案A", embedder, dept_code="all"), "all"),
+    ]
+    data = qa_client.get("/api/admin/qa-pairs", params={"page": 1, "pageSize": 20}).json()["data"]
+    by_id = {item["id"]: item for item in data["items"]}
+    assert len(by_id) == 3
+    for qa, code in seeded:
+        assert by_id[qa.id]["deptCode"] == code
+        assert by_id[qa.id]["deptId"] == qa.dept_id  # 与 deptId 同行同源
 
 
 # ---------- ② 停用后检索不命中（QA-05 API 层复验） ----------

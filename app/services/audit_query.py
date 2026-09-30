@@ -7,6 +7,13 @@ services/admin_views 口径，不依赖服务器 TimeZone GUC），dateTo 含当
 查询条件全部参数绑定（standards 红线 2）。导出走逐行生成器（StreamingResponse
 消费），不整表载内存；行数上限 EXPORT_LIMIT（缺省 10 万）为内存放大保护，超出
 截断并以 X-Truncated 响应头标注（截断判定在 api 层：total 同 WHERE 计数）。
+
+CSV 公式注入不变式（T2/W4 评审）：Excel 按单元格**首字符**决定是否解释为公式
+（=/+/-/@ 开头即执行）。本服务导出各列首字符恒安全——操作人 username 由注册
+白名单约束（中文/字母/数字，§21.5，不出 = + - @）、action/objectType 为服务端
+枚举值、objectId 为数字或空、ip 服务端生成、detail 恒为 JSON 对象序列化（首字符
+`{`）；其余列（时间 ISO 格式）亦服务端生成。未来若 detail 允许顶层标量（可能以
+`-` 等开头），须回头加制表符前缀类防御，不得直接放行。
 """
 
 import csv

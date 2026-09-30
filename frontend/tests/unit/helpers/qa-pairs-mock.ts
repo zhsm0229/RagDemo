@@ -51,6 +51,7 @@ export function qaItem(overrides: Partial<QaPairItem> = {}): QaPairItem {
   return {
     id: backend.nextId,
     deptId: 1,
+    deptCode: 'service',
     question: '退货流程是什么？',
     answer: '质量问题退货：联系客服登记 → 寄回商品 → 验货后退款。',
     status: 'enabled',

@@ -9,7 +9,9 @@ r"""zip 批量导入（F-1007，治理"傻瓜式原则"）：安全预扫描 →
 头，Content-Type 闸不适用——MIME 以扩展名规范值补齐仅为复用同一代码路径，真实闸门
 = 扩展名 + 魔数双闸（docx 压缩弹与 pdf 危险声明仍由解析器处置，见 precheck docstring）。
 
-文件名元数据（F-1007）：`部门_主题_日期.ext`，部门限库内枚举（试点 service/hr/all）、
+文件名元数据（F-1007）：`部门_主题_日期.ext`，部门段与 metadata-suggest 同源别名表
+（services.metadata_suggest.DEPT_ALIASES）双收中文名（客服/人力/全员）与编码
+（service/hr/all）、归一为编码后仍过库内枚举闸（dept_id 由 departments 表解析）、
 日期白名单 YYYYMMDD / YYYY-MM-DD（严格位数 + 真实日期）、责任人=上传管理员（命名
 规则无责任人字段，管理员批量操作兜底）；命名不符 → "元数据待补"不入库（该条
 skipped_metadata）。合规确认（§7.4）：zip 导入是管理端管理员的显式批量操作，视同
@@ -38,6 +40,7 @@ from app.db.models import Department, Document, User
 from app.rag.precheck import MAX_SYNC_BYTES, check_sync
 from app.services import ingest as ingest_service
 from app.services.audit import record_audit
+from app.services.metadata_suggest import DEPT_ALIASES
 
 MAX_TOTAL_BYTES: int = 500 * 1024 * 1024  # §6.3 解压产物总量上限
 MAX_ENTRIES: int = 100_000  # §6.3 条目数上限
@@ -51,7 +54,7 @@ _MIME_BY_EXT: dict[str, str] = {
 _MSG_BAD_ZIP = "文件不是有效的 zip 压缩包"
 _MSG_SKIPPED_METADATA = (
     "元数据待补：文件名须为 部门_主题_日期 格式"
-    "（部门编码限库内枚举 service/hr/all，日期 YYYYMMDD 或 YYYY-MM-DD）"
+    "（部门须为：客服/人力/全员 或 service/hr/all，日期 YYYYMMDD 或 YYYY-MM-DD）"
 )
 
 # 日期白名单：先严格位数（拒 2026-9-1 这类缺前导零），再由 _parse_date 验真实日期
@@ -207,17 +210,20 @@ def _import_entry(
 def parse_entry_meta(filename: str, dept_ids: dict[str, int], owner: str) -> dict | None:
     """F-1007 文件名元数据解析：`部门_主题_日期.ext` → create_document 元数据包。
 
-    自两端向中间拆解（rsplit 日期 / split 部门），主题可含下划线；部门限库内枚举
-    （试点 service/hr/all）；日期白名单 YYYYMMDD / YYYY-MM-DD（严格位数 + 真实日期）；
-    责任人=上传管理员（命名规则无责任人字段，管理员批量操作兜底，§7.4 视同合规
-    已确认）；expiry_date 不可推导保持空。任一段不符返回 None → skipped_metadata。
+    自两端向中间拆解（rsplit 日期 / split 部门），主题可含下划线；部门段经共享别名表
+    DEPT_ALIASES 归一（中文名与编码双收，与 metadata-suggest 单一口径），归一结果仍须
+    命中库内枚举（dept_ids，_resolve_dept 同一闸）；日期白名单 YYYYMMDD / YYYY-MM-DD
+    （严格位数 + 真实日期）；责任人=上传管理员（命名规则无责任人字段，管理员批量操作
+    兜底，§7.4 视同合规已确认）；expiry_date 不可推导保持空。任一段不符返回 None →
+    skipped_metadata。
     """
     stem = PureWindowsPath(filename).stem
     left, _, date_token = stem.rpartition("_")
     if not left or not _valid_date_token(date_token):
         return None
-    dept_code, sep, title = left.partition("_")
-    if not sep or not title or dept_code not in dept_ids:
+    dept_token, sep, title = left.partition("_")
+    dept_code = DEPT_ALIASES.get(dept_token)
+    if not sep or not title or dept_code is None or dept_code not in dept_ids:
         return None
     return {
         "dept_id": dept_ids[dept_code],

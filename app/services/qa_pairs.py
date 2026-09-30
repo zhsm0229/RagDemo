@@ -114,8 +114,10 @@ def list_qa_pairs(
 ) -> dict:
     """管理列表（F-402）：软删行不出现（QA-07），过滤可选，created_at 降序（同刻 id 兜底）。
 
-    keyword 对问题/答案 ILIKE 且通配符先转义（§22）；status 枚举外 422。返回
-    {items, total, page, pageSize}，items 为 camelCase DTO（standards §3.4）。
+    keyword 对问题/答案 ILIKE 且通配符先转义（§22）；status 枚举外 422。join
+    departments 取库内编码（deptId 之外的稳定部门标识，前端部门列渲染不再依赖
+    种子序 id 推导）。返回 {items, total, page, pageSize}，items 为 camelCase DTO
+    （standards §3.4）。
     """
     filters = [QaPair.is_active.is_(True)]
     if dept_id is not None:
@@ -129,15 +131,16 @@ def list_qa_pairs(
         filters.append(
             or_(QaPair.question.ilike(like, escape="\\"), QaPair.answer.ilike(like, escape="\\"))
         )
-    stmt = select(QaPair).where(*filters)
+    stmt = select(QaPair, Department.code).join(Department, Department.id == QaPair.dept_id)
+    stmt = stmt.where(*filters)
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = db.scalars(
+    rows = db.execute(
         stmt.order_by(QaPair.created_at.desc(), QaPair.id.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()
     return {
-        "items": [_item_payload(pair) for pair in rows],
+        "items": [_item_payload(pair, dept_code) for pair, dept_code in rows],
         "total": total,
         "page": page,
         "pageSize": page_size,
@@ -254,11 +257,13 @@ def _escape_like(keyword: str) -> str:
     return keyword
 
 
-def _item_payload(pair: QaPair) -> dict:
-    """列表/读回 DTO（camelCase，standards §3.4）：数据库行不直接返回。"""
+def _item_payload(pair: QaPair, dept_code: str) -> dict:
+    """列表/读回 DTO（camelCase，standards §3.4）：数据库行不直接返回；
+    deptCode 由 join departments 取库内编码（同 users_admin 列表口径）。"""
     return {
         "id": pair.id,
         "deptId": pair.dept_id,
+        "deptCode": dept_code,
         "question": pair.question,
         "answer": pair.answer,
         "status": pair.status,

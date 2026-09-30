@@ -1,8 +1,9 @@
 /**
  * 管理三页（P6 用户 / P7 提问记录 / P8 badcase）共享枚举文案，对照原型与后端口径。
  * deptId 筛选参数映射与 qa/options 同一依据：列表端点无部门列表可查，按种子序
- * （app/db/seed.py：service → hr → all 自增 id，deviations #30）；item 的 deptCode
- * 直接走 code → 中文映射（后端返回编码原值）。
+ * （app/db/seed.py：service → hr → all 自增 id，deviations #30/#35）——P4 问答对
+ * 管理筛选下拉亦复用此表（deptId 查询参数契约）；item 的 deptCode 直接走
+ * code → 中文映射（后端返回编码原值，qa-pairs 列表 DTO 已含 deptCode）。
  */
 
 export interface Option<T = string> {

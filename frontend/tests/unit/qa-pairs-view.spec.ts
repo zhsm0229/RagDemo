@@ -90,12 +90,13 @@ describe('列表加载与渲染', () => {
       qaItem({
         question: '退货流程是什么？',
         answer: '质量问题退货：联系客服登记 → 寄回商品 → 验货后退款。',
-        deptId: 1,
+        deptId: 99, // 列渲染不再依赖 deptId（原"部门#N"兜底口径翻转）
+        deptCode: 'all',
         createdAt: '2026-09-28T10:00:00+08:00',
         batchNo: 'QA-20260901-0001',
         status: 'enabled',
       }),
-      qaItem({ question: '年假怎么算？', deptId: 2, status: 'disabled' }),
+      qaItem({ question: '年假怎么算？', deptCode: 'hr', status: 'disabled' }),
     ]
     const wrapper = await mountQaPairs()
     expect(listCalls()[0]).toBe('/api/admin/qa-pairs?page=1&pageSize=20')
@@ -103,7 +104,8 @@ describe('列表加载与渲染', () => {
     expect(rows).toHaveLength(2)
     expect(rows[0]!.text()).toContain('退货流程是什么？')
     expect(rows[0]!.text()).toContain('联系客服登记')
-    expect(rows[0]!.text()).toContain('客服')
+    expect(rows[0]!.text()).toContain('全员') // 真实 deptCode 渲染
+    expect(rows[0]!.text()).not.toContain('部门#99')
     expect(rows[0]!.text()).toContain('2026-09-28 10:00')
     expect(rows[0]!.text()).toContain('QA-20260901-0001')
     expect(rows[0]!.find('.el-switch').classes()).toContain('is-checked')

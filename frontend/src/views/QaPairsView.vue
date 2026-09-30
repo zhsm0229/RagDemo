@@ -8,7 +8,8 @@
  * 启停 switch 即时生效（F-402，开关即刷无确认弹窗），失败回滚开关（client 统一
  * toast 错误）；编辑/删除后保持当前页刷新（§22.3，删空回退一页）；删除 el-popconfirm
  * 二次确认（对照原型）；列表 DTO 无 updatedAt（api.md §4.1.3），时间列以 createdAt
- * 呈现（deviations #30）。
+ * 呈现（deviations #30）。部门列按真实 deptCode 渲染中文（后端 join departments
+ * 下发库内编码，api.md §4.1.3 9 键），不再按种子序 id 映射（T11 裁定脆弱点已除）。
  */
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
@@ -21,7 +22,8 @@ import {
   type QaPairItem,
   type QaPairStatus,
 } from '@/api/qaPairs'
-import { DEPT_ID_OPTIONS, QA_STATUS_OPTIONS, deptIdLabel } from '@/components/qa/options'
+import { ADMIN_DEPT_ID_OPTIONS, deptCodeLabel } from '@/components/admin/options'
+import { QA_STATUS_OPTIONS } from '@/components/qa/options'
 import EditQaDialog from '@/components/qa/EditQaDialog.vue'
 import ImportQaDialog from '@/components/qa/ImportQaDialog.vue'
 
@@ -143,7 +145,12 @@ function formatTime(iso: string): string {
         style="width: 130px"
         @change="search"
       >
-        <el-option v-for="o in DEPT_ID_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
+        <el-option
+          v-for="o in ADMIN_DEPT_ID_OPTIONS"
+          :key="o.value"
+          :label="o.label"
+          :value="o.value"
+        />
       </el-select>
       <el-select
         v-model="filters.status"
@@ -182,7 +189,7 @@ function formatTime(iso: string): string {
         <template #default="{ row }">{{ row.answer }}</template>
       </el-table-column>
       <el-table-column label="部门" width="90">
-        <template #default="{ row }">{{ deptIdLabel(row.deptId) }}</template>
+        <template #default="{ row }">{{ deptCodeLabel(row.deptCode) }}</template>
       </el-table-column>
       <el-table-column label="创建时间" width="150">
         <template #default="{ row }">{{ formatTime(row.createdAt) }}</template>

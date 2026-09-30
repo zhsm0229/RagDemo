@@ -15,10 +15,11 @@ export type QaPairStatus = 'enabled' | 'disabled'
 /** 编辑请求体（schema EditQaPairBody：全文提交，校验同导入规则 问题 1-2000 / 答案 1-10000） */
 export type EditQaPairPayload = components['schemas']['EditQaPairBody']
 
-/** 列表项（docs/api.md §4.1.3 全 8 键；无 deptCode/updatedAt，见 components/qa/options.ts 注） */
+/** 列表项（docs/api.md §4.1.3 全 9 键；无 updatedAt，见 components/qa/options.ts 注） */
 export interface QaPairItem {
   id: number
   deptId: number
+  deptCode: string
   question: string
   answer: string
   status: QaPairStatus
