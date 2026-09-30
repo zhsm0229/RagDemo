@@ -20,8 +20,9 @@ import { DEPT_LABELS, DEPT_OPTIONS, STATUS_OPTIONS } from '@/components/document
 import UploadDialog from '@/components/documents/UploadDialog.vue'
 import ZipImportDialog from '@/components/documents/ZipImportDialog.vue'
 
-/** T3（36da916）import-zip 未合入 feat/w4-fe：入口置灰不发无效调用，合并后翻开关即启用（deviations #21） */
-const ZIP_IMPORT_ENABLED = false
+/** F-1007 import-zip 已随 feat/w4-fe 合并（5878a01）：合并门禁解禁（T10 评审 M-7，
+ * deviations #21 置灰态结束）。保留开关作应急一键回灰，不再指向未就绪语义。 */
+const ZIP_IMPORT_ENABLED = true
 
 const POLL_INTERVAL_MS = 30_000
 
@@ -158,13 +159,7 @@ function onZipImported(): void {
       <el-button @click="resetFilters">重置</el-button>
       <span class="spacer"></span>
       <el-button :loading="loading" @click="refresh">刷新</el-button>
-      <el-tooltip content="后端任务未就绪" placement="top">
-        <span class="tip-host">
-          <el-button :disabled="!ZIP_IMPORT_ENABLED" @click="zipVisible = true"
-            >zip 批量导入</el-button
-          >
-        </span>
-      </el-tooltip>
+      <el-button :disabled="!ZIP_IMPORT_ENABLED" @click="zipVisible = true">zip 批量导入</el-button>
       <el-button type="primary" @click="uploadVisible = true">＋ 上传文档</el-button>
     </div>
 

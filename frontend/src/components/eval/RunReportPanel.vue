@@ -2,10 +2,10 @@
 /**
  * 跑分报告面板（F-603，api.md §4.2.7 + F-1012 阈值扫描区）：totals 四键卡 +
  * byDept/byQtype 两表 + [阈值扫描]。报告 running/failed 也可出（部分明细+真实状态）。
- * 阈值扫描端点（主分支 e42c4ce）未合入 feat/w4-fe：按钮置灰不发无效调用，扫描
- * 调用与曲线/推荐值渲染按契约实现，合并翻 FEATURE_FLAGS.thresholdScan 即启用
- * （deviations 同 #21）。曲线 accuracy 为重放口径 ≠ 报告 accuracy（T5 评审裁决，
- * 文案注明）；scope.note（qa 曲线口径局限）原样展示（T5 裁决）。
+ * 阈值扫描端点已随 feat/w4-fe 合并（5878a01）：FEATURE_FLAGS.thresholdScan 默认
+ * true（T13 评审 #44 解禁，同 #21），开关仅作应急回灰。曲线 accuracy 为重放口径
+ * ≠ 报告 accuracy（T5 评审裁决，文案注明）；scope.note（qa 曲线口径局限）原样
+ * 展示（T5 裁决）。
  */
 import { ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'

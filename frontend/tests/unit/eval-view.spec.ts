@@ -2,8 +2,8 @@
  * P9 评测管理集成测试：跑分列表渲染与空态、发起跑分（必填校验/202 异步语义）、
  * 列表与详情轮询（running 期 10s，收口即停；detail 无 pendingCount 键容错——W3
  * 交接契约）、详情抽屉（config 快照/逐题明细/录分三档批量端点）、报告渲染（totals
- * 四键 + byDept/byQtype）、阈值扫描（默认置灰——后端未合入 deviations #44；翻转
- * FEATURE_FLAGS 后曲线 7+5 档/推荐值高亮/scope.note/口径注明）、题库 Excel 导入
+ * 四键 + byDept/byQtype）、阈值扫描（合并门禁解禁默认启用——deviations #44 置灰态
+ * 结束；曲线 7+5 档/推荐值高亮/scope.note/口径注明）、题库 Excel 导入
  * （非 xlsx 拒收/422 错误行/201 成功）、api 层契约钉死。
  * 共享 mock 后端见 helpers/eval-mock.ts（全链路走真 client.ts）。
  */
@@ -20,7 +20,6 @@ import {
   runThresholdScan,
   submitJudgments,
 } from '@/api/evalAdmin'
-import { FEATURE_FLAGS } from '@/components/eval/options'
 import CreateRunDialog from '@/components/eval/CreateRunDialog.vue'
 import ImportEvalDialog from '@/components/eval/ImportEvalDialog.vue'
 import RecordJudgmentDialog from '@/components/eval/RecordJudgmentDialog.vue'
@@ -62,7 +61,6 @@ beforeEach(() => {
 
 afterEach(() => {
   unmountAll()
-  FEATURE_FLAGS.thresholdScan = false
   vi.useRealTimers()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
@@ -280,19 +278,19 @@ describe('报告与阈值扫描', () => {
     void drawer
   })
 
-  it('阈值扫描默认置灰（后端未合入 deviations #44）：按钮 disabled 且点击不发请求', async () => {
+  it('阈值扫描入口已解禁（合并门禁 T13 #44）：按钮可点，点击即发起扫描请求', async () => {
     doneRun()
+    backend.scan = scanFixture()
     const wrapper = await mountEval()
     const drawer = await openDrawer(wrapper)
     const btn = drawer.find('[data-test="scan-btn"]')
-    expect(btn.attributes('disabled')).toBeDefined()
+    expect(btn.attributes('disabled')).toBeUndefined()
     await btn.trigger('click')
     await flushAll()
-    expect(backend.scanCalls).toEqual([])
+    expect(backend.scanCalls).toEqual([9])
   })
 
-  it('扫描（翻转 FEATURE_FLAGS）：POST 曲线数据 → 拒答 7 档/qa 5 档表格、推荐值高亮、scope.note 与口径注明', async () => {
-    FEATURE_FLAGS.thresholdScan = true
+  it('扫描结果渲染：POST 曲线数据 → 拒答 7 档/qa 5 档表格、推荐值高亮、scope.note 与口径注明', async () => {
     doneRun()
     backend.scan = scanFixture()
     const wrapper = await mountEval()

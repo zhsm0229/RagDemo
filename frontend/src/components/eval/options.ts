@@ -5,13 +5,13 @@ import type { EvalRunStatus } from '@/api/evalAdmin'
 import { ADMIN_DEPT_ID_OPTIONS } from '@/components/admin/options'
 
 /**
- * W4 Task 5 阈值扫描端点（主分支 e42c4ce/15dfe55）未合入 feat/w4-fe：入口置灰
- * 不发无效调用，扫描调用与曲线/推荐值渲染按契约实现，合并置 true 即启用
- * （deviations #44，同 ZIP_IMPORT_ENABLED #21 模式）。对象形态便于 spec 翻转。
+ * W4 Task 5 阈值扫描端点已随 feat/w4-fe 合并（5878a01，主分支 e42c4ce/15dfe55）：
+ * 合并门禁解禁（T13 评审 #44，置灰态结束），扫描入口默认启用。保留开关作应急
+ * 一键回灰，对象形态便于翻转。
  */
 export const FEATURE_FLAGS = {
   /** POST /admin/eval-runs/{id}/threshold-scan（W4 Task 5 主分支） */
-  thresholdScan: false,
+  thresholdScan: true,
 }
 
 /** 跑分状态 tag：running（轮询中）/ done / failed（api.md §4.2.4 枚举） */

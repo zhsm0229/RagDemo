@@ -187,19 +187,21 @@ describe('行操作', () => {
     expect(backend.retryCalls).toEqual([failed.id])
   })
 
-  it('删除按钮置灰且 tooltip"暂不支持"；zip 导入按钮置灰且 tooltip"后端任务未就绪"', async () => {
+  it('删除按钮置灰且 tooltip"暂不支持"；zip 导入按钮已解禁（无 disabled、无"后端任务未就绪" tooltip）', async () => {
     backend.docs = [docItem()]
     const wrapper = await mountDocuments()
     const del = wrapper.findAll('button').find((b) => b.text() === '删除')
     expect(del).toBeDefined()
     expect(del!.attributes('disabled')).toBeDefined()
+    // 合并门禁解禁（T10 评审 M-7）：import-zip 后端已合入，按钮可点、置灰 tooltip 摘除
     const zip = wrapper.findAll('button').find((b) => b.text().includes('zip 批量导入'))
-    expect(zip!.attributes('disabled')).toBeDefined()
+    expect(zip).toBeDefined()
+    expect(zip!.attributes('disabled')).toBeUndefined()
     const contents = wrapper
       .findAllComponents({ name: 'ElTooltip' })
       .map((t) => String(t.props('content')))
     expect(contents).toContain('暂不支持')
-    expect(contents).toContain('后端任务未就绪')
+    expect(contents).not.toContain('后端任务未就绪')
   })
 })
 
