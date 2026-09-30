@@ -15,6 +15,7 @@ import { ref } from 'vue'
 import { ApiClientError } from '@/api/client'
 import { runRetrievalTest, type RetrievalTestResult } from '@/api/retrievalTest'
 import ZeroRecallChunkPanel from '@/components/admin/ZeroRecallChunkPanel.vue'
+import { fmtTime } from '@/utils/format'
 import { checkQuestion } from '@/validators'
 
 /** 部门范围选项：后端 deptCode 枚举 service/hr/all（api.md §4.4.1），默认客服（对照原型） */
@@ -51,11 +52,6 @@ async function run(): Promise<void> {
   } finally {
     testing.value = false
   }
-}
-
-/** ISO8601 → YYYY-MM-DD HH:mm（同 OverviewView/AuditView 口径） */
-function fmtTime(iso: string): string {
-  return iso.replace('T', ' ').slice(0, 16)
 }
 
 /** 历史命中格（F-1011）：次数 + 最近召回时刻；从未召回出占位文案不编时间 */

@@ -32,7 +32,8 @@ import {
 } from './helpers/chat-mock'
 
 // SSE 流时序用例（等待多帧事件）在 CI/慢机上可能超过默认 5s 单测超时（T3 评审裁定
-// 与其余 9 个重型 view spec 对齐补设；chat-stream-robustness 拆分文件维持现状）
+// 与其余 9 个重型 view spec 对齐补设；chat-stream-robustness 原按 T5 裁决维持现状，
+// W6 验收期高负载下 5s 连续打满，已同口径补设，见该文件内注释）
 vi.setConfig({ testTimeout: 30_000 })
 
 beforeEach(() => {

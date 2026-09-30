@@ -4,7 +4,8 @@
  * （rerank sigmoid 与召回余弦不互比——W3 交接红线）、thresholdPassed/folded 标记、
  * 历史命中列（W5 F-1011：hitCount+lastHitAt 读现列展示）、当前阈值只读展示、
  * qa=null 与全空两种空态、422 内联（§22.2）、零召回块清单折叠区（F-1011 块级下钻：
- * 首展懒加载/分页/空态引导）。mock 全局 fetch 按 docs/api.md §4.4.1 契约应答，
+ * 首展懒加载/分页/空态引导/首展失败 loaded 回退可重拉——W5 T4 评审 M-3）。
+ * mock 全局 fetch 按 docs/api.md §4.4.1 契约应答，
  * 全链路走真 client.ts。
  */
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
@@ -341,5 +342,29 @@ describe('零召回块清单折叠区（W5 F-1011 块级下钻）', () => {
     expect(wrapper.text()).toContain('所有活跃块近期均有命中')
     expect(wrapper.findAll('.el-table__row')).toHaveLength(0)
     expect(wrapper.find('.btn-next').exists()).toBe(false)
+  })
+
+  it('首展失败（W5 T4 评审 M-3）：内联错误且不出"没有零召回块"空态；修正后收起重展触发重拉', async () => {
+    zrcBackend.error = '系统繁忙，请稍后重试'
+    const wrapper = await mountView()
+    const header = () => wrapper.find('.el-collapse-item__header')
+    await header().trigger('click') // 首展 → 拉取失败
+    await flushPromises()
+    expect(zrcCalls).toHaveLength(1)
+    expect(wrapper.find('.err-inline').text()).toBe('系统繁忙，请稍后重试')
+    // 拉取失败 ≠ 窗口内健康：失败态不出空态引导
+    expect(wrapper.text()).not.toContain('窗口内没有零召回块')
+    // loaded 已回退：收起再重展必须重拉（修复前 loaded 恒真，重展不发请求永久卡死）
+    zrcBackend.error = null
+    zrcBackend.result = { items: [zrcChunk], total: 1, page: 1, pageSize: 10 }
+    await header().trigger('click') // 收起
+    await header().trigger('click') // 重展
+    await flushPromises()
+    expect(zrcCalls).toEqual([
+      '/api/admin/zero-recall-chunks?days=30&page=1&pageSize=10',
+      '/api/admin/zero-recall-chunks?days=30&page=1&pageSize=10',
+    ])
+    expect(wrapper.text()).toContain('客服手册 2023 版')
+    expect(wrapper.find('.err-inline').exists()).toBe(false)
   })
 })

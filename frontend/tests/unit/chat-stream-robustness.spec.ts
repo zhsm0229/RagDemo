@@ -21,6 +21,11 @@ import {
   waitFor,
 } from './helpers/chat-mock'
 
+// 流式用例每例整挂 ChatView（部分两连挂）+ 实时 waitFor，W6 验收期高负载机器上 5s
+// 默认超时连续打满——T5"拆分文件维持现状"裁决的前提（当时 217 全绿）已不成立，
+// 按 chat-view/chat-feedback 同口径补设（W6 Task 3 披露项，非静默改裁决）
+vi.setConfig({ testTimeout: 30_000 })
+
 beforeEach(() => {
   vi.stubGlobal('fetch', fetchMock)
   // jsdom 未实现 scrollIntoView（角标→面板滚动定位用）

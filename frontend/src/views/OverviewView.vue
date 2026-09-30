@@ -12,6 +12,7 @@ import { useRouter } from 'vue-router'
 import KnowledgeGapCard from '@/components/overview/KnowledgeGapCard.vue'
 import { getHealth, getOverview, type HealthData, type OverviewData } from '@/api/overview'
 import { deptCodeLabel } from '@/components/admin/options'
+import { fmtTime } from '@/utils/format'
 
 const days = ref<1 | 7>(1)
 const loading = ref(false)
@@ -152,7 +153,7 @@ function expiryClass(expiryDate: string): string {
           <template #default="{ row }">{{ deptCodeLabel(row.deptCode) }}</template>
         </el-table-column>
         <el-table-column label="建档时间" width="150">
-          <template #default="{ row }">{{ row.createdAt.replace('T', ' ').slice(0, 16) }}</template>
+          <template #default="{ row }">{{ fmtTime(row.createdAt) }}</template>
         </el-table-column>
         <template #empty>暂无零召回文档</template>
       </el-table>

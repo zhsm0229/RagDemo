@@ -2,7 +2,8 @@
  * P10 运营概览集成测试：挂载即拉概览（days=1）与健康度与知识缺口周榜（F-1010）、
  * 统计卡四张（提问数/命中率/拒答率/点踩率，比率 0-1 → 百分比 1 位小数）、days 切换
  * （近1天/近7天，api.md §4.5.1 仅两档）、byDept 表格（部门中文/tokens）、知识缺口
- * TOP 卡片（top10 表格/周切换 0/-1/-2/导出 CSV blob/空态引导）、健康度面板（就绪率
+ * TOP 卡片（top10 表格/周切换 0/-1/-2/导出 CSV blob/空态引导/加载失败内联错误+重试
+ * ——W5 终审 M-1）、健康度面板（就绪率
  * 进度条/待确认数/零召回榜/待过期清单，行点击跳转 P3 文档管理）、api 层契约钉死。
  */
 import { DOMWrapper, flushPromises, mount, type VueWrapper } from '@vue/test-utils'
@@ -74,6 +75,15 @@ function okEnvelope(data: unknown): Response {
     status: 200,
     headers: { get: () => 'application/json' },
     json: async () => ({ code: 0, message: 'ok', data }),
+  } as unknown as Response
+}
+
+function errEnvelope(status: number, message: string): Response {
+  return {
+    ok: false,
+    status,
+    headers: { get: () => 'application/json' },
+    json: async () => ({ code: 1003, message, data: null }),
   } as unknown as Response
 }
 
@@ -259,6 +269,30 @@ describe('知识缺口卡片（F-1010）', () => {
     const panel = wrapper.find('[data-test="gap-panel"]')
     expect(panel.text()).toContain('暂无拒答——运行评测或等待用户提问')
     expect(panel.findAll('.el-table__row')).toHaveLength(0)
+  })
+
+  it('加载失败（W5 终审 M-1）：内联错误 + 重试，不出"暂无拒答"空态；重试成功后表格恢复', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).startsWith('/api/admin/knowledge-gap?')) {
+        return errEnvelope(500, '知识缺口服务暂不可用')
+      }
+      return routeFetch(String(url))
+    })
+    const wrapper = await mountOverview()
+    const panel = wrapper.find('[data-test="gap-panel"]')
+    expect(wrapper.find('[data-test="gap-error"]').text()).toContain('知识缺口服务暂不可用')
+    // 接口故障 ≠ 窗口内无拒答：失败不得出现空态引导（避免误读运营口径）
+    expect(panel.text()).not.toContain('暂无拒答')
+    expect(panel.findAll('.el-table__row')).toHaveLength(0)
+    // 后端恢复后点重试：重拉当前周（weekOffset=0），错误消失、top10 表格恢复
+    fetchMock.mockImplementation(routeFetch)
+    await wrapper.find('[data-test="gap-retry-btn"]').trigger('click')
+    await flushPromises()
+    expect(
+      fetchMock.mock.calls.filter((c) => String(c[0]).startsWith('/api/admin/knowledge-gap?')),
+    ).toHaveLength(2)
+    expect(wrapper.find('[data-test="gap-error"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="gap-panel"]').findAll('.el-table__row')).toHaveLength(10)
   })
 })
 

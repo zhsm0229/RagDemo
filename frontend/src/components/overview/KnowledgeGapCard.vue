@@ -4,7 +4,9 @@
  * （问题/出现次数）+ 周切换下拉（本周/上周/前两周）+ 导出 CSV（fetch blob →
  * a[download] 触发，同 AuditView 口径；X-Truncated 提示"已截断"）；空态引导
  * "暂无拒答——运行评测或等待用户提问"。数据自取自挂载（api.md §4.9）：端点按
- * count 降序取前 50，卡片只展示 top10，超出提示导出可看全部。
+ * count 降序取前 50，卡片只展示 top10，超出提示导出可看全部。加载失败内联
+ * 错误 + 重试（对齐 ZeroRecallChunkPanel 错误态，W5 终审 M-1）——失败不出
+ * 空态引导，避免把接口故障误读为"窗口内无拒答"。
  */
 import { computed, onMounted, ref } from 'vue'
 import { ApiClientError } from '@/api/client'
@@ -18,6 +20,8 @@ import {
 const GAP_WEEK_LABELS: Record<WeekOffset, string> = { 0: '本周', [-1]: '上周', [-2]: '前两周' }
 const gapWeek = ref<WeekOffset>(0)
 const gap = ref<KnowledgeGapData | null>(null)
+const loading = ref(false)
+const error = ref('')
 const exporting = ref(false)
 const exportNote = ref('')
 
@@ -26,7 +30,15 @@ onMounted(() => {
 })
 
 async function load(): Promise<void> {
-  gap.value = await getKnowledgeGap(gapWeek.value)
+  loading.value = true
+  error.value = ''
+  try {
+    gap.value = await getKnowledgeGap(gapWeek.value)
+  } catch (e) {
+    error.value = e instanceof ApiClientError ? e.message : '系统繁忙，请稍后重试'
+  } finally {
+    loading.value = false
+  }
 }
 
 function switchWeek(value: WeekOffset): void {
@@ -87,7 +99,13 @@ async function exportCsv(): Promise<void> {
         >
       </div>
     </div>
-    <el-table v-if="gap" :data="top10" border size="small">
+    <div v-if="error" class="err-row" role="alert" data-test="gap-error">
+      <span>{{ error }}</span>
+      <el-button size="small" :loading="loading" data-test="gap-retry-btn" @click="load"
+        >重试</el-button
+      >
+    </div>
+    <el-table v-if="gap" v-loading="loading" :data="top10" border size="small">
       <el-table-column prop="question" label="问题" min-width="240" show-overflow-tooltip />
       <el-table-column prop="count" label="出现次数" width="100" />
       <template #empty>
@@ -132,6 +150,14 @@ async function exportCsv(): Promise<void> {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+.err-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--el-color-danger);
 }
 .gap-more {
   margin: 8px 0 0;

@@ -15,6 +15,7 @@ import {
   type AuditLogItem,
 } from '@/api/auditLogs'
 import { ApiClientError } from '@/api/client'
+import { fmtTime } from '@/utils/format'
 import { checkDateRange } from '@/validators'
 
 const filters = reactive({
@@ -127,11 +128,6 @@ async function exportCsv(): Promise<void> {
 function objectText(row: AuditLogItem): string {
   return row.objectId === null ? `${row.objectType} -` : `${row.objectType} #${row.objectId}`
 }
-
-/** DTO createdAt 为 ISO 字符串 → 原型口径 "YYYY-MM-DD HH:mm" */
-function formatTime(iso: string): string {
-  return iso.replace('T', ' ').slice(0, 16)
-}
 </script>
 
 <template>
@@ -191,7 +187,7 @@ function formatTime(iso: string): string {
         </template>
       </el-table-column>
       <el-table-column label="时间" width="150">
-        <template #default="{ row }">{{ formatTime(row.createdAt) }}</template>
+        <template #default="{ row }">{{ fmtTime(row.createdAt) }}</template>
       </el-table-column>
       <el-table-column prop="actorUsername" label="操作人" width="120" />
       <el-table-column label="动作" width="180">

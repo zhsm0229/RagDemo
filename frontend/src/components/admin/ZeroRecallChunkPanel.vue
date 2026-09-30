@@ -5,11 +5,14 @@
  * 见 services.overview_views.list_zero_recall_chunks docstring 互指）。首展懒加载
  * （收起不发请求，展开收起不重拉已载数据），翻页重拉；空清单出空态引导（§8.5）。
  * 独立成组件：检索测试视图守 300 行红线（AGENTS.md），本面板与调参结果互不依赖。
+ * 首展失败时 loaded 回退 false（W5 T4 评审 M-3）：否则失败后 total=0 分页隐藏、
+ * loaded 恒真导致重展不重拉，面板永久卡死在错误/空态。
  */
 import { ref } from 'vue'
 import { ApiClientError } from '@/api/client'
 import { listZeroRecallChunks, type ZeroRecallChunkItem } from '@/api/retrievalTest'
 import { deptCodeLabel } from '@/components/admin/options'
+import { fmtTime } from '@/utils/format'
 
 const PAGE_SIZE = 10
 const loading = ref(false)
@@ -32,6 +35,8 @@ async function load(): Promise<void> {
     total.value = result.total
   } catch (e) {
     error.value = e instanceof ApiClientError ? e.message : '系统繁忙，请稍后重试'
+    // 懒加载未完成即失败：回退 loaded 让"收起→重展"可触发重拉（M-3）
+    loaded.value = false
   } finally {
     loading.value = false
   }
@@ -48,11 +53,6 @@ function onChange(names: Array<string | number>): void {
 function onPageChange(next: number): void {
   page.value = next
   void load()
-}
-
-/** ISO8601 → YYYY-MM-DD HH:mm（同 OverviewView/AuditView 口径） */
-function fmtTime(iso: string): string {
-  return iso.replace('T', ' ').slice(0, 16)
 }
 </script>
 
