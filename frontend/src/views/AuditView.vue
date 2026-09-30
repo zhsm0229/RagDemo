@@ -2,7 +2,7 @@
 /**
  * P11 审计日志（F-802，对照原型 AuditView + ui-spec §八）：筛选行（操作人ID/
  * 动作/对象类型/日期范围 + 查询/重置 §22.1——后端为精确匹配契约，原型单关键字
- * LIKE 无对应查询能力，deviations #47）+ 列表（时间/操作人/动作/对象/IP/详情
+ * LIKE 无对应查询能力，deviations #45）+ 列表（时间/操作人/动作/对象/IP/详情
  * 展开行）+ 详情 JSON 格式化只读展示（detail 为 JSON 字符串，解析后展示，失败
  * 原样——T2 评审移交契约）+ 导出 CSV（fetch blob + a[download] 触发，X-Truncated
  * 提示"已截断"；端点在主分支 68783f9 未合入，合并即生效，deviations 同 #22）。
