@@ -156,3 +156,80 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0（SHA pin，防 tag 漂移）
       - name: Docker build
         run: docker build -f Dockerfile -t "ragdemo:${GITHUB_REF_NAME}-${GITHUB_SHA::7}" .
+
+  # ---------- ⑥-⑨ 前端流水线（W4 Task 6，working-directory=frontend） ----------
+  # 四 job 与后端五阶段同规：lint（eslint+prettier）/ type（vue-tsc）/ test（vitest）/ build（vite build+产物断言）。
+  # 依赖事实源为 frontend/package-lock.json（依赖全部钉精确版本），CI 一律 npm ci 不用 install；
+  # setup-node 用 actions/setup-node（astral-sh/setup-node 不存在），node 20 与本地验证版本一致口径。
+  # 四 job 互不依赖可并行（backend 各阶段间亦无 fe 依赖）。
+  fe-lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0（与后端 job 同 SHA pin）
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0（SHA pin，防 tag 漂移）
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci
+      - name: ESLint (禁 any / 禁 console)
+        run: npm run lint:eslint
+      - name: Prettier check
+        run: npm run lint:prettier
+
+  fe-type:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0（SHA pin）
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0（SHA pin）
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci
+      - name: vue-tsc
+        run: npm run type
+
+  fe-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0（SHA pin）
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0（SHA pin）
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Vitest
+        run: npm run test
+
+  fe-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0（SHA pin）
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0（SHA pin）
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Vite build (vue-tsc 先行)
+        run: npm run build
+      - name: Assert dist exists
+        run: test -d dist
