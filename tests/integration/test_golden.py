@@ -34,9 +34,10 @@ from app.rag.precheck import GARBLE_THRESHOLD, garbled_ratio
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"  # tests/fixtures
 MANIFEST_PATH = FIXTURES / "golden" / "manifest.json"
 TOOLS = FIXTURES / "tools"
-# 钉死进程内解析路径（python-docx/pypdf），不随部署环境 MINERU_BASE_URL 漂移；mineru
-# 类 expect 的样本（当前均 pending）待 W2 接入 MinerU 后改此一处改为读环境配置。
-GOLDEN_SETTINGS = Settings(jwt_secret="golden-regression", mineru_base_url="")
+# 解析路径随部署环境切换：MINERU_BASE_URL 经 .env 注入（Settings 默认读取），MinerU 在位时
+# dual_col/scanned 走真 OCR 引擎；为空（CI 无 MinerU）时该类样本显式跳过而非降级 pypdf 误断
+# 引擎不符（§15.1 禁静默跳过：跳过原因打印在用例与 terminal summary）。
+GOLDEN_SETTINGS = Settings(jwt_secret="golden-regression")
 GARBLE_REASON: str = "编码异常"  # F-1005 失败原因前缀，与 ingest_pipeline 文案对齐
 KINDS: frozenset[str] = frozenset({"clean", "dual_col", "table", "scanned", "garbled"})
 ENGINES: frozenset[str] = frozenset({"docx", "mineru", "pypdf"})  # 与 documents.parse_engine 同词汇
@@ -362,7 +363,9 @@ def test_invariants_reject_pending_tamper() -> None:
     with pytest.raises(AssertionError, match="种子不得 pending"):
         check_pending_uniformity(seeded_pending)
 
-    mixed = deepcopy(load_manifest())  # table 类当前单行 pending：补一行非 pending 即混杂
+    mixed = deepcopy(load_manifest())  # 显式构造混杂：table 行标 pending + 同 kind 追加非 pending 行
+    # （不依赖清单当前投放状态：表格样本投放后其行已非 pending，写死旧状态会随投放自然失效）
+    next(e for e in mixed if e["file"] == "golden/hr_制度_表格_v1.docx")["pending"] = True
     mixed.append(
         {
             "file": "golden/hr_制度_表格_v2.docx",
@@ -408,6 +411,8 @@ def test_golden_regression(entry: dict[str, Any]) -> None:
         pytest.skip(f"待用户提供（pending）：{filename}（投放 {target}，验证后置 pending=false）")
     if not Path(target).exists():
         pytest.skip(f"待用户提供样例：{filename}（投放 {target}）")
+    if expect["engine"] == "mineru" and not GOLDEN_SETTINGS.mineru_base_url:
+        pytest.skip(f"MinerU 未部署（MINERU_BASE_URL 为空）：{filename}（部署后回归真 OCR 路径）")
     content = Path(target).read_bytes()
     if expect["fail_reason"] is not None:  # 乱码类：全链在乱码检测处失败且原因可核对
         with pytest.raises(ApiError) as exc_info:

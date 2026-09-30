@@ -23,7 +23,6 @@
   {
     "file": "golden/hr_制度_表格_v1.docx",
     "kind": "table",
-    "pending": true,
     "expect": {"engine": "docx", "min_chars": 300, "min_blocks": 1, "garbled_ok": false, "fail_reason": null}
   },
   {
