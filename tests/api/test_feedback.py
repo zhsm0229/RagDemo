@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import ERR_NOT_FOUND, ERR_PARAM_INVALID
 from app.db.models import AuditLog, Department, Message, User
+from tests.conftest import login_as
 
 _MSG_NOT_FOUND = "消息不存在或无权访问"
 
@@ -39,9 +40,6 @@ def make_user(session: Session, username: str, password: str) -> User:
     session.flush()
     return user
 
-
-def login(client, username: str, password: str):
-    return client.post("/api/auth/login", json={"username": username, "password": password})
 
 
 def new_conversation(client) -> int:
@@ -73,7 +71,7 @@ def setup_answer(
 ) -> tuple[User, int, Message]:
     """登录 + 新建会话 + 直插一条本人 assistant 消息，返回 (user, conv_id, 消息)。"""
     user = make_user(session, username, password)
-    assert login(client, username, password).status_code == 200
+    assert login_as(client, username, password).status_code == 200
     conv_id = new_conversation(client)
     return user, conv_id, add_message(session, user, conv_id, "assistant", "答：年假五到十天")
 
@@ -229,18 +227,18 @@ def test_feedback_forbidden_targets_404_with_zero_writes(client, session) -> Non
     一律 404/3003 同文案"消息不存在或无权访问"，且零写入（反馈列与审计均不动）。"""
     owner = make_user(session, "fbowner2", "right-one")
     make_user(session, "fbother2", "right-two")
-    assert login(client, "fbowner2", "right-one").status_code == 200
+    assert login_as(client, "fbowner2", "right-one").status_code == 200
     conv_id = new_conversation(client)
     answer = add_message(session, owner, conv_id, "assistant", "答：内部口径")
     user_msg = add_message(session, owner, conv_id, "user", "问：我的问题")
     placeholder = add_message(session, owner, conv_id, "assistant", "", is_active=False)
 
-    assert login(client, "fbother2", "right-two").status_code == 200  # 切换到用户 B
+    assert login_as(client, "fbother2", "right-two").status_code == 200  # 切换到用户 B
     hijack = post_feedback(client, answer.id, feedback="down", category="其他", comment="越权尝试")
     assert (hijack.status_code, hijack.json()["code"]) == (404, ERR_NOT_FOUND)
     assert hijack.json()["message"] == _MSG_NOT_FOUND
 
-    assert login(client, "fbowner2", "right-one").status_code == 200  # 切回本人
+    assert login_as(client, "fbowner2", "right-one").status_code == 200  # 切回本人
     for target in (user_msg.id, placeholder.id, 987654321):  # user 消息/占位行/不存在
         resp = post_feedback(client, target, feedback="down", category="其他", comment="不该成功")
         assert resp.status_code == 404, target
@@ -379,11 +377,11 @@ def test_repeat_down_preserves_admin_final_badcase_status(client, session) -> No
     fixed.badcase_status = "已修语料"
     session.flush()
 
-    assert login(client, "fbfinal1", "right-one").status_code == 200  # 切回本人再反馈
+    assert login_as(client, "fbfinal1", "right-one").status_code == 200  # 切回本人再反馈
     first = post_feedback(
         client, ignored.id, feedback="down", category="答案错误", comment="换了个说法"
     )
-    assert login(client, "fbfinal2", "right-two").status_code == 200
+    assert login_as(client, "fbfinal2", "right-two").status_code == 200
     second = post_feedback(client, fixed.id, feedback="down", category="其他", comment="补充了细节")
 
     assert first.status_code == 200 and second.status_code == 200

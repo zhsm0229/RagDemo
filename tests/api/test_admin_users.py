@@ -28,6 +28,7 @@ from app.core.errors import (
 from app.core.security import hash_password, verify_password
 from app.db.models import AuditLog, Department, User
 from app.main import app
+from tests.conftest import login_as
 
 # 与实现同源的无歧义字符集断言口径（字母数字去 0O1lI）：发放密码要人工抄写/口传
 _UNAMBIGUOUS = frozenset(string.ascii_letters + string.digits) - frozenset("0O1lI")
@@ -57,14 +58,11 @@ def make_user(
     return user
 
 
-def login(client, username: str, password: str):
-    return client.post("/api/auth/login", json={"username": username, "password": password})
-
 
 def admin_login(client, session: Session) -> User:
     """创建并登录 admin（cookie 由 client 保持），返回该用户供 actor 断言。"""
     admin = make_user(session, "useradmin", "right-one", role="admin")
-    assert login(client, "useradmin", "right-one").status_code == 200
+    assert login_as(client, "useradmin", "right-one").status_code == 200
     return admin
 
 
@@ -102,11 +100,11 @@ def test_create_issues_one_time_password_and_audits(client, session) -> None:
     assert created.id == data["id"]  # 读回：id 与落库行一致
     assert created.must_change_password is True  # 发放的号首登强制改密（§21.5）
     assert verify_password(initial, created.password_hash)  # bcrypt 落库可验
-    assert login(client, "新员工甲", initial).status_code == 200  # 初始密码可登录
+    assert login_as(client, "新员工甲", initial).status_code == 200  # 初始密码可登录
     me = client.get("/api/auth/me").json()["data"]
     assert me["mustChangePassword"] is True
 
-    login(client, "useradmin", "right-one")  # 切回管理员会话再查管理列表
+    login_as(client, "useradmin", "right-one")  # 切回管理员会话再查管理列表
     listed = client.get("/api/admin/users", params={"keyword": "新员工甲"}).json()["data"]
     assert listed["total"] == 1
     assert "initialPassword" not in listed["items"][0]
@@ -299,7 +297,7 @@ def test_disable_immediately_revokes_and_audits(client, session) -> None:
     member = make_user(session, "被禁员工", "right-one", role="member")
 
     member_client = TestClient(app)  # 独立 cookie jar：保住被禁用户的旧会话
-    assert login(member_client, "被禁员工", "right-one").status_code == 200
+    assert login_as(member_client, "被禁员工", "right-one").status_code == 200
     assert member_client.get("/api/auth/me").status_code == 200
 
     resp = toggle(client, member.id, False)
@@ -310,7 +308,7 @@ def test_disable_immediately_revokes_and_audits(client, session) -> None:
     assert denied.status_code == 401
     assert denied.json()["code"] == ERR_UNAUTHENTICATED
 
-    relogin = login(member_client, "被禁员工", "right-one")  # 重新登录同样拒绝（终审 I-1）
+    relogin = login_as(member_client, "被禁员工", "right-one")  # 重新登录同样拒绝（终审 I-1）
     assert relogin.status_code == 401
     assert relogin.json()["code"] == ERR_UNAUTHENTICATED
     assert relogin.json()["message"] == "未登录或登录已过期"
@@ -372,8 +370,8 @@ def test_reset_password_invalidates_old_and_audits(client, session) -> None:
     assert verify_password(new_pwd, member.password_hash)
     assert not verify_password("old-pass-123", member.password_hash)
 
-    assert login(client, "重置对象", "old-pass-123").json()["code"] == 2001  # 旧密码失效
-    assert login(client, "重置对象", new_pwd).status_code == 200  # 新密码可登录
+    assert login_as(client, "重置对象", "old-pass-123").json()["code"] == 2001  # 旧密码失效
+    assert login_as(client, "重置对象", new_pwd).status_code == 200  # 新密码可登录
 
     audits = session.scalars(select(AuditLog).where(AuditLog.action == "user.reset_password")).all()
     assert len(audits) == 1
@@ -396,7 +394,7 @@ def test_reset_unknown_user_404(client, session) -> None:
 def test_member_forbidden_on_all_user_endpoints(client, session) -> None:
     """member 调列表/发放/启停/重置：一律 403/2004（admin-only）。"""
     make_user(session, "普通成员", "right-one", role="member")
-    assert login(client, "普通成员", "right-one").status_code == 200
+    assert login_as(client, "普通成员", "right-one").status_code == 200
     requests = (
         ("get", "/api/admin/users", {}),
         (

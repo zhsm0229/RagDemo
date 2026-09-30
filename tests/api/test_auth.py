@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.core.security import hash_password, verify_password
 from app.db.models import AuditLog, Department, User
+from tests.conftest import login_as
 
 
 def make_user(
@@ -37,9 +38,6 @@ def make_user(
     return user
 
 
-def login(client, username: str, password: str):
-    return client.post("/api/auth/login", json={"username": username, "password": password})
-
 
 # ---------- 用例表 1：正确登录 ----------
 
@@ -47,7 +45,7 @@ def login(client, username: str, password: str):
 def test_login_success_sets_httponly_cookie(client, session) -> None:
     """正确登录：200 + Set-Cookie(jwt, httpOnly, SameSite=Lax, 8h)；body code=0。"""
     make_user(session, "alice", "correct-horse", role="admin")
-    resp = login(client, "alice", "correct-horse")
+    resp = login_as(client, "alice", "correct-horse")
     assert resp.status_code == 200
     body = resp.json()
     assert body["code"] == 0
@@ -72,7 +70,7 @@ def test_wrong_password_four_times_shows_remaining(client, session) -> None:
     """错 4 次：每次 2001 且 message 含剩余 3/2/1/0，未锁定。"""
     user = make_user(session, "bob", "right-one")
     for remaining in ("3", "2", "1", "0"):
-        resp = login(client, "bob", "wrong-pass")
+        resp = login_as(client, "bob", "wrong-pass")
         assert resp.status_code == 401
         assert resp.json()["code"] == 2001
         assert remaining in resp.json()["message"]
@@ -88,15 +86,15 @@ def test_five_failures_lock_account_and_write_audit(client, session, fake_clock)
     """错 5 次：第 5 次 2002 锁定 15 分钟；正确密码也 2002；locked_until 落库；写审计。"""
     user = make_user(session, "carol", "right-one")
     for _ in range(4):
-        assert login(client, "carol", "wrong-pass").json()["code"] == 2001
-    fifth = login(client, "carol", "wrong-pass")
+        assert login_as(client, "carol", "wrong-pass").json()["code"] == 2001
+    fifth = login_as(client, "carol", "wrong-pass")
     assert fifth.status_code == 401
     assert fifth.json()["code"] == 2002
     assert "15" in fifth.json()["message"]
     session.refresh(user)  # 读回断言：锁定状态持久化（§15.4）
     assert user.failed_attempts == 5
     assert user.locked_until == fake_clock.now() + timedelta(minutes=15)
-    denied = login(client, "carol", "right-one")  # 锁定期间正确密码同样拒绝
+    denied = login_as(client, "carol", "right-one")  # 锁定期间正确密码同样拒绝
     assert denied.json()["code"] == 2002
     audits = session.scalars(select(AuditLog).where(AuditLog.action == "user.lock")).all()
     assert len(audits) == 1
@@ -114,15 +112,15 @@ def test_locked_login_response_carries_locked_until(client, session, fake_clock)
 
     user = make_user(session, "frank", "right-one")
     for _ in range(4):
-        assert login(client, "frank", "wrong-pass").json()["code"] == 2001
+        assert login_as(client, "frank", "wrong-pass").json()["code"] == 2001
     expected = (fake_clock.now() + timedelta(minutes=15)).isoformat()
-    fifth = login(client, "frank", "wrong-pass")
+    fifth = login_as(client, "frank", "wrong-pass")
     assert fifth.status_code == 401
     assert fifth.json()["code"] == 2002
     assert fifth.json()["data"]["lockedUntil"] == expected
 
     session.refresh(user)
-    denied = login(client, "frank", "right-one")  # 锁定窗口内正确密码同样拒绝
+    denied = login_as(client, "frank", "right-one")  # 锁定窗口内正确密码同样拒绝
     assert denied.status_code == 401
     assert denied.json()["code"] == 2002
     body_until = denied.json()["data"]["lockedUntil"]
@@ -137,9 +135,9 @@ def test_success_login_resets_failed_counter(client, session) -> None:
     """失败 3 次 → 登录成功 → 再失败 1 次：剩余回到 3（计数已清零），不锁定。"""
     user = make_user(session, "dave", "right-one")
     for _ in range(3):
-        assert login(client, "dave", "wrong-pass").json()["code"] == 2001
-    assert login(client, "dave", "right-one").status_code == 200
-    resp = login(client, "dave", "wrong-pass")
+        assert login_as(client, "dave", "wrong-pass").json()["code"] == 2001
+    assert login_as(client, "dave", "right-one").status_code == 200
+    resp = login_as(client, "dave", "wrong-pass")
     assert resp.json()["code"] == 2001
     assert "3" in resp.json()["message"]  # 若未清零，此处剩余应为 0
     session.refresh(user)
@@ -153,7 +151,7 @@ def test_success_login_resets_failed_counter(client, session) -> None:
 def test_first_login_forced_password_change_flow(client, session) -> None:
     """首登改密：登录可成功但业务依赖 403 提示改密；<8 位 422；改后放行、旧密码失效。"""
     user = make_user(session, "erin", "temp-pass", must_change=True)
-    assert login(client, "erin", "temp-pass").status_code == 200
+    assert login_as(client, "erin", "temp-pass").status_code == 200
     blocked = client.get("/api/auth/admin/ping")
     assert blocked.status_code == 403
     assert blocked.json()["code"] == 2004
@@ -172,8 +170,8 @@ def test_first_login_forced_password_change_flow(client, session) -> None:
     ping = client.get("/api/auth/admin/ping")  # 已过改密关卡，member 落到权限 403
     assert ping.status_code == 403
     assert "无权限" in ping.json()["message"]
-    assert login(client, "erin", "temp-pass").json()["code"] == 2001  # 旧密码失效
-    assert login(client, "erin", "new-pass-123").status_code == 200
+    assert login_as(client, "erin", "temp-pass").json()["code"] == 2001  # 旧密码失效
+    assert login_as(client, "erin", "new-pass-123").status_code == 200
     change_audit = session.scalars(
         select(AuditLog).where(AuditLog.action == "user.change_password")
     ).all()
@@ -184,7 +182,7 @@ def test_first_login_forced_password_change_flow(client, session) -> None:
 def test_change_password_rejects_wrong_old(client, session) -> None:
     """改密验旧密码：原密码不正确 → 400/2001，密码未变更。"""
     user = make_user(session, "henry", "right-one")
-    login(client, "henry", "right-one")
+    login_as(client, "henry", "right-one")
     resp = client.post(
         "/api/auth/change-password", json={"old": "wrong-old", "new": "new-pass-123"}
     )
@@ -205,7 +203,7 @@ def test_change_password_requires_login(client) -> None:
 def test_change_password_length_bounds(client, session, new_password) -> None:
     """新密码边界：<8 位或超 72 字节 → 422/1003。"""
     make_user(session, "iris", "right-one")
-    login(client, "iris", "right-one")
+    login_as(client, "iris", "right-one")
     resp = client.post("/api/auth/change-password", json={"old": "right-one", "new": new_password})
     assert resp.status_code == 422
     assert resp.json()["code"] == 1003
@@ -217,7 +215,7 @@ def test_change_password_length_bounds(client, session, new_password) -> None:
 def test_disabled_user_rejected_with_old_cookie(client, session) -> None:
     """禁用后带旧 cookie 的下一次请求：401/2003（§5.6）。"""
     user = make_user(session, "frank", "right-one")
-    assert login(client, "frank", "right-one").status_code == 200
+    assert login_as(client, "frank", "right-one").status_code == 200
     user.is_active = False
     session.flush()
     resp = client.get("/api/auth/me")
@@ -235,7 +233,7 @@ def test_disabled_user_login_rejected_same_2003_message(client, session) -> None
     disabled = make_user(session, "被禁登录者", "right-one")
     disabled.is_active = False
     session.flush()
-    resp = login(client, "被禁登录者", "right-one")
+    resp = login_as(client, "被禁登录者", "right-one")
     assert resp.status_code == 401
     body = resp.json()
     assert body["code"] == 2003
@@ -245,7 +243,7 @@ def test_disabled_user_login_rejected_same_2003_message(client, session) -> None
     assert disabled.failed_attempts == 0
     assert disabled.last_login_at is None
     make_user(session, "在职登录者", "right-one")  # 同批次正常用户不受牵连
-    assert login(client, "在职登录者", "right-one").status_code == 200
+    assert login_as(client, "在职登录者", "right-one").status_code == 200
 
 
 # ---------- 用例表 7：无 cookie / 坏 cookie ----------
@@ -266,13 +264,13 @@ def test_member_cannot_access_admin_route(client, session) -> None:
     """member 访问 admin-only 路由：403/2004；admin 正常 200。"""
     make_user(session, "member1", "right-one", role="member")
     make_user(session, "root", "right-one", role="admin")
-    login(client, "member1", "right-one")
+    login_as(client, "member1", "right-one")
     resp = client.get("/api/auth/admin/ping")
     assert resp.status_code == 403
     assert resp.json()["code"] == 2004
     assert "无权限" in resp.json()["message"]
     client.cookies.clear()
-    login(client, "root", "right-one")
+    login_as(client, "root", "right-one")
     ok = client.get("/api/auth/admin/ping")
     assert ok.status_code == 200
     assert ok.json()["data"]["pong"] is True
@@ -285,7 +283,7 @@ def test_member_cannot_access_admin_route(client, session) -> None:
 def test_login_password_over_72_bytes_rejected(client, session, password) -> None:
     """登录密码超 72 字节：422/1003，在触碰 bcrypt 前拒绝。"""
     make_user(session, "gina", "right-one")
-    resp = login(client, "gina", password)
+    resp = login_as(client, "gina", password)
     assert resp.status_code == 422
     assert resp.json()["code"] == 1003
 
@@ -295,7 +293,7 @@ def test_login_password_over_72_bytes_rejected(client, session, password) -> Non
 
 def test_unknown_username_returns_generic_2001(client) -> None:
     """未知用户名：与密码错误同码 2001，不提示用户是否存在。"""
-    resp = login(client, "ghost", "whatever-123")
+    resp = login_as(client, "ghost", "whatever-123")
     assert resp.status_code == 401
     assert resp.json()["code"] == 2001
 
@@ -304,12 +302,12 @@ def test_login_rate_limited_by_sliding_window(client, session) -> None:
     """限流：同 IP+用户名窗口内第 11 次请求 429/2005；其他用户名不受影响。"""
     make_user(session, "jack", "right-one")
     for _ in range(10):
-        resp = login(client, "jack", "wrong-pass")
+        resp = login_as(client, "jack", "wrong-pass")
         assert resp.status_code == 401  # 2001 或 2002（5 次后已锁定），均非限流
-    blocked = login(client, "jack", "wrong-pass")
+    blocked = login_as(client, "jack", "wrong-pass")
     assert blocked.status_code == 429
     assert blocked.json()["code"] == 2005
     make_user(session, "jack2", "right-one")
-    other = login(client, "jack2", "wrong-pass")
+    other = login_as(client, "jack2", "wrong-pass")
     assert other.status_code == 401
     assert other.json()["code"] == 2001

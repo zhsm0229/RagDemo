@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import ERR_NOT_FOUND, ERR_PARAM_INVALID
 from app.db.models import Conversation, Department, Message, User
+from tests.conftest import login_as
 
 _MSG_NOT_FOUND = "会话不存在或无权访问"
 _MESSAGE_KEYS = {
@@ -51,9 +52,6 @@ def make_user(session: Session, username: str, password: str, role: str) -> User
     return user
 
 
-def login(client, username: str, password: str):
-    return client.post("/api/auth/login", json={"username": username, "password": password})
-
 
 def create_conversation(client) -> int:
     """新建空会话并返回 id（POST /api/conversations → data.id）。"""
@@ -76,7 +74,7 @@ def list_ids(client, **params) -> list[int]:
 def test_create_conversation_listed_first_with_fields(client, session) -> None:
     """① 新建空会话：data 恰 {id} 一键；列表第 1 位且 title 读回 DB 默认"新会话"。"""
     user = make_user(session, "convuser", "right-one", role="member")
-    assert login(client, "convuser", "right-one").status_code == 200
+    assert login_as(client, "convuser", "right-one").status_code == 200
 
     created = client.post("/api/conversations")
 
@@ -107,7 +105,7 @@ def test_create_conversation_listed_first_with_fields(client, session) -> None:
 def test_two_conversations_ordered_updated_at_desc(client, session) -> None:
     """② 后建的会话排前：updated_at DESC（同事务 now() 同刻以 id 降序兜底）。"""
     make_user(session, "orderuser", "right-one", role="member")
-    assert login(client, "orderuser", "right-one").status_code == 200
+    assert login_as(client, "orderuser", "right-one").status_code == 200
 
     id_first = create_conversation(client)
     id_second = create_conversation(client)
@@ -121,7 +119,7 @@ def test_two_conversations_ordered_updated_at_desc(client, session) -> None:
 def test_conversation_list_pagination(client, session) -> None:
     """③ 7 条 + pageSize=5：total=7，第 1 页 5 条、第 2 页恰 2 条（id 降序切片）。"""
     make_user(session, "pageuser", "right-one", role="member")
-    assert login(client, "pageuser", "right-one").status_code == 200
+    assert login_as(client, "pageuser", "right-one").status_code == 200
     created = [create_conversation(client) for _ in range(7)]
 
     page1 = client.get("/api/conversations", params={"page": 1, "pageSize": 5}).json()["data"]
@@ -136,7 +134,7 @@ def test_conversation_list_pagination(client, session) -> None:
 def test_conversation_list_page_bounds_422(client, session) -> None:
     """§3.5 分页边界：page 0 与 pageSize 0/101 → 422/1003 字段级指名 page/pageSize。"""
     make_user(session, "bounduser", "right-one", role="member")
-    assert login(client, "bounduser", "right-one").status_code == 200
+    assert login_as(client, "bounduser", "right-one").status_code == 200
 
     for params in ({"page": "0"}, {"pageSize": "0"}, {"pageSize": "101"}):
         resp = client.get("/api/conversations", params=params)
@@ -154,7 +152,7 @@ def test_messages_history_asc_filters_interrupted_placeholder(client, session) -
     """④ 历史消息 ASC 全字段读回：citations JSONB 逐字段相等；is_active=false 的
     assistant 中断占位行（Task 9 CHAT-12 遗留形态）不出现，user 消息全部返回。"""
     user = make_user(session, "historyuser", "right-one", role="member")
-    assert login(client, "historyuser", "right-one").status_code == 200
+    assert login_as(client, "historyuser", "right-one").status_code == 200
     conv_id = create_conversation(client)
     citation = {
         "n": 1,
@@ -248,9 +246,9 @@ def test_other_user_conversation_idor_404(client, session) -> None:
     B 的列表不见 A 的会话；不存在 id 同文案 404。"""
     make_user(session, "convowner", "right-one", role="member")
     make_user(session, "convother", "right-two", role="member")
-    assert login(client, "convowner", "right-one").status_code == 200
+    assert login_as(client, "convowner", "right-one").status_code == 200
     conv_id = create_conversation(client)
-    assert login(client, "convother", "right-two").status_code == 200  # 切换登录态
+    assert login_as(client, "convother", "right-two").status_code == 200  # 切换登录态
 
     messages = client.get(f"/api/conversations/{conv_id}/messages")
     deletion = client.delete(f"/api/conversations/{conv_id}")
@@ -273,7 +271,7 @@ def test_soft_delete_hides_and_is_idempotent(client, session) -> None:
     """⑥ 删除后列表不见、GET messages 404/3003；重复删除幂等 200；行保留
     is_active=false（不物理删）。"""
     user = make_user(session, "deluser", "right-one", role="member")
-    assert login(client, "deluser", "right-one").status_code == 200
+    assert login_as(client, "deluser", "right-one").status_code == 200
     conv_id = create_conversation(client)
     session.add(
         Message(

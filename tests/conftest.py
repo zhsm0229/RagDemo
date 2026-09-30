@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 from alembic.config import Config
+from fastapi.testclient import TestClient
+from httpx import Response
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -72,3 +74,13 @@ def session(pg) -> Session:
         s.close()
         transaction.rollback()
         connection.close()
+
+
+def login_as(client: TestClient, username: str, password: str) -> Response:
+    """登录测试辅助（W5 自各 api 测试文件本地 login 定义上收至此）：POST
+    /api/auth/login，cookie 由 client 的 cookie jar 保持，返回响应供调用侧
+    `.status_code` 显式断言——故签名带返回值而非 brief 初稿的 None，否则
+    机械替换无法做到断言零改动。各文件的 admin_login 因建号用户名/返回值
+    （User / int / None）形态不一，保留文件内原样不上收。
+    """
+    return client.post("/api/auth/login", json={"username": username, "password": password})
