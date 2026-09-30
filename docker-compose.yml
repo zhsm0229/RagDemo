@@ -26,5 +26,71 @@ services:
       POSTGRES_PASSWORD: rag
       POSTGRES_DB: rag_test
 
+  # TEI embedding（BGE-M3，dim=1024）。宿主 8081 被本机其他项目占用，dev 映射 8091；
+  # 生产 VM 无冲突时按 standards §12.2 映射回 8081。模型经 hf-mirror 预热进卷，避免每次启动重下。
+  tei-embed:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.2
+    container_name: ragdemo-tei-embed
+    command: ["--model-id", "BAAI/bge-m3", "--pooling", "cls"]
+    ports:
+      - "8091:80"
+    environment:
+      HF_ENDPOINT: https://hf-mirror.com
+      HUGGINGFACE_HUB_CACHE: /data/hub
+    volumes:
+      - tei-models:/data
+    mem_limit: 3g
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 10m
+
+  # TEI rerank（bge-reranker-v2-m3，原始 logit 由应用侧 sigmoid 归一化，§4.4 分数口径）
+  tei-rerank:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.2
+    container_name: ragdemo-tei-rerank
+    command: ["--model-id", "BAAI/bge-reranker-v2-m3"]
+    ports:
+      - "8082:80"
+    environment:
+      HF_ENDPOINT: https://hf-mirror.com
+      HUGGINGFACE_HUB_CACHE: /data/hub
+    volumes:
+      - tei-models:/data
+    mem_limit: 3g
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 10m
+
+  # MinerU 解析服务（pipeline 后端，CPU）。本机 Docker 仅 8G 内存，与双 TEI 无法常驻并存，
+  # 归入 parser profile 按需启停：跑解析/黄金回归时 docker compose --profile parser up mineru。
+  # 生产 4C16G VM 上常驻（§12.5 资源位 4C6G）。模型经 ModelScope 国内源预热进卷。
+  mineru:
+    build:
+      context: .
+      dockerfile: docker/mineru-cpu.Dockerfile
+    container_name: ragdemo-mineru
+    profiles: ["parser"]
+    ports:
+      - "8090:8000"
+    environment:
+      MINERU_MODEL_SOURCE: modelscope
+    volumes:
+      - mineru-models:/root/.cache
+    mem_limit: 5g
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/docs || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 15m
+
 volumes:
   pgdata:
+  tei-models:
+  mineru-models:
