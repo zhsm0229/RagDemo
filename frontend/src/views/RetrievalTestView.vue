@@ -5,13 +5,16 @@
  * 不渲染，deviations #28）+ 问题输入（strip 后 1-2000，checkQuestion 与 chat 同口径）
  * + 测试按钮 → 结果区：问答对命中卡（similarity=embedding 余弦 + thresholdPassed 标记）
  * + 文档块表（rerankScore=sigmoid 与 recallCosine=召回余弦分列展示，两套分数口径
- * 不互比——W3 交接红线；thresholdPassed/folded 逐块标记）+ 当前阈值展示（响应下发
- * 只读，后端无阈值保存端点，deviations #29）。422 错误内联（§22.2）；
- * 空结果（无 qa 且无 docs）展示空态引导（§8.5）。
+ * 不互比——W3 交接红线；thresholdPassed/folded 逐块标记；历史命中列=W5 F-1011 读现列，
+ * 对照"真实用户流量是否召回到过"）+ 当前阈值展示（响应下发只读，后端无阈值保存端点，
+ * deviations #29）。422 错误内联（§22.2）；空结果（无 qa 且无 docs）展示空态引导（§8.5）。
+ * 页内另设零召回块清单折叠区（F-1011 块级下钻，与健康度零召回榜同口径）：首展懒加载
+ * + 分页，与左侧调参结果互不依赖。
  */
 import { ref } from 'vue'
 import { ApiClientError } from '@/api/client'
 import { runRetrievalTest, type RetrievalTestResult } from '@/api/retrievalTest'
+import ZeroRecallChunkPanel from '@/components/admin/ZeroRecallChunkPanel.vue'
 import { checkQuestion } from '@/validators'
 
 /** 部门范围选项：后端 deptCode 枚举 service/hr/all（api.md §4.4.1），默认客服（对照原型） */
@@ -48,6 +51,16 @@ async function run(): Promise<void> {
   } finally {
     testing.value = false
   }
+}
+
+/** ISO8601 → YYYY-MM-DD HH:mm（同 OverviewView/AuditView 口径） */
+function fmtTime(iso: string): string {
+  return iso.replace('T', ' ').slice(0, 16)
+}
+
+/** 历史命中格（F-1011）：次数 + 最近召回时刻；从未召回出占位文案不编时间 */
+function fmtHistory(row: { hitCount: number; lastHitAt: string | null }): string {
+  return `${row.hitCount} 次 · ${row.lastHitAt === null ? '从未被召回' : fmtTime(row.lastHitAt)}`
 }
 </script>
 
@@ -121,6 +134,9 @@ async function run(): Promise<void> {
                 <el-tag v-if="row.folded" type="info" size="small" class="gap-tag">已折叠</el-tag>
               </template>
             </el-table-column>
+            <el-table-column label="历史命中" width="180">
+              <template #default="{ row }">{{ fmtHistory(row) }}</template>
+            </el-table-column>
           </el-table>
           <div v-else class="muted">无文档块命中</div>
 
@@ -134,6 +150,11 @@ async function run(): Promise<void> {
         </template>
       </template>
     </div>
+
+    <div class="panel">
+      <!-- 零召回块清单（F-1011 块级下钻）：独立面板组件，与调参结果互不依赖 -->
+      <ZeroRecallChunkPanel />
+    </div>
   </div>
 </template>
 
@@ -141,6 +162,9 @@ async function run(): Promise<void> {
 /* 对照原型 .panel 宽度（max-width:900px）与 .filter-row 同行排布 */
 .page {
   max-width: 900px;
+}
+.page > .panel + .panel {
+  margin-top: 12px;
 }
 .filter-row {
   display: flex;

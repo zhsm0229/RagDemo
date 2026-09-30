@@ -54,7 +54,9 @@ def _qa_payload(qa: QaHit | None, qa_threshold: float) -> dict | None:
 
 def _doc_payload(view: DocTestView) -> dict:
     """文档块 DTO（§3.4 camelCase）：rerankScore 与 recallCosine 两套分数分字段，
-    folded 标记进 top_n 但被折叠丢弃的块（brief 钉死：调参需看到被折叠块）。"""
+    folded 标记进 top_n 但被折叠丢弃的块（brief 钉死：调参需看到被折叠块）；
+    hitCount/lastHitAt 为历史召回统计（F-1011，读现列，lastHitAt ISO8601、
+    null=从未被召回），检索测试自身不写计数（不污染 F-1009 零召回榜）。"""
     return {
         "chunkId": view.chunk_id,
         "documentTitle": view.document_title,
@@ -64,6 +66,8 @@ def _doc_payload(view: DocTestView) -> dict:
         "recallCosine": view.recall_cosine,
         "thresholdPassed": view.threshold_passed,
         "folded": view.folded,
+        "hitCount": view.hit_count,
+        "lastHitAt": view.last_hit_at.isoformat() if view.last_hit_at else None,
     }
 
 

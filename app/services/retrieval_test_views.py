@@ -4,6 +4,8 @@ r"""管理端检索测试服务（Task 10，F-503/F-703，RET-03/04）：检索�
 → rerank_and_fold）但 qa 与 docs 两路结果都展示、互不短路——qa 命中不遮蔽文档召回
 （调参需同时看到两道闸的原始表现）。与问答链路的三点差异（brief 钉死）：
 - 不调 LLM（无改写无生成）、不写 hit_counter（调参流量不污染 F-1009 零召回榜）；
+  但**读** Chunk.hit_count/last_hit_at 现列展示历史召回表现（W5 F-1011：读现列，
+  不写——两列为 chat 链路 HitCounter 刷库沉淀，供调参时对照"真实用户是否召回到过"）；
 - fold 前后信息都展示：rerank_and_fold(return_folded=True) 取回进 top_n 但被折叠
   丢弃的块，与保留块合并按 rerank 分降序，folded 标记供前端打标；
 - 两套分数字段分明（standards §4.4）：qa.similarity=embedding 余弦（qa_threshold
@@ -14,6 +16,7 @@ admin 视角 deptCode 任意（service|hr|all），检索 SQL 恒带 dept_id IN 
 只读不写库（无 commit 无审计，同 services.admin_views 只读服务惯例）。
 """
 
+import datetime as dt
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -22,7 +25,7 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings
 from app.core.errors import ERR_PARAM_INVALID, ApiError
 from app.core.llm import Embedder, Reranker
-from app.db.models import Department
+from app.db.models import Chunk, Department
 from app.services.retrieval import (
     DocHit,
     QaHit,
@@ -39,7 +42,8 @@ _MSG_BAD_DEPT = "部门编码无效：{code}（可选 service/hr/all）"  # 与 
 @dataclass(frozen=True)
 class DocTestView:
     """文档块调参视图：rerankScore 与 recallCosine 两套分数各占字段，folded 标记
-    进 top_n 但被折叠丢弃的块（brief：调参需看到被折叠块）。"""
+    进 top_n 但被折叠丢弃的块（brief：调参需看到被折叠块）；hit_count/last_hit_at
+    为历史召回统计（F-1011，读现列：真实问答流量沉淀，调参重放不产生计数）。"""
 
     chunk_id: int
     document_title: str
@@ -49,6 +53,8 @@ class DocTestView:
     recall_cosine: float
     threshold_passed: bool
     folded: bool
+    hit_count: int
+    last_hit_at: dt.datetime | None
 
 
 @dataclass(frozen=True)
@@ -88,8 +94,9 @@ def run_retrieval_test(
         settings.chunk_dedup_sim,
         return_folded=True,
     )
+    hit_stats = _hit_stats(db, [hit.chunk_id for hit in kept + folded_out])
     docs = [
-        _doc_view(hit, recall_cosine[hit.chunk_id], settings.refuse_threshold, folded)
+        _doc_view(hit, recall_cosine[hit.chunk_id], settings.refuse_threshold, folded, hit_stats)
         for hit, folded in [(item, False) for item in kept] + [(item, True) for item in folded_out]
     ]
     docs.sort(key=lambda view: view.rerank_score, reverse=True)
@@ -101,11 +108,27 @@ def run_retrieval_test(
     )
 
 
+def _hit_stats(db: Session, chunk_ids: list[int]) -> dict[int, tuple[int, dt.datetime | None]]:
+    """按 chunk_id 批量读历史命中两列（F-1011 读现列）：一次 IN 绑定参数查询，
+    块数 ≤ top_n+折叠数（小集合）；返回 {chunk_id: (hit_count, last_hit_at)}，
+    供调参对照"真实用户流量是否召回到过该块"（本端点自身不产生计数）。"""
+    rows = db.execute(
+        select(Chunk.id, Chunk.hit_count, Chunk.last_hit_at).where(Chunk.id.in_(chunk_ids))
+    ).all()
+    return {row.id: (row.hit_count, row.last_hit_at) for row in rows}
+
+
 def _doc_view(
-    hit: DocHit, recall_cosine: float, refuse_threshold: float, folded: bool
+    hit: DocHit,
+    recall_cosine: float,
+    refuse_threshold: float,
+    folded: bool,
+    hit_stats: dict[int, tuple[int, dt.datetime | None]],
 ) -> DocTestView:
     """DocHit（fold 后 similarity=rerank sigmoid 分）→ 调参视图；阈值标记对照当前
-    Settings，与 folded 互相独立（被折叠块同样标记是否过拒答阈值）。"""
+    Settings，与 folded 互相独立（被折叠块同样标记是否过拒答阈值）；历史命中两键
+    从 hit_stats 取（同批召回块必在库，直取不设防）。"""
+    hit_count, last_hit_at = hit_stats[hit.chunk_id]
     return DocTestView(
         chunk_id=hit.chunk_id,
         document_title=hit.title,
@@ -115,6 +138,8 @@ def _doc_view(
         recall_cosine=recall_cosine,
         threshold_passed=hit.similarity >= refuse_threshold,
         folded=folded,
+        hit_count=hit_count,
+        last_hit_at=last_hit_at,
     )
 
 

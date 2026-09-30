@@ -2,8 +2,10 @@
  * P5 检索测试集成测试：表单初始态与空值校验、请求体契约（question strip + deptCode）、
  * 问答对命中卡（similarity=embedding 余弦 + thresholdPassed）、文档块表两套分数分列
  * （rerank sigmoid 与召回余弦不互比——W3 交接红线）、thresholdPassed/folded 标记、
- * 当前阈值只读展示、qa=null 与全空两种空态、422 内联（§22.2）。
- * mock 全局 fetch 按 docs/api.md §4.4.1 契约应答，全链路走真 client.ts。
+ * 历史命中列（W5 F-1011：hitCount+lastHitAt 读现列展示）、当前阈值只读展示、
+ * qa=null 与全空两种空态、422 内联（§22.2）、零召回块清单折叠区（F-1011 块级下钻：
+ * 首展懒加载/分页/空态引导）。mock 全局 fetch 按 docs/api.md §4.4.1 契约应答，
+ * 全链路走真 client.ts。
  */
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
@@ -58,6 +60,8 @@ const hitResult: RetrievalTestResult = {
       recallCosine: 0.88,
       thresholdPassed: true,
       folded: false,
+      hitCount: 5,
+      lastHitAt: '2026-09-25T10:30:00+00:00',
     },
     {
       chunkId: 12,
@@ -68,6 +72,8 @@ const hitResult: RetrievalTestResult = {
       recallCosine: 0.72,
       thresholdPassed: false,
       folded: true,
+      hitCount: 0,
+      lastHitAt: null,
     },
   ],
   thresholds: { qa: 0.85, refuse: 0.55 },
@@ -80,11 +86,21 @@ const backend = {
   error: null as string | null,
 }
 
+/** 零召回块清单（GET /api/admin/zero-recall-chunks）mock：result 非 null 即按其应答 */
+const zrcBackend = {
+  result: null as unknown | null,
+  error: null as string | null,
+}
+const zrcCalls: string[] = []
+
 let lastBody: unknown = null
 
 function resetBackend(): void {
   backend.result = null
   backend.error = null
+  zrcBackend.result = null
+  zrcBackend.error = null
+  zrcCalls.length = 0
   lastBody = null
 }
 
@@ -95,6 +111,13 @@ async function routeFetch(url: string, init: RequestInit = {}): Promise<Response
       return makeResponse(422, { code: 1003, message: backend.error, data: null })
     }
     return okEnvelope(backend.result ?? hitResult)
+  }
+  if (url.startsWith('/api/admin/zero-recall-chunks') && (init.method ?? 'GET') === 'GET') {
+    zrcCalls.push(url)
+    if (zrcBackend.error !== null) {
+      return makeResponse(422, { code: 1003, message: zrcBackend.error, data: null })
+    }
+    return okEnvelope(zrcBackend.result ?? { items: [], total: 0, page: 1, pageSize: 10 })
   }
   throw new Error(`unexpected fetch: ${init.method ?? 'GET'} ${url}`)
 }
@@ -220,5 +243,103 @@ describe('错误处理', () => {
     expect(wrapper.find('.err-inline').text()).toBe('问题长度须在 1-2000 字之间')
     expect(wrapper.text()).not.toContain('文档块命中')
     expect(wrapper.text()).not.toContain('问答对命中')
+  })
+})
+
+describe('历史命中列（W5 F-1011，读现列展示）', () => {
+  it('文档块表渲染历史命中列：hitCount 计数 + lastHitAt 格式化（YYYY-MM-DD HH:mm）', async () => {
+    const wrapper = await mountView()
+    await askAndRun(wrapper, '差旅报销标准')
+    const headers = wrapper.findAll('.el-table__header-wrapper .cell').map((c) => c.text())
+    expect(headers).toContain('历史命中')
+    const row1 = wrapper.findAll('.el-table__row')[0]!
+    expect(row1.text()).toContain('5 次')
+    expect(row1.text()).toContain('2026-09-25 10:30')
+    expect(row1.text()).not.toContain('从未被召回')
+  })
+
+  it('从未被召回（lastHitAt=null）出"从未被召回"占位，不出时间文本', async () => {
+    const wrapper = await mountView()
+    await askAndRun(wrapper, '差旅报销标准')
+    const row2 = wrapper.findAll('.el-table__row')[1]!
+    expect(row2.text()).toContain('0 次')
+    expect(row2.text()).toContain('从未被召回')
+    expect(row2.text()).not.toContain('2026-09-25')
+  })
+})
+
+describe('零召回块清单折叠区（W5 F-1011 块级下钻）', () => {
+  const zrcChunk = {
+    chunkId: 31,
+    documentTitle: '客服手册 2023 版',
+    deptCode: 'service',
+    titlePath: '客服手册>第一章',
+    contentPreview: '退货运费说明',
+    createdAt: '2026-08-15T09:30:00+00:00',
+  }
+
+  it('默认收起不发请求（检索测试也不触发）；首展拉 days=30&page=1&pageSize=10 并渲染行', async () => {
+    zrcBackend.result = {
+      items: [zrcChunk],
+      total: 1,
+      page: 1,
+      pageSize: 10,
+    }
+    const wrapper = await mountView()
+    expect(zrcCalls).toHaveLength(0)
+    await askAndRun(wrapper, '差旅报销标准')
+    expect(zrcCalls).toHaveLength(0) // 检索测试不搭车拉清单
+    await wrapper.find('.el-collapse-item__header').trigger('click')
+    await flushPromises()
+    expect(zrcCalls).toEqual(['/api/admin/zero-recall-chunks?days=30&page=1&pageSize=10'])
+    const text = wrapper.text()
+    expect(text).toContain('客服手册 2023 版')
+    expect(text).toContain('客服') // deptCode 经共享映射出中文
+    expect(text).toContain('客服手册>第一章')
+    expect(text).toContain('退货运费说明')
+    expect(text).toContain('2026-08-15 09:30')
+  })
+
+  it('翻下一页携带 page=2 重拉并渲染第 2 页数据，total 保持全量', async () => {
+    zrcBackend.result = { items: [zrcChunk], total: 11, page: 1, pageSize: 10 }
+    const wrapper = await mountView()
+    await wrapper.find('.el-collapse-item__header').trigger('click')
+    await flushPromises()
+    zrcBackend.result = {
+      items: [
+        {
+          chunkId: 32,
+          documentTitle: 'HR 考勤制度 2022 版',
+          deptCode: 'hr',
+          titlePath: null,
+          contentPreview: '考勤异常处理流程',
+          createdAt: '2026-08-01T08:00:00+00:00',
+        },
+      ],
+      total: 11,
+      page: 2,
+      pageSize: 10,
+    }
+    await wrapper.find('.btn-next').trigger('click')
+    await flushPromises()
+    expect(zrcCalls).toEqual([
+      '/api/admin/zero-recall-chunks?days=30&page=1&pageSize=10',
+      '/api/admin/zero-recall-chunks?days=30&page=2&pageSize=10',
+    ])
+    const text = wrapper.text()
+    expect(text).toContain('HR 考勤制度 2022 版')
+    expect(text).toContain('人力')
+    expect(text).not.toContain('客服手册 2023 版') // 第 1 页数据被替换不残留
+  })
+
+  it('空清单渲染空态引导（§8.5），不出表格与分页', async () => {
+    const wrapper = await mountView()
+    await wrapper.find('.el-collapse-item__header').trigger('click')
+    await flushPromises()
+    expect(zrcCalls).toHaveLength(1)
+    expect(wrapper.text()).toContain('窗口内没有零召回块')
+    expect(wrapper.text()).toContain('所有活跃块近期均有命中')
+    expect(wrapper.findAll('.el-table__row')).toHaveLength(0)
+    expect(wrapper.find('.btn-next').exists()).toBe(false)
   })
 })

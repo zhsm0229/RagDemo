@@ -263,9 +263,11 @@ def test_命中结构_qa命中与阈值回显(rt_client, session):
 
 
 def test_docs两套分数字段分且逐块标记(rt_client, session):
-    """① docs 键集恰为 8 键；rerankScore=rerank sigmoid 降序（权重 4.0/3.0 对位）、
-    recallCosine=召回余弦（rerank 覆写前的另一路分数，两套分数不互比）、folded=false、
-    thresholdPassed 对照 refuse_threshold；documentTitle/titlePath/page 逐块读回。"""
+    """① docs 键集恰为 10 键（W5 F-1011 补 hitCount/lastHitAt 历史命中两键，种子未
+    计数故两键为 0/null，值断言见 tests/api/test_retrieval_test.py）；rerankScore=
+    rerank sigmoid 降序（权重 4.0/3.0 对位）、recallCosine=召回余弦（rerank 覆写前的
+    另一路分数，两套分数不互比）、folded=false、thresholdPassed 对照 refuse_threshold；
+    documentTitle/titlePath/page 逐块读回。"""
     embedder = StubEmbedder()
     admin_login(rt_client, session)
     seed = _seed_hit_fixture(session, embedder)
@@ -290,6 +292,8 @@ def test_docs两套分数字段分且逐块标记(rt_client, session):
         "recallCosine",
         "thresholdPassed",
         "folded",
+        "hitCount",
+        "lastHitAt",
     }
     assert [entry["chunkId"] for entry in data["docs"]] == [first.id, second.id]  # rerank 降序
     qvec = embedder.embed([seed["question"]])[0]
