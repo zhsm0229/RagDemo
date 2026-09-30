@@ -127,18 +127,14 @@ defineExpose({ load, doScan })
 
     <h4 class="sec-title">阈值扫描</h4>
     <div class="scan-bar">
-      <el-tooltip content="后端任务未就绪" placement="top">
-        <span class="tip-host">
-          <el-button
-            type="primary"
-            :disabled="!FEATURE_FLAGS.thresholdScan"
-            :loading="scanning"
-            data-test="scan-btn"
-            @click="doScan"
-            >扫描阈值曲线</el-button
-          >
-        </span>
-      </el-tooltip>
+      <el-button
+        type="primary"
+        :disabled="!FEATURE_FLAGS.thresholdScan"
+        :loading="scanning"
+        data-test="scan-btn"
+        @click="doScan"
+        >扫描阈值曲线</el-button
+      >
       <span v-if="scan" class="muted">
         推荐值：拒答阈值 {{ scan.recommended.refuseThreshold ?? '-' }} / 问答对阈值
         {{ scan.recommended.qaThreshold ?? '-' }} · 已排除"全员拒答"档
@@ -243,9 +239,6 @@ defineExpose({ load, doScan })
   align-items: center;
   gap: 12px;
   margin-bottom: 8px;
-}
-.tip-host {
-  display: inline-block;
 }
 .scope-note {
   margin-bottom: 8px;
