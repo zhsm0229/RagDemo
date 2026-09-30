@@ -199,6 +199,24 @@ class _BreakOneLLM:
         yield from self.inner.chat_stream(messages, max_tokens)
 
 
+class _ProgressProbeLLM:
+    """逐题进度观测替身（W6 Task1 detail-stall 回归）：每次生成入口读回已提交的
+    detail.items——单线程同步执行下恰落在"上一题 commit 之后、本题 commit 之前"，
+    与前端 GET /{id} 轮询（请求级会话对已提交行的读回）视角等价且无采样竞态。"""
+
+    def __init__(self, inner: StubLLMProvider, session: Session, run_id: int) -> None:
+        self.inner = inner
+        self.session = session
+        self.run_id = run_id
+        self.observed: list[list[int]] = []  # 每次观测的已落库 questionId 序列
+
+    def chat_stream(self, messages, max_tokens):  # type: ignore[no-untyped-def]
+        self.session.expire_all()  # 过期缓存后 get → 对已提交行的真 SELECT（非身份映射旧值）
+        detail = self.session.get(EvalRun, self.run_id).detail
+        self.observed.append([item["questionId"] for item in detail["items"]])
+        yield from self.inner.chat_stream(messages, max_tokens)
+
+
 def _run_engine(session: Session, deps: ChatDeps, run_id: int) -> None:
     """以 hr 视角部门直接执行跑分任务体（session_factory 注入测试事务）。"""
     eval_engine.run_eval_run(
@@ -373,6 +391,50 @@ def test_detail逐题结构_citations快照与消息一致(session: Session) -> 
         REFUSAL_TEXT,
         [],
     )
+
+
+# ---------------------------------------------------------------------------
+# ④′ 逐题 detail 进度落库（W6 Task1 回归：部署验收 detail-stall 缺陷）
+# ---------------------------------------------------------------------------
+
+
+def test_跑分中途detail逐题可见_读回进度随题数增长(session: Session) -> None:
+    """④′ 逐题 commit 生效：生成入口读回的 detail.items 逐题增长（[→Q1→Q1Q2→Q1Q2Q3]）。
+    缺陷形态（重赋值共享 list 被 flush 相等比较判无变更、UPDATE 受抑制）：中途恒停
+    首题快照、_finish 收口才跳全量——"进度可查/崩溃保留"意图失效。4 题均必命中被
+    回答，保证每题都经 LLM 观测点。"""
+    admin = _admin_id(session)
+    embedder = StubEmbedder()
+    doc = _add_document(session, _dept_ids(session)["hr"], admin, "HR_进度语料")
+    _add_chunk(session, doc, "密码重置：登录页点击忘记密码，验证手机号后重置。", embedder)
+    _add_chunk(session, doc, "差旅报销：交通费与住宿费凭票据实报销。", embedder)
+    _add_chunk(session, doc, "考勤补卡：迟到需在当月内补卡。", embedder)
+    _add_chunk(session, doc, "年假申请：需提前三天在 OA 提交。", embedder)
+    dept_id = _dept_ids(session)["service"]
+    questions = [
+        _add_question(
+            session, dept_id, "员工如何重置门户登录密码？", "忘记密码后重置。", "factual"
+        ),
+        _add_question(session, dept_id, "差旅费报销标准是多少？", "凭票据实报销。", "factual"),
+        _add_question(session, dept_id, "考勤补卡怎么办理？", "当月内补卡。", "factual"),
+        _add_question(session, dept_id, "年假如何申请？", "提前三天 OA 提交。", "factual"),
+    ]
+    run = _new_run(session, admin)
+    probe = _ProgressProbeLLM(StubLLMProvider(), session, run.id)
+    deps = _make_deps(embedder, _MarkerReranker(["密码", "差旅", "考勤", "年假"]), probe)
+
+    _run_engine(session, deps, run.id)
+    session.expire_all()
+    run = session.get(EvalRun, run.id)
+
+    assert run.status == "done"  # 回归不破坏收口：终态完整
+    assert run.total == 4
+    assert probe.observed == [
+        [],  # Q1 生成前：尚无已完成题
+        [questions[0].id],  # Q2 生成前：Q1 已落库
+        [questions[0].id, questions[1].id],  # Q3 生成前：Q1Q2 已落库
+        [questions[0].id, questions[1].id, questions[2].id],  # Q4 生成前：Q1Q2Q3 已落库
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -11,8 +11,9 @@ assistant 行不走占位+finalize，一次 INSERT 完整行。自动判（判�
 （expected=='[拒答]' 或 qtype==cross_reject，取或防御手工造数）按 answer==REFUSAL_TEXT
 判 correct/wrong；其余 pending（Task 7 人工评判以 judgment 覆写合并）；失败题恒
 pending。detail 结构（Task 7 按此消费，键名勿改）：{"items": [逐题 dict],
-"pendingCount": n}——逐题重赋值触发 JSONB 变更跟踪后即 commit（进度可查、崩溃保留
-已完成题）；整体异常 → failed 且 detail 附 "error"；收口 accuracy=correct/total
+"pendingCount": n}——逐题重赋值并 flag_modified 强制变更跟踪后即 commit（进度可查、
+崩溃保留已完成题；W6 验收实测仅重赋值会被 flush 的相等比较抑制——新旧 dict 共享
+同一 items 列表）；整体异常 → failed 且 detail 附 "error"；收口 accuracy=correct/total
 （pending 计 0、total=0 记 0）+ config 快照 9 字段（锁定阈值/模型/提示词版本）→ done。
 
 事务：任务体自管短会话逐题独立 commit，绝不横跨整个跑分（连接占用红线，chat_stream
@@ -27,6 +28,7 @@ from time import perf_counter
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.clock import get_clock
 from app.core.llm import UpstreamError
@@ -120,7 +122,8 @@ def _run_questions(
     all_dept_id: int,
     questions: list[EvalQuestion],
 ) -> tuple[int, list[dict]]:
-    """逐题执行：detail.items 重赋值后即 commit（进度可查、崩溃保留已完成题）。"""
+    """逐题执行：detail.items 重赋值 + flag_modified 后即 commit（进度可查、崩溃保留
+    已完成题）——仅重赋值不够，见循环内注释。"""
     correct = 0
     items: list[dict] = list(run.detail["items"]) if run.detail else []
     for question in questions:
@@ -129,7 +132,11 @@ def _run_questions(
         )
         correct += item["autoJudgment"] == _CORRECT
         items.append(item)
-        run.detail = {"items": items}  # 重赋值：JSONB 原地改动不被变更跟踪
+        run.detail = {"items": items}
+        # 重赋值的新 dict 与 ORM 记录的旧值共享同一 items 列表（expire_on_commit=False
+        # 不失效重查），flush 的相等比较判"无变更"而抑制 UPDATE（首题旧值来自 DB 反
+        # 序列化的独立对象故幸免）——必须 flag_modified 强制标记 dirty 才真发逐题 UPDATE
+        flag_modified(run, "detail")
         db.commit()
     return correct, items
 
