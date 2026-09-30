@@ -12,7 +12,8 @@ inactive）；readyRate=ready/totalDocs（口径只看 status+deleted_at，待�
 EXISTS(该文档有 chunk 在近 30 天被命中)——文档级反连接，任一块近期命中即整篇不算，
 恰在 30 天线的 last_hit_at 即算近期、恰 30 天前建档不算（created_at 严格小于）；
 expiringSoon=expiry_date <= today+7 AND is_active AND deleted_at IS NULL（含已到期
-未下线——到期下线未跑完的窗口期仍要露出）。
+未下线——到期下线未跑完的窗口期仍要露出）；零召回块清单（F-1011，W5 追加）与零召回
+文档榜为同一口径的文档级/块级两面，口径见 list_zero_recall_chunks docstring 互指。
 
 时间基准一律取注入时钟 get_clock().now()（W1 Clock 先例，测试 FakeClock 前拨构造
 边界）；窗口在 Python 侧折算成绝对时刻再参数绑定（SQL 不做 now()-interval 运算）；
@@ -33,6 +34,7 @@ from app.db.models import Chunk, Department, Document, Message
 _RATE_DIGITS = 4  # 比率统一 4 位小数（0-1 浮点，前端按百分比展示时自行换算）
 _ZERO_RECALL_DAYS = 30  # 零召回观察窗口 30 天，F-1009 口径（固定常量不入 config）
 _EXPIRING_DAYS = 7  # 待过期提前量 7 天，F-1009 口径（"待过期 ≤7 天即黄"）
+_PREVIEW_CHARS = 50  # 零召回块内容预览截断长度（F-1011，api.md §4.5.3）
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,28 @@ class ZeroRecallDoc:
     title: str
     dept_code: str
     created_at: dt.datetime
+
+
+@dataclass(frozen=True)
+class ZeroRecallChunk:
+    """零召回块清单项（F-1011）：文档零召回榜的块级下钻，content_preview 截
+    _PREVIEW_CHARS 字（预览列不整段拖表），created_at 为块建档时刻。"""
+
+    chunk_id: int
+    document_title: str
+    dept_code: str
+    title_path: str
+    content_preview: str
+    created_at: dt.datetime
+
+
+@dataclass(frozen=True)
+class ZeroRecallChunkPage:
+    """零召回块分页结果：items 按 created_at 降序（同刻 id 降序兜底），total 同
+    WHERE 全量计数（§3.5 列表口径，page/pageSize 由 api 层回显）。"""
+
+    items: list[ZeroRecallChunk]
+    total: int
 
 
 @dataclass(frozen=True)
@@ -169,6 +193,55 @@ def _zero_recall_docs(db: Session, now: dt.datetime) -> list[ZeroRecallDoc]:
         .order_by(Document.created_at.asc(), Document.id.asc())
     ).all()
     return [ZeroRecallDoc(row.id, row.title, row.code, row.created_at) for row in rows]
+
+
+def list_zero_recall_chunks(
+    db: Session, days: int, *, page: int, page_size: int
+) -> ZeroRecallChunkPage:
+    """零召回块清单（F-1011）：与 F-1009 文档级零召回榜（_zero_recall_docs）为同一
+    口径的文档级/块级两面——文档级是"任一块近窗口命中即整篇不算"的 NOT EXISTS 反
+    连接，块级（本函数）逐块判 last_hit_at（从未召回或最近一次召回早于窗口起点即
+    入列）。文档闸与文档级逐字一致（is_active+ready，不看 deleted_at，差异依据见
+    _zero_recall_docs）；块侧另加 is_active（停用块同样不可被召回）。days 缺省 30
+    与文档级 _ZERO_RECALL_DAYS 同值，参数可调宽供运营排查（文档级固定 30 天不入
+    config）；窗口起点 = 注入时钟 now-days，Python 侧折算后参数绑定。"""
+    since = get_clock().now() - dt.timedelta(days=days)
+    base = (
+        select(
+            Chunk.id,
+            Document.title,
+            Department.code,
+            Chunk.title_path,
+            Chunk.content,
+            Chunk.created_at,
+        )
+        .join(Document, Document.id == Chunk.document_id)
+        .join(Department, Department.id == Document.dept_id)
+        .where(
+            Chunk.is_active.is_(True),
+            Chunk.last_hit_at.is_(None) | (Chunk.last_hit_at < since),  # 从未召回或超窗口
+            Document.is_active.is_(True),
+            Document.status == "ready",
+        )
+    )
+    total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
+    rows = db.execute(
+        base.order_by(Chunk.created_at.desc(), Chunk.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    items = [
+        ZeroRecallChunk(
+            chunk_id=row.id,
+            document_title=row.title,
+            dept_code=row.code,
+            title_path=row.title_path,
+            content_preview=row.content[:_PREVIEW_CHARS],
+            created_at=row.created_at,
+        )
+        for row in rows
+    ]
+    return ZeroRecallChunkPage(items=items, total=total)
 
 
 def _expiring_docs(db: Session, today: dt.date) -> list[ExpiringDoc]:
