@@ -145,6 +145,7 @@ bash deploy/backup.sh
 ```
 
 - 产物：`backups/rag-YYYYMMDD-HHMMSS.sql.gz`（主库全量 dump，gzip 在宿主侧管道完成）+ `backups/uploads-YYYYMMDD-HHMMSS.tar.gz`（上传目录归档；目录不存在时警告跳过）；结束自动清理超过 7 天的 `backups/*.gz`。
+- 备份目录 `backups/` 已加入 `.gitignore`（备份含全部问答与文档内容，禁止入库，§18.1），勿移出该忽略项。
 - 备份后速检：`ls -lh backups/`——当日 `.sql.gz` 必须非 0 字节；**没做过恢复读回验证的备份不算可用备份**——至少在每次演练时按 3.3(a) 验证一轮。
 
 ### 3.3 恢复步骤（两种口径，动手前先确认口径）
@@ -164,18 +165,19 @@ echo "BK=$BK BU=$BU"
 docker exec ragdemo-pg psql -U rag -c "DROP DATABASE IF EXISTS rag_restore"
 docker exec ragdemo-pg psql -U rag -c "CREATE DATABASE rag_restore"
 
-# 2. 恢复
-gunzip -c "$BK" | docker exec -i ragdemo-pg psql -U rag -d rag_restore
+# 2. 恢复（ON_ERROR_STOP=1：任一 SQL 失败即非零退出，不得静默半成功）
+gunzip -c "$BK" | docker exec -i ragdemo-pg psql -v ON_ERROR_STOP=1 -U rag -d rag_restore
 
 # 3. 读回核对：表清单应与生产库一致，核心表行数应与备份时点一致
 docker exec ragdemo-pg psql -U rag -d rag_restore -c "\dt"
 docker exec ragdemo-pg psql -U rag -d rag_restore -c "SELECT count(*) FROM documents"
 docker exec ragdemo-pg psql -U rag -d rag_restore -c "SELECT count(*) FROM qa_pairs"
-docker exec ragdemo-pg psql -U rag -d rag_restore -c "SELECT count(*) FROM conversations"
+docker exec ragdemo-pg psql -U rag -d rag_restore -c "SELECT count(*) FROM messages"
 
-# 4. 与生产库同口径比对（结果应一致）
+# 4. 与备份时点记录的行数比对（三表同第 3 步口径；演练当天如有新增写入，恢复库行数 ≤ 生产库属正常，差值 = 备份后增量）
 docker exec ragdemo-pg psql -U rag -d rag -c "SELECT count(*) FROM documents"
 docker exec ragdemo-pg psql -U rag -d rag -c "SELECT count(*) FROM qa_pairs"
+docker exec ragdemo-pg psql -U rag -d rag -c "SELECT count(*) FROM messages"
 
 # 5. 演练结束清理验证库
 docker exec ragdemo-pg psql -U rag -c "DROP DATABASE rag_restore"
@@ -198,8 +200,8 @@ docker compose stop app
 docker exec ragdemo-pg psql -U rag -d postgres -c "DROP DATABASE IF EXISTS rag WITH (FORCE)"
 docker exec ragdemo-pg psql -U rag -d postgres -c "CREATE DATABASE rag"
 
-# 3. 恢复主库
-gunzip -c "$BK" | docker exec -i ragdemo-pg psql -U rag -d rag
+# 3. 恢复主库（ON_ERROR_STOP=1：任一 SQL 失败即非零退出——灾难恢复的"成功"信号必须可靠，不得静默半成功）
+gunzip -c "$BK" | docker exec -i ragdemo-pg psql -v ON_ERROR_STOP=1 -U rag -d rag
 
 # 4. 恢复上传目录（归档内含 uploads/ 一级目录，解到其父目录 ./data）
 mkdir -p ./data
