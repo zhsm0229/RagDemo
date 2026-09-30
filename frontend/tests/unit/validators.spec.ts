@@ -3,6 +3,8 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import {
+  badcaseNoteValidator,
+  checkBadcaseNote,
   checkConfirm,
   checkDateRange,
   checkPassword,
@@ -171,6 +173,36 @@ describe('确认字段一致校验（改密页 新密码/确认密码）', () =>
     expect(fail).toHaveBeenCalledWith(undefined)
     expected = 'CCCCDDDD'
     validator({}, 'AAAABBBB', fail)
+    expect(fail).toHaveBeenCalledWith(expect.any(Error))
+  })
+})
+
+describe('badcase 处置理由校验（ADM-03：已忽略必填 1-500，已修语料可选）', () => {
+  it('已忽略：空白拒绝带原型文案，1-500 字通过', () => {
+    expect(checkBadcaseNote('', '已忽略')).toBe('忽略必须说明理由')
+    expect(checkBadcaseNote('   ', '已忽略')).toBe('忽略必须说明理由')
+    expect(checkBadcaseNote(null, '已忽略')).toBe('忽略必须说明理由')
+    expect(checkBadcaseNote('重复提问，语料已覆盖', '已忽略')).toBe(true)
+    expect(checkBadcaseNote('理'.repeat(500), '已忽略')).toBe(true)
+  })
+
+  it('已修语料：空白通过（可选口径），给了则同样 1-500', () => {
+    expect(checkBadcaseNote('', '已修语料')).toBe(true)
+    expect(checkBadcaseNote('   ', '已修语料')).toBe(true)
+    expect(checkBadcaseNote('已补问答对', '已修语料')).toBe(true)
+    expect(checkBadcaseNote('理'.repeat(501), '已修语料')).toBe('处理理由长度须在 1-500 字之间')
+    expect(checkBadcaseNote('理'.repeat(501), '已忽略')).toBe('处理理由长度须在 1-500 字之间')
+  })
+
+  it('badcaseNoteValidator 经 getter 实时取状态：radio 切到已忽略后同一校验器开始拦空', () => {
+    let status = '已修语料'
+    const validator = badcaseNoteValidator(() => status)
+    const pass = vi.fn()
+    validator({}, '', pass)
+    expect(pass).toHaveBeenCalledWith(undefined)
+    status = '已忽略'
+    const fail = vi.fn()
+    validator({}, '', fail)
     expect(fail).toHaveBeenCalledWith(expect.any(Error))
   })
 })

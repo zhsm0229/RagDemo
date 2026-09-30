@@ -109,6 +109,27 @@ export function requiredText(
   })
 }
 
+/**
+ * badcase 处置理由（ADM-03 冻结基线，api.md §4.3.4）：'已忽略' 必填 strip 后 1-500；
+ * '已修语料' 可选，给了则同样 1-500。必填文案对照原型（"忽略必须说明理由"）；
+ * 状态经 getter 实时取——radio 切换即改校验口径，无需重建 rules。
+ */
+export function checkBadcaseNote(value: unknown, status: string): ValidatorResult {
+  const text = typeof value === 'string' ? value.trim() : ''
+  if (text.length === 0) {
+    return status === '已忽略' ? '忽略必须说明理由' : true
+  }
+  if (text.length > 500) return '处理理由长度须在 1-500 字之间'
+  return true
+}
+
+/** badcase 处置理由 el-form validator 工厂：getStatus 实时读当前处理方式 */
+export function badcaseNoteValidator(
+  getStatus: () => string,
+): (rule: unknown, value: unknown, callback: (error?: Error) => void) => void {
+  return toElementValidator((value) => checkBadcaseNote(value, getStatus()))
+}
+
 /** 下拉/日期等必选项 validator 工厂：未选（''/null/undefined）即不通过，文案"请选择{label}" */
 export function requiredPick(
   label: string,
