@@ -4,11 +4,15 @@
 只 import 本模块暴露的 app（uvicorn app.main:app）。
 """
 
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api import (
     admin_audit,
@@ -25,6 +29,7 @@ from app.api import (
     conversations,
     documents,
     feedback,
+    healthz,
 )
 from app.core import errors
 from app.core.assembly import build_embedder, build_llm, build_reranker, load_prompt_pack
@@ -91,6 +96,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 def create_app() -> FastAPI:
     app = FastAPI(title="企业智能工作台", version="0.1.0", lifespan=lifespan)
+    app.include_router(healthz.router)  # 无前缀：探针路径 /healthz（docker healthcheck 消费）
     app.include_router(auth.router, prefix="/api")
     app.include_router(documents.router, prefix="/api")
     app.include_router(admin_qa_pairs.router, prefix="/api")
@@ -110,7 +116,31 @@ def create_app() -> FastAPI:
     app.add_exception_handler(errors.ApiError, errors.api_error_handler)
     app.add_exception_handler(RequestValidationError, errors.validation_error_handler)
     app.add_exception_handler(Exception, errors.unhandled_error_handler)
+    _mount_spa(app)
     return app
+
+
+def _mount_spa(app: FastAPI) -> None:
+    """前端 dist 托管（§12.2 生产仅 app 发布 80 端口的形态）。
+
+    STATIC_DIR 未设置（本机 dev 裸 uvicorn、CI 的 test_mode API 测试）时不挂载，
+    行为与历史完全一致；设置了且存在 index.html 才托管。必须最后注册：catch-all
+    只兜未匹配路径（/docs、/api/** 等先注册者优先生效）。
+    """
+    static_dir = os.getenv("STATIC_DIR", "")
+    if not static_dir or not (Path(static_dir) / "index.html").is_file():
+        return
+    root = Path(static_dir)
+    app.mount("/assets", StaticFiles(directory=root / "assets"), name="spa-assets")
+
+    @app.get("/{spa_path:path}", include_in_schema=False)
+    async def _spa(spa_path: str) -> FileResponse:
+        if spa_path.startswith("api/"):  # 未匹配的 API 路径保持 404 JSON，绝不回前端页
+            raise HTTPException(status_code=404)
+        candidate = (root / spa_path).resolve()
+        if spa_path and candidate.is_relative_to(root.resolve()) and candidate.is_file():
+            return FileResponse(candidate)  # vite 根部零散文件（favicon 等）
+        return FileResponse(root / "index.html")  # 客户端路由（/chat、/kb/**）fallback
 
 
 app = create_app()
