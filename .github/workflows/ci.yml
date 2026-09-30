@@ -19,6 +19,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # 发布入口（standards §13.2）：手动触发 + production 环境审批保护；
+  # VM 未到位前本 job 只产出发布清单（镜像 tag + digest），实机部署由 deploy.sh 执行。
+  workflow_dispatch:
 
 # 最小权限（§6 安全规范）：GITHUB_TOKEN 全局只读 contents:read；gitleaks-action
 # 仅需读仓库与扫描，不开 issue-comment 等额外权限，后续确需再按 job 单独放开。
@@ -149,13 +152,101 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ---------- ⑤ build：全部镜像 docker build 成功（tag = 分支名 + 短 SHA） ----------
+  # ---------- ⑤ build：app 镜像构建（双 tag）；main push 推送 GHCR 并记录 digest ----------
+  # digest 记录在 job summary（deploy/releases.md 的发布记录由里程碑 tag 时人工回填，
+  # §13.2 同 digest 双 tag：分支-短SHA 用于回滚定位，v0.x.y 用于里程碑）。
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # GHCR 推送（仅 main push；PR 只构建不落仓库镜像）
+    outputs:
+      image_ref: ${{ steps.push.outputs.image_ref }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0（SHA pin，防 tag 漂移）
-      - name: Docker build
+      - name: Docker build (双 tag：分支-短SHA)
         run: docker build -f Dockerfile -t "ragdemo:${GITHUB_REF_NAME}-${GITHUB_SHA::7}" .
+      - name: Push to GHCR (main push only)
+        id: push
+        if: github.event_name == 'push'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          IMAGE="ghcr.io/${{ github.repository }}/ragdemo"
+          TAG="${GITHUB_REF_NAME}-${GITHUB_SHA::7}"
+          docker tag "ragdemo:${TAG}" "${IMAGE}:${TAG}"
+          DIGEST=$(docker push "${IMAGE}:${TAG}" 2>&1 | grep -o 'sha256:[a-f0-9]*' | tail -1)
+          REF="${IMAGE%@*}@${DIGEST}"
+          echo "image_ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "### 发布镜像" >> "$GITHUB_OUTPUT"
+          echo "\`${REF}\`（tag \`${TAG}\`）" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------- ⑤b e2e：Playwright L1 确定性冒烟（TEST_MODE stub 全链，每 MR 必跑） ----------
+  # 栈 = compose 起 pg + app（容器内自迁移 + healthz 门）→ 容器内灌 e2e 种子 →
+  # 前端 Playwright（官方 CDN 装 chromium，runner 无网络限制）。红 = 禁合入。
+  e2e:
+    needs: [test, fe-build]
+    runs-on: ubuntu-latest
+    env:
+      TEST_MODE: "true"
+      JWT_SECRET: ci-e2e-secret-0123456789abcdef0123456789abcdef
+      E2E_PASSWORD: e2e-ci-password
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0（SHA pin）
+      - name: Start stack (pg + app)
+        run: |
+          cp .env.example .env
+          docker compose up -d --build pg app
+      - name: Wait for healthz (entrypoint 迁移 + 服务就绪)
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8000/healthz >/dev/null; then echo "ready"; exit 0; fi
+            sleep 5
+          done
+          docker compose logs app
+          exit 1
+      - name: Seed e2e accounts (容器内，口令与 Playwright 侧同源)
+        run: docker compose exec -T -e E2E_PASSWORD="$E2E_PASSWORD" app python -m app.db.e2e_seed
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0（SHA pin）
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend deps + Playwright chromium
+        working-directory: frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Playwright L1 smoke
+        working-directory: frontend
+        run: npm run e2e
+      - name: Upload Playwright artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2（SHA pin）
+        if: always()
+        with:
+          name: playwright-report
+          path: frontend/e2e/.artifacts
+          if-no-files-found: ignore
+
+  # ---------- ⑤c deploy：发布清单产出（workflow_dispatch + production 审批） ----------
+  # VM 到位前的占位实现：汇总本镜像的发布要素（tag/digest/迁移状态/回滚指引），
+  # 实机部署由运维在 VM 上执行 deploy/deploy.sh（runbook §发布）；到位后本 job
+  # 扩展为 SSH/agent 触发远端 deploy.sh（环境密钥走 GitHub Environments）。
+  deploy:
+    if: github.event_name == 'workflow_dispatch'
+    needs: [build, e2e]
+    runs-on: ubuntu-latest
+    environment: production # 审批保护在 repo Settings → Environments 配置
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0（SHA pin）
+      - name: Release manifest
+        run: |
+          {
+            echo "## 发布清单（deploy/releases.md 回填用）"
+            echo "- 镜像引用: \`${{ needs.build.outputs.image_ref }}\`"
+            echo "- 迁移状态: 容器 entrypoint 自动 alembic upgrade head"
+            echo "- 部署步骤: deploy/deploy.sh（拉取 → up → 迁移 → healthz → 冒烟）"
+            echo "- 回滚步骤: deploy/rollback.sh（回上一 digest，§13.4 三红线校验）"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------- ⑥-⑨ 前端流水线（W4 Task 6，working-directory=frontend） ----------
   # 四 job 与后端五阶段同规：lint（eslint+prettier）/ type（vue-tsc）/ test（vitest）/ build（vite build+产物断言）。
