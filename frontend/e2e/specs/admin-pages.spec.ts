@@ -48,7 +48,7 @@ test.describe('管理页（检索测试/提问记录/审计/评测）', () => {
     const xlsxPath = fileURLToPath(new URL('../fixtures/files/eval_题库.xlsx', import.meta.url))
     await fileInput.setInputFiles(xlsxPath)
     await dialog.getByRole('button', { name: /导入|确定/ }).last().click()
-    // 页面明示"题库列表暂无查询端点"：题目经导入后在跑分报告中呈现，无行可断言
-    await expect(page.locator('.el-message').last()).toBeVisible()
+    // 页面明示"题库列表暂无查询端点"：断言导入弹窗关闭（成功路径）即可
+    await expect(dialog).toBeHidden({ timeout: 15_000 })
   })
 })

@@ -171,6 +171,10 @@ def _write_upload_fixture() -> None:
         ],
     )
     make("e2e-fail-redline.docx", ["短正文"])  # 清洗后 <100 字 → §10.3 红线失败（重试恒失败）
+    make(
+        "e2e-upload-docspec.docx",
+        [f"DOC-01 专用流水号 {stamp}。", "第七条 本夹具仅供 documents.spec 的入库用例使用，内容与 latest 互异。"],
+    )
     print("[e2e-seed] 上传夹具已生成（5 份，内容互异）")
 
 

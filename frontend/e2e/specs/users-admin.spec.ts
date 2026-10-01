@@ -29,8 +29,8 @@ test.describe('用户管理', () => {
   test('ADM-05: 用户名校验（重名/1 字）内联拦截', async ({ page }) => {
     const dupErr = await users.createUserExpectError('e2e-hr') // 重名（已存在种子账号）
     expect(dupErr.length).toBeGreaterThan(0) // 后端 409 提示（toast/内联均有中文文案）
-    await users.createUserExpectError('张')
-    await expect(page.getByText(/2-32 位/).last()).toBeVisible()
+    const shortErr = await users.createUserExpectError('张')
+    expect(shortErr).toContain('2-32')
   })
 
   test('AUTH-05: 禁用即时生效（禁用后该账号登录被拒）', async ({ page }) => {

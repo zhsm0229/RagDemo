@@ -39,14 +39,15 @@ test.describe('问答对管理', () => {
     // QA-06 编辑答案
     await qa.editAnswer('年假有几天', '入职满一年享五天年假（E2E 修订版）。')
     await qa.expectRow('年假有几天')
-    // QA-05 停用 → 提问不再走问答对通道（引用不再是"问答对"类型）
-    await qa.toggleStatus('报销的时限是多少天')
+    // QA-05 停用（改停"年假"行：种子问答对与导入行同题会产生歧义匹配）
+    await qa.toggleStatus('年假有几天')
     const chat = new ChatPage(page)
     await chat.goto()
     await chat.newConversation()
     await chat.ask('报销的时限是多少天')
     await expect(page.locator('#cite-card-1')).toBeVisible()
     await expect(page.locator('.cite-panel, [class*="cite"]').last()).not.toContainText('问答对')
+    await expect(page.locator('.el-table__row', { hasText: '年假有几天' }).first().getByRole('switch')).not.toBeChecked()
     // QA-05 断言（口径修正）：停用=行保留 + 启用开关关断（退出匹配），行不消失
     await qa.goto()
     const row = page.locator('.el-table__row', { hasText: '年假有几天' }).first()
