@@ -30,3 +30,6 @@ node_modules/
 .mimosa/
 .zcode/
 deploy/nul
+
+# Playwright 登录态（httpOnly cookie 快照，严禁入库）
+.auth/

@@ -76,6 +76,7 @@ test.describe('文档治理', () => {
   test('DOC-11: 失败文档可重试（状态回解析再终态）', async ({ page }) => {
     const title = `e2e_重试_${Date.now()}`
     await docs.uploadAllowFailure(REDLINE, { title, owner: 'e2e-bot' })
+    await docs.filterByStatusFailed()
     await docs.expectRowFailed(title)
     await docs.retry(title) // 重试 → parsing → 仍失败（扫描件确定性），但状态机走通
     await docs.expectRowFailed(title)
@@ -87,6 +88,10 @@ test.describe('文档治理', () => {
     await docs.expectRowReady(title)
     // 内容不同（绕开 F-1001 查重）+ 同标题同部门 → 版本递增，旧版归档
     await docs.uploadAllowFailure(V2, { title, owner: 'e2e-bot' })
+    // 同主题近似 → 预检置待确认（§10.8 设计行为）：管理员确认激活后版本生效
+    const v2row = page.locator('.el-table__row', { hasText: title }).last()
+    await v2row.getByRole('button', { name: '确认激活' }).click()
+    await page.getByRole('button', { name: /确定/ }).last().click()
     await docs.expectRowReady(title)
     await docs.expectSingleActiveVersion(title)
   })
