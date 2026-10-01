@@ -29,11 +29,10 @@ from app.db.models import Chunk, Department
 from app.services.retrieval import (
     DocHit,
     QaHit,
-    match_qa,
     normalize_question,
     rerank_and_fold,
-    search_chunks,
 )
+from app.services.vector_store import VectorStore
 
 _DEPT_CODES = ("service", "hr", "all")
 _MSG_BAD_DEPT = "部门编码无效：{code}（可选 service/hr/all）"  # 与 qa_pairs._resolve_dept 同文案
@@ -75,16 +74,19 @@ def run_retrieval_test(
     settings: Settings,
     question: str,
     dept_code: str,
+    store: VectorStore,
 ) -> RetrievalTestReport:
     """重放检索管道：归一化 → embed（问答链路同一 embedder 实例，指纹空间一致）→
-    qa 匹配 + 文档召回重排折叠。embedder/reranker 经 app.state.chat_deps 注入
+    qa 匹配 + 文档召回重排折叠。embedder/reranker/store 经 app.state.chat_deps 注入
     （装配层唯一选择实现，standards §1.2）；召回余弦在 fold 覆写前按 chunk_id
     留存供展示。"""
     normalized = normalize_question(question)
     query_vec = embedder.embed([normalized])[0]  # 一次计算，qa 与文档链路复用（chat.py 同款）
     dept_ids = _view_dept_ids(db, dept_code)
-    qa_hit = match_qa(db, query_vec, dept_ids, settings.qa_threshold)
-    hits = search_chunks(db, query_vec, dept_ids, settings.retriever_top_k, settings.hnsw_ef_search)
+    qa_hit = store.match_qa(db, query_vec, dept_ids, settings.qa_threshold)
+    hits = store.search_chunks(
+        db, query_vec, dept_ids, settings.retriever_top_k, settings.hnsw_ef_search
+    )
     recall_cosine = {hit.chunk_id: hit.similarity for hit in hits}
     kept, folded_out = rerank_and_fold(
         reranker,

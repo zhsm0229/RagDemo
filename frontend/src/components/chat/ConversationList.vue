@@ -1,9 +1,10 @@
 <script setup lang="ts">
 /**
  * 会话列表（P2 左栏，对照原型 conv-list/conv-item）：新建 / 删除入口（二次确认在
- * 页面层）/ 点击切换 / 活跃高亮 / 时间展示（今天只显时分，同年月日时分，更早年带年份）。
+ * 页面层）/ 点击切换 / 活跃高亮 / 时间展示（相对口径归 utils/fmtTimeRelative）。
  */
 import type { ConversationItem } from '@/api/chat'
+import { fmtTimeRelative } from '@/utils/format'
 
 defineProps<{
   items: ConversationItem[]
@@ -15,17 +16,6 @@ const emit = defineEmits<{
   create: []
   remove: [id: number]
 }>()
-
-function formatTime(iso: string): string {
-  const date = new Date(iso)
-  if (Number.isNaN(date.getTime())) return ''
-  const pad = (n: number): string => String(n).padStart(2, '0')
-  const hhmm = `${pad(date.getHours())}:${pad(date.getMinutes())}`
-  const now = new Date()
-  if (date.toDateString() === now.toDateString()) return hhmm
-  const md = `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${hhmm}`
-  return date.getFullYear() === now.getFullYear() ? md : `${date.getFullYear()}-${md}`
-}
 </script>
 
 <template>
@@ -44,7 +34,7 @@ function formatTime(iso: string): string {
       >
         <div class="conv-text">
           <div class="conv-title">{{ c.title }}</div>
-          <div class="conv-time">{{ formatTime(c.updatedAt) }}</div>
+          <div class="conv-time">{{ fmtTimeRelative(c.updatedAt) }}</div>
         </div>
         <el-button class="del" link size="small" @click.stop="emit('remove', c.id)">删除</el-button>
       </div>

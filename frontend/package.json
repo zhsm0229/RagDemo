@@ -13,7 +13,8 @@
     "lint:prettier": "prettier --check .",
     "lint:fix": "eslint --fix . && prettier --write .",
     "test": "vitest run",
-    "e2e": "playwright test --config=e2e/playwright.config.ts"
+    "e2e": "playwright test --config=e2e/playwright.config.ts",
+    "e2e:up": "docker compose -f ../docker-compose.yml -f ../deploy/docker-compose.e2e.yml up -d --build pg app"
   },
   "dependencies": {
     "element-plus": "2.14.6",

@@ -25,23 +25,26 @@ from time import perf_counter
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import DbSession, ReadyUser
 from app.core.clock import get_clock
-from app.core.errors import ERR_DAILY_LIMITED, ERR_INTERNAL, ApiError
+from app.core.errors import ERR_DAILY_LIMITED, ApiError
 from app.core.llm import UpstreamError
-from app.db.models import Conversation, Department, Message, User
-from app.services.chat import ChatDeps, prepare_turn, resolve_owned_conversation
+from app.db.models import Conversation, Message, User
+from app.services.chat import (
+    ChatDeps,
+    load_recent_history,
+    prepare_turn,
+    resolve_owned_conversation,
+)
 from app.services.chat_stream import event_stream, interrupt_turn
+from app.services.departments import all_dept_id
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 _QUESTION_MAX_CHARS = 2000  # §21.5：问题 strip 后 1-2000 字
-_ALL_DEPT_CODE = "all"  # 全员部门 code（F-502：检索范围恒为 [用户部门, 全员]）
 _MSG_DAILY_LIMITED = "今日提问次数已达上限，请明天再试"
-_MSG_INTERRUPTED = "系统繁忙，请稍后重试"
 
 
 class ChatStreamRequest(BaseModel):
@@ -115,39 +118,6 @@ def _persist_placeholder(
     return user_msg.id, assistant.id
 
 
-def _load_history(
-    db: Session, conversation_id: int, current_user_msg_id: int
-) -> list[tuple[str, str]]:
-    """最近 3 轮（6 条）历史（Task 9 强制移交①）：created_at DESC LIMIT 6 再 reversed。
-
-    id < current_user_msg_id 排除本轮 user 消息（prepare 的 question 另传，不得重复进
-    history）；is_active 过滤中断占位行；同事务 now() 同刻以 id 兜底排序；奇数条（上轮
-    断流留下悬空 user）丢弃最新一条，保证严格 (user, assistant) 轮次对。部门过滤豁免
-    说明：会话归属已在上游 _resolve_conversation 校验，本查询随之继承本人边界。
-    """
-    rows = db.execute(
-        select(Message.role, Message.content)
-        .where(
-            Message.conversation_id == conversation_id,
-            Message.id < current_user_msg_id,
-            Message.is_active.is_(True),
-        )
-        .order_by(Message.created_at.desc(), Message.id.desc())
-        .limit(6)
-    ).all()
-    if len(rows) % 2 == 1:
-        rows = rows[1:]
-    return [(role, content) for role, content in reversed(rows)]
-
-
-def _all_dept_id(db: Session) -> int:
-    """全员部门 id（F-502）：种子幂等存在，缺失属环境装配错误按 500 兜底拒绝。"""
-    dept_id = db.scalar(select(Department.id).where(Department.code == _ALL_DEPT_CODE))
-    if dept_id is None:
-        raise ApiError(ERR_INTERNAL, _MSG_INTERRUPTED, 500)
-    return dept_id
-
-
 @router.post("/stream")
 def chat_stream(
     body: ChatStreamRequest, user: ReadyUser, db: DbSession, request: Request
@@ -158,9 +128,9 @@ def chat_stream(
         raise ApiError(ERR_DAILY_LIMITED, _MSG_DAILY_LIMITED, 429)
     conversation = _resolve_conversation(db, user, body.conversationId, body.question)
     user_msg_id, assistant_msg_id = _persist_placeholder(db, conversation, user, body.question)
-    history = _load_history(db, conversation.id, user_msg_id)
+    history = load_recent_history(db, conversation.id, user_msg_id)
     try:
-        plan = prepare_turn(db, deps, user.dept_id, _all_dept_id(db), body.question, history)
+        plan = prepare_turn(db, deps, user.dept_id, all_dept_id(db), body.question, history)
     except UpstreamError:
         interrupt_turn(assistant_msg_id)  # CHAT-12：事务①已提交，不留 is_active=true 幽灵占位
         raise  # 开流前失败：交全局 500 兜底（话术脱敏不变），事务随依赖 teardown 回滚

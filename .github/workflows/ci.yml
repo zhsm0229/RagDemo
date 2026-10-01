@@ -192,10 +192,10 @@ jobs:
       E2E_PASSWORD: e2e-ci-password
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0（SHA pin）
-      - name: Start stack (pg + app)
+      - name: Start stack (pg + app, TEST_MODE via e2e override)
         run: |
           cp .env.example .env
-          docker compose up -d --build pg app
+          docker compose -f docker-compose.yml -f deploy/docker-compose.e2e.yml up -d --build pg app
       - name: Wait for healthz (entrypoint 迁移 + 服务就绪)
         run: |
           for i in $(seq 1 60); do

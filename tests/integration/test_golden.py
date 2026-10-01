@@ -363,7 +363,9 @@ def test_invariants_reject_pending_tamper() -> None:
     with pytest.raises(AssertionError, match="种子不得 pending"):
         check_pending_uniformity(seeded_pending)
 
-    mixed = deepcopy(load_manifest())  # 显式构造混杂：table 行标 pending + 同 kind 追加非 pending 行
+    mixed = deepcopy(
+        load_manifest()
+    )  # 显式构造混杂：table 行标 pending + 同 kind 追加非 pending 行
     # （不依赖清单当前投放状态：表格样本投放后其行已非 pending，写死旧状态会随投放自然失效）
     next(e for e in mixed if e["file"] == "golden/hr_制度_表格_v1.docx")["pending"] = True
     mixed.append(

@@ -69,6 +69,7 @@ def build_llm(settings: Settings, temperature: float = 0.2) -> LLMProvider:
         model=settings.llm_model,
         timeout_s=settings.llm_timeout_s,
         temperature=temperature,
+        effort=settings.llm_effort or None,
     )
 
 

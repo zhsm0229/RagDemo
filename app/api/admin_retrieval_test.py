@@ -82,7 +82,7 @@ def retrieval_test(
     问题向量与检索侧同指纹空间（documents.py._request_embedder 同款约束）。"""
     deps = request.app.state.chat_deps
     report: RetrievalTestReport = run_retrieval_test(
-        db, deps.embedder, deps.reranker, deps.settings, body.question, body.deptCode
+        db, deps.embedder, deps.reranker, deps.settings, body.question, body.deptCode, deps.store
     )
     return {
         "code": 0,

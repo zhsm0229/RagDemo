@@ -305,8 +305,41 @@ def test_interrupted_stream_marks_placeholder_inactive_and_retry_creates_new_pai
     assert [row.role for row in rows] == ["user", "assistant", "user", "assistant"]
     assert rows[0].id == broken_row.id - 1 and rows[1].id == broken_row.id  # 旧行原地不动
     assert (rows[1].content, rows[1].is_active) == ("", False)  # 旧占位保持失败态
-    assert rows[2].content == "那病假呢"  # 重试产生新 user 消息
-    assert rows[3].is_active is True and rows[3].content != ""  # 新 assistant 正常收尾
+
+
+# ---------- ④b 空正文防护（2026-10-01 事故）：reasoning 烧尽预算 → 零正文按可重试失败 ----------
+
+
+def test_empty_llm_output_treated_as_retryable_failure(chat_client, session) -> None:
+    """LLM 流正常耗尽但零正文（推理模型 reasoning 烧尽 max_tokens 的事故形态）：
+    必须转 error(5001, retryable) 且占位行中断标记——严禁空串当正常回答落库/进缓存。"""
+    make_user(session, "emptyuser", "right-one", role="member")
+    _seed_rag_chunk(
+        session, session.scalars(select(User).where(User.username == "emptyuser")).one()
+    )
+    _override_reranker_high()
+    assert login_as(chat_client, "emptyuser", "right-one").status_code == 200
+
+    class _NoopLLM(StubLLMProvider):
+        """零产出替身：流"正常结束"但无任何 token（finish=length 无 content 的形态）。"""
+
+        def chat_stream(self, messages, max_tokens):
+            return iter(())
+
+    app.state.chat_deps.llm = _NoopLLM()
+    resp = post_chat(chat_client, QUESTION)
+
+    assert resp.status_code == 200
+    events = _parse_sse(resp.text)
+    assert [name for name, _ in events] == ["citations", "error"]  # 无 token 事件
+    assert events[-1][1] == {
+        "code": 5001,
+        "message": "生成服务暂时不可用，请重试",
+        "retryable": True,
+    }
+    conversation = _conversation_row(session)
+    (_, row) = _messages(session, conversation.id)
+    assert (row.content, row.is_active) == ("", False)  # 空串未落库，中断标记
 
 
 # ---------- ④b prepare 阶段上游故障：500 兜底且不留幽灵占位行（CHAT-12） ----------

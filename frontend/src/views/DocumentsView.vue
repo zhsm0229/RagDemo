@@ -66,6 +66,13 @@ function syncPolling(): void {
   }
 }
 
+/** 弹窗关闭即刷新（§22.3 关闭即刷新语义）：失败提交的行（解析失败/待确认）
+ * 同样已落库，无条件刷新保证立即可见（取消路径多一次廉价列表调用，可接受）。 */
+function onUploadClosed(): void {
+  uploadVisible.value = false
+  refresh()
+}
+
 function refresh(): void {
   void load()
 }
@@ -240,7 +247,11 @@ function onZipImported(): void {
       />
     </div>
 
-    <UploadDialog :visible="uploadVisible" @close="uploadVisible = false" @uploaded="onUploaded" />
+    <UploadDialog
+      :visible="uploadVisible"
+      @close="onUploadClosed"
+      @uploaded="onUploaded"
+    />
     <ZipImportDialog :visible="zipVisible" @close="zipVisible = false" @imported="onZipImported" />
   </div>
 </template>

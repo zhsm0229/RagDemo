@@ -18,8 +18,6 @@ from datetime import date
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, Query, Request, UploadFile
-from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session
 
 from app.api.deps import AdminUser, DbSession
 from app.core.assembly import build_embedder
@@ -28,9 +26,12 @@ from app.core.config import get_settings
 from app.core.errors import ERR_PARAM_INVALID, ApiError
 from app.core.storage import LocalFileStorage
 from app.db.base import SessionLocal
-from app.db.models import Department, Document
+from app.db.models import Document
 from app.services import ingest as ingest_service
 from app.services import metadata_suggest, zip_import
+from app.services.departments import resolve_dept_id
+from app.services.document_views import list_documents as list_document_rows
+from app.services.document_views import list_versions
 from app.services.ingest import IngestDeps, process_document
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -38,14 +39,18 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 _ALLOWED_STATUS: tuple[str, ...] = ("pending", "parsing", "ready", "failed")  # 与 DDL CHECK 同源
 _MAX_UPLOAD_BYTES: int = 50 * 1024 * 1024  # 与 check_sync 的 50MB 上限同源（API 侧早拒用）
 _MSG_NOT_FOUND = "文档不存在"
-_ESCAPES = (("\\", "\\\\"), ("%", "\\%"), ("_", "\\_"))  # §22：ILIKE 通配符按字面匹配
 
 
-def _escape_like(keyword: str) -> str:
-    """§22：`%`/`_`/`\\` 逐一转义，关键字按字面匹配不展开为通配（同 qa_pairs 口径）。"""
-    for raw, safe in _ESCAPES:
-        keyword = keyword.replace(raw, safe)
-    return keyword
+def build_ingest_deps() -> IngestDeps:
+    """异步段依赖包（装配口径同 T13，供本文件与 document_rebuild 共用）：
+    embedder 走装配工厂（真实 TEI；test_mode 回 Stub）。"""
+    settings = get_settings()
+    return IngestDeps(
+        parser_settings=settings,
+        embedder=build_embedder(settings),
+        clock=get_clock(),
+        storage=LocalFileStorage(settings.storage_dir),
+    )
 
 
 def _early_reject_oversize(file: UploadFile) -> None:
@@ -61,29 +66,10 @@ def _early_reject_oversize(file: UploadFile) -> None:
         raise ApiError(ERR_PARAM_INVALID, "文件超过 50MB 上限", 422)
 
 
-def _resolve_dept(db: Session, code: str) -> int:
-    """部门 code → dept_id（W2 移交的枚举校验在本任务落地）：枚举外 422 中文原因。"""
-    dept = db.scalars(select(Department).where(Department.code == code)).first()
-    if dept is None:
-        raise ApiError(ERR_PARAM_INVALID, f"部门编码无效：{code}（可选 service/hr/all）", 422)
-    return dept.id
-
-
-def _build_deps() -> IngestDeps:
-    """异步段依赖包（装配口径同 T13）：embedder 走装配工厂（真实 TEI；test_mode 回 Stub）。"""
-    settings = get_settings()
-    return IngestDeps(
-        parser_settings=settings,
-        embedder=build_embedder(settings),
-        clock=get_clock(),
-        storage=LocalFileStorage(settings.storage_dir),
-    )
-
-
 def _process_in_background(doc_id: int) -> None:
     """后台进程段入口：请求会话已关，独立 SessionLocal 执行；失败由状态机落 failed。"""
     with SessionLocal() as session:
-        process_document(session, _build_deps(), doc_id)
+        process_document(session, build_ingest_deps(), doc_id)
 
 
 def _doc_payload(doc: Document, dept_code: str) -> dict:
@@ -128,7 +114,7 @@ def upload_document(
         raise ApiError(ERR_PARAM_INVALID, "请先勾选内容合规确认后再上传", 422)
     _early_reject_oversize(file)
     meta = {
-        "dept_id": _resolve_dept(db, dept),
+        "dept_id": resolve_dept_id(db, dept),
         "title": title,
         "owner_name": owner,
         "effective_date": effectiveDate,
@@ -144,7 +130,7 @@ def upload_document(
         file.content_type or "",
     )
     if get_settings().test_mode:  # 测试模式同步执行，响应即可断言终态；生产走后台任务
-        process_document(db, _build_deps(), doc.id)
+        process_document(db, build_ingest_deps(), doc.id)
     else:
         background.add_task(_process_in_background, doc.id)
     return {"code": 0, "message": "ok", "data": {"id": doc.id, "status": doc.status}}
@@ -167,7 +153,7 @@ def import_documents_zip(
 
     def on_accepted(doc_id: int) -> None:
         if get_settings().test_mode:
-            process_document(db, _build_deps(), doc_id)
+            process_document(db, build_ingest_deps(), doc_id)
         else:
             background.add_task(_process_in_background, doc_id)
 
@@ -214,39 +200,59 @@ def list_documents(
     page: Annotated[int, Query(ge=1)] = 1,
     pageSize: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> dict:
-    """文档列表（§22.1）：过滤条件可选，created_at 降序（同刻 id 降序兜底），分页返回。"""
-    filters = []
-    if dept is not None:
-        filters.append(Document.dept_id == _resolve_dept(db, dept))
-    if status is not None:
-        if status not in _ALLOWED_STATUS:
-            raise ApiError(ERR_PARAM_INVALID, f"状态取值无效：{status}", 422)
-        filters.append(Document.status == status)
-    if keyword:
-        like = f"%{_escape_like(keyword)}%"
-        filters.append(
-            or_(
-                Document.title.ilike(like, escape="\\"),
-                Document.original_filename.ilike(like, escape="\\"),
-            )
-        )
-    stmt = select(Document, Department.code).join(Department, Document.dept_id == Department.id)
-    if filters:
-        stmt = stmt.where(*filters)
-    total = db.scalar(select(func.count()).select_from(stmt.subquery()))
-    rows = db.execute(
-        stmt.order_by(Document.created_at.desc(), Document.id.desc())
-        .offset((page - 1) * pageSize)
-        .limit(pageSize)
-    ).all()
+    """文档列表（§22.1）：过滤条件可选，created_at 降序（同刻 id 降序兜底），分页返回。
+    过滤语句与分页在 services/document_views（§1.6 api 禁直写查询），本层只做参数
+    校验（dept code 枚举 / status 枚举）与 DTO 组装。"""
+    _check_status(status)
+    rows, total = list_document_rows(
+        db,
+        dept_id=resolve_dept_id(db, dept) if dept is not None else None,
+        status=status,
+        keyword=keyword,
+        page=page,
+        page_size=pageSize,
+    )
     return {
         "code": 0,
         "message": "ok",
         "data": {
             "items": [_doc_payload(doc, code) for doc, code in rows],
-            "total": total or 0,
+            "total": total,
             "page": page,
             "pageSize": pageSize,
+        },
+    }
+
+
+def _check_status(status: str | None) -> None:
+    """status 枚举校验：取值外 422 中文原因（与 DDL CHECK 同源的 _ALLOWED_STATUS）。"""
+    if status is not None and status not in _ALLOWED_STATUS:
+        raise ApiError(ERR_PARAM_INVALID, f"状态取值无效：{status}", 422)
+
+
+@router.get("/{doc_id}/versions")
+def get_document_versions(doc_id: int, user: AdminUser, db: DbSession) -> dict:
+    """版本历史（F-303，W7 补齐）：同部门同主题全部代次按 version 降序（含当前行），
+    归档版本在案可追溯；寻址文档不存在 404。查询在 services/document_views。"""
+    rows = list_versions(db, doc_id)
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": {
+            "items": [
+                {
+                    "id": row.id,
+                    "version": row.version,
+                    "status": row.status,
+                    "isActive": row.is_active,
+                    "effectiveDate": row.effective_date.isoformat(),
+                    "sizeBytes": row.size_bytes,
+                    "ownerName": row.owner_name,
+                    "uploadedBy": row.uploaded_by,
+                    "createdAt": row.created_at.isoformat(),
+                }
+                for row in rows
+            ]
         },
     }
 
@@ -263,7 +269,7 @@ def retry_document(
     if doc.status != "failed":
         raise ApiError(ERR_PARAM_INVALID, "仅失败状态的文档可以重试", 422)
     if get_settings().test_mode:
-        process_document(db, _build_deps(), doc.id)
+        process_document(db, build_ingest_deps(), doc.id)
     else:
         doc.status = "parsing"  # 后台接管前先落 parsing：列表即时反馈（DOC-11 状态回 parsing）
         db.commit()

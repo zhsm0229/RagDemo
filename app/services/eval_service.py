@@ -24,7 +24,7 @@ r"""评测题库业务：Excel 整批导入（F-601）、模板数据与跑分�
 
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.clock import Clock, get_clock
@@ -217,6 +217,23 @@ def create_eval_run(db: Session, actor_user_id: int, name: str, perspective_dept
     )
     db.commit()
     return run.id
+
+
+def list_eval_runs(db: Session, page: int, page_size: int) -> tuple[list[EvalRun], int]:
+    """跑分任务分页列表（自 api/admin_eval.py 下沉，§1.6）：created_at DESC（同刻 id
+    降序兜底），返回 (当前页行, 总数)。"""
+    total = db.scalar(select(func.count()).select_from(EvalRun)) or 0
+    rows = (
+        db.execute(
+            select(EvalRun)
+            .order_by(EvalRun.created_at.desc(), EvalRun.id.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        .scalars()
+        .all()
+    )
+    return list(rows), total
 
 
 # ---------------------------------------------------------------------------

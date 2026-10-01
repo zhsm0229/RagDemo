@@ -138,6 +138,26 @@ Linux（部署机；`crontab -e` 追加一行，仓库路径按实际调整）�
 - 前置：`ragdemo-pg` 在运行且 healthy（`docker inspect -f '{{.State.Health.Status}}' ragdemo-pg`）；失败先查上述日志，再手工按 3.2 复现。
 - 登记核查：Windows `schtasks /Query /TN "ragdemo-daily-backup"`；Linux `crontab -l`。
 
+### 3.1b 知识缺口周报导出调度（F-1010"每周自动生成"，W7 补齐）
+
+应用内无调度器（AGENTS"能不加就不加"），周报自动化 = OS 调度器拉 CLI，与 backup 同口径。CLI：`python -m app.services.knowledge_gap [--week-offset 1] [--out 目录]`（缺省导出上周榜单 `knowledge-gap-YYYYMMDD.csv`，UTF-8 BOM Excel 直开）。
+
+Windows（Git Bash 语义，管理员 PowerShell 一次性注册；venv 路径按实际调整）：
+
+```bat
+schtasks /Create /TN "ragdemo-weekly-gap" /SC WEEKLY /D MON /ST 06:00 /TR "\"D:\Project\ZCodeProject\RagDemo\.venv\Scripts\python.exe\" -m app.services.knowledge_gap --week-offset 1 --out D:\Project\ZCodeProject\RagDemo\backups"
+```
+
+Linux（`crontab -e` 追加）：
+
+```bash
+0 6 * * 1 cd /opt/ragdemo && .venv/bin/python -m app.services.knowledge_gap --week-offset 1 --out backups >> backups/knowledge-gap-cron.log 2>&1
+```
+
+- 前置：`DATABASE_URL` 指向目标库（venv 内运行读 `.env`）；管理界面（/admin 知识缺口页）为实时聚合视图，与导出同 SQL 口径，导出仅是留档交付物。
+- 登记核查：Windows `schtasks /Query /TN "ragdemo-weekly-gap"`；Linux `crontab -l`。
+
+
 ### 3.2 手动备份
 
 ```bash
@@ -306,3 +326,47 @@ python tests/fixtures/tools/make_sample_docx.py   # 写出 tests/fixtures/sample
 | 2026-09-30 | 2（rag_test_b） | 人力 | 客服题 10/10 | 对照组拒答挂人工（同上） | 0.8333 | T9 测试者（AI） | Run B 对称：byQtype cross_reject accuracy 1.0 |
 | 2026-09-30 | 1 | 客服 | 人力题 7/9 拒答（2 漏拒 rerank 0.6509/0.6578；另 1 题 rerank 超时 infra err） | 对照 2/2 录分 correct（另 2 题 rerank 超时挂人工） | 0.7500 | 部署验收（AI） | 真实 embedding 复测：越界引用 0/19 机检 ✓、config 快照 9 字段落档；漏拒根因=全员手册「考勤与休假」语义重叠，阈值/语料治理结论见验收报告 §5.2；执行窗口撞 rerank 批量负载 |
 | 2026-09-30 | 3 | 人力 | 客服题实得 2/2 拒答（q11/q18，auto correct）；其余 22 题全部 rerank 超时 infra err（21:09-22:44 执行窗口与用户批量作业撞车，TEI rerank 队列 8-12 深） | 对照组 0/4 实答（全 infra err，无可录分） | 0.0833（失真：infra err 记 pending 计 0） | 部署验收（AI） | hr 视角对称矩阵被负载摧毁，**有效样本 2/24、方向正确但不足判据，留负载解除后复测**；accuracy 0.0833 不具评价意义；复测口径：避开批量解析/embedding 窗口（见 §5.5 真实模式复测口径注） |
+
+## 6. 模型版本表（§12.2-8：升级前/定期对模型目录 hash 复核）
+
+> hash 基准必须在可信外网终端从官方发布页/官方 repo revision commit 获取，双人复核后登记。
+> embedding 模型升级即全库重建向量索引（§13.4 红线③）；LLM 变更须附评测对比（§17.3）。
+
+| 模型 | 用途 | 版本/revision | 获取源 | hash（sha256） | 登记日期 | 复核人 |
+|------|------|---------------|--------|----------------|----------|--------|
+| BAAI/bge-m3 | embedding（1024 维，pooling=cls） | main@（待登记 revision） | hf-mirror.com（构建期/预热期下载） | 待部署机登记 | — | — |
+| BAAI/bge-reranker-v2-m3 | rerank（logit→sigmoid 应用侧归一） | main@（待登记 revision） | hf-mirror.com | 待部署机登记 | — | — |
+| MinerU 2.5.4 pipeline 模型族 | PDF 版面/表格/OCR（CPU ONNX） | mineru==2.5.4（ModelScope 源） | modelscope | 待首次拉起后登记 | — | — |
+| deepseek-flash（云） | 生成 | DeepSeek-V4.1-Flash | api.deepseek.com（云 API，无本地工件） | 不适用（云侧） | 2026-09-29 | — |
+| 内网 LLM（预案） | 生成（合规=禁出网时） | Qwen2.5-32B-Instruct AWQ | 待定 | 待定 | — | — |
+
+本地/部署机模型目录：`./data/tei-models/`（docker/download_models.py 预热，hf-mirror +
+HF_HUB_DISABLE_XET=1）。升级操作：改 download_models.py 钉的 revision → 重建索引（红线③）→
+回归黄金样本与评测集 → 本表登记新 hash。
+
+## 7. 常见故障排查
+
+| 症状 | 首查 | 处置 |
+|------|------|------|
+| 容器 unhealthy（app） | `docker compose logs app`；`curl -v localhost:8000/healthz` | healthz 500=DB 断连：查 pg 容器与 DATABASE_URL；健康即过 |
+| 问答报"生成服务暂时不可用" | TEI/LLM 上游：`docker logs ragdemo-tei-rerank`；DeepSeek 余额 | TEI 未就绪等 healthcheck 转绿；LLM 侧核对 key/额度（错误码 4xxx 脱敏，详见日志 request_id） |
+| 问答明显变慢（>30s） | 本机 CPU 负载（rerank bcrypt/解析并发）；`docker stats` | CPU rerank 属 dev 形态；生产 GPU TEI；避开批量解析窗口（见 §5.5 复测口径） |
+| 上传 409 | 精确查重 F-1001（content_hash 命中已存在文档） | 属预期行为：复用已有文档或先停用旧版 |
+| 上传后"疑似扫描件或空文档" | 解析红线（§10.3）：有效字符 < max(100, 原文×10%) | 文本型 PDF 走 pypdf 降级仍失败=扫描件，需 MinerU（本机未部署时属预期）；核对 parse_error 字段 |
+| 登录 401"剩余尝试次数 N" | failed_attempts 累计（§5.4 持久锁） | admin 解锁或等 locked_until 过期；连续失败源于自动化时，重跑 e2e_seed 复位口令后再跑 |
+| 登录 429 | 滑动窗口（60s/10 次·IP+用户名，进程内） | 等窗口滑出或重启 app 容器（窗口态不持久） |
+| alembic 迁移失败拒启 | entrypoint fail-fast（§12.2-3） | 看容器日志定位迁移脚本；禁止手改库结构（§4.5），修复迁移后重起 |
+
+## 8. 合规轨道切换（决策 3 双轨：云 API ↔ 内网模型）
+
+切换只改 `.env` 三键（代码零改动，六接口装配层切换，§1.2）：
+
+| 项 | 云轨（现状） | 内网轨 |
+|----|--------------|--------|
+| LLM_BASE_URL | https://api.deepseek.com/v1 | http://<内网vLLM-IP>:8000/v1 |
+| LLM_API_KEY | DeepSeek key | 内网 vLLM 无鉴权时可留空 |
+| LLM_MODEL | deepseek-flash | Qwen2.5-32B-Instruct AWQ |
+
+步骤：①合规书面结论回填 docs/compliance-checklist-2026-09-30.md 第五节 → ②内网轨需
+GPU（≥1×24G）+ vLLM 就绪 → ③改 `.env` 三键重启 app → ④跑评测集对比（§17.3，无对比不
+上线）→ ⑤runbook 本表与模型版本表同步。RAGFlow 基线环境同受出网白名单约束（§7.6）。

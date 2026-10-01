@@ -75,6 +75,7 @@ class OpenAICompatLLMProvider:
         model: str,
         timeout_s: float = 60.0,
         temperature: float = 0.2,
+        effort: str | None = None,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.base_url: str = base_url
@@ -82,6 +83,7 @@ class OpenAICompatLLMProvider:
         self.model: str = model
         self.timeout_s: float = timeout_s
         self.temperature: float = temperature
+        self.effort: str | None = effort
         self.transport: httpx.BaseTransport | None = transport
         self.last_usage: tuple[int, int] | None = None
 
@@ -92,8 +94,9 @@ class OpenAICompatLLMProvider:
         return {"Authorization": f"Bearer {self.api_key}"}
 
     def _payload(self, messages: Sequence[Mapping[str, str]], max_tokens: int) -> dict[str, object]:
-        """请求体：model/max_tokens/stream/temperature/messages 原样 + include_usage。"""
-        return {
+        """请求体：model/max_tokens/stream/temperature/messages 原样 + include_usage；
+        effort 推理力度缺席不下发（供应商缺省）。"""
+        payload: dict[str, object] = {
             "model": self.model,
             "max_tokens": max_tokens,  # 只透传：钳制在调用方（管道）
             "stream": True,
@@ -101,6 +104,9 @@ class OpenAICompatLLMProvider:
             "messages": [dict(message) for message in messages],
             "stream_options": {"include_usage": True},
         }
+        if self.effort:
+            payload["effort"] = self.effort
+        return payload
 
     def chat_stream(self, messages: Sequence[Mapping[str, str]], max_tokens: int) -> Iterator[str]:
         """逐段 yield 回答片段；正常耗尽（见 data: [DONE]）后填 last_usage，否则保持 None。

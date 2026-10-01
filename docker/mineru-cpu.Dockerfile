@@ -12,12 +12,15 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # 版本钉住：2.5.x 为 pipeline（ONNX 后端，§12.5）稳定线；PyPI 走阿里镜像。
-# torch 预装 CPU 版（+cpu 仅存在于 PyTorch 轮子镜像源）：否则 pip 默认解析 CUDA 栈，
+# torch 预装 CPU 版（+cpu 仅在 PyTorch 轮子镜像源有）：否则 pip 默认解析 CUDA 栈，
 # 多下载 3-4GB（弱网环境构建时间不可接受，实测国内源 150KB/s 级）。
-RUN pip install --no-cache-dir \
+# 拆两层：torch 层成功即缓存，mineru 依赖再失败不重下 174MB；PIP_DEFAULT_TIMEOUT
+# 放宽（默认 15s，弱网必超时）+ retries 10。
+ENV PIP_DEFAULT_TIMEOUT=120
+RUN pip install --no-cache-dir --retries 10 \
       -f https://mirrors.aliyun.com/pytorch-wheels/cpu/ \
       "torch==2.5.1+cpu" \
-    && pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ \
+ && pip install --no-cache-dir --retries 10 -i https://mirrors.aliyun.com/pypi/simple/ \
       "mineru[core]==2.5.4" "modelscope"
 
 EXPOSE 8000

@@ -7,7 +7,7 @@ import { ChatPage } from '../pages/ChatPage'
 // 有候选即"命中"，拒答语义在 stub 下不可测（红线本身由 API 测试与评测集把守）。
 test.skip(process.env.E2E_REAL !== '1', 'L2 真实链路用例：需 E2E_REAL=1（TEI+LLM 就绪）')
 
-test('CHAT-09 @real: 无关问题逐字拒答不编造', async ({ page }) => {
+test('CHAT-03 @real: 无关问题逐字拒答不编造', async ({ page }) => {
   const chat = new ChatPage(page)
   await chat.goto()
   await chat.newConversation()

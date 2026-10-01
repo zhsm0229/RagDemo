@@ -20,13 +20,12 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, BackgroundTasks, File, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
 
 from app.api.deps import AdminUser, DbSession
 from app.core.errors import ERR_NOT_FOUND, ERR_PARAM_INVALID, ApiError
-from app.db.models import Department, EvalRun
+from app.db.models import EvalRun
 from app.services import eval_engine, eval_report, eval_scan, eval_service
+from app.services.departments import resolve_dept_id
 from app.services.eval_service import RUN_NOT_FOUND_MSG
 from app.services.xlsx_io import XlsxBatchError
 
@@ -110,18 +109,6 @@ def download_template(user: AdminUser) -> Response:
 _RUN_NAME_MAX = 100  # 任务名单行文本，页面输入框量级；超限 422/1003 字段级
 
 
-def _resolve_perspective_dept(db: Session, code: str) -> int:
-    """视角部门 code → id：未播种 422（与导入 _resolve_depts"部门数据未初始化"同口径）。
-
-    放 api 层的先例：api/chat.py._all_dept_id 同款单查 + 错误转换；engine 收 id，
-    code 只在创建时被人读（审计 perspective）。
-    """
-    dept_id = db.scalar(select(Department.id).where(Department.code == code))
-    if dept_id is None:
-        raise ApiError(ERR_PARAM_INVALID, f"部门数据未初始化：{code}", 422)
-    return dept_id
-
-
 class EvalRunCreate(BaseModel):
     """POST /api/admin/eval-runs 请求体（camelCase §3.4）：name 非空 ≤100。"""
 
@@ -166,7 +153,7 @@ def create_eval_run(
     202 {id}：跑分异步进行，前端轮询 GET /{id}；视角部门未播种 422（创建前置校验，
     不留无法执行的 running 行）。
     """
-    dept_id = _resolve_perspective_dept(db, body.perspectiveDeptCode)
+    dept_id = resolve_dept_id(db, body.perspectiveDeptCode)
     run_id = eval_service.create_eval_run(db, user.id, body.name, dept_id)
     tasks.add_task(eval_engine.run_eval_run, run_id, request.app.state.chat_deps, dept_id)
     return JSONResponse(
@@ -182,17 +169,7 @@ def list_eval_runs(
     pageSize: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> dict:
     """跑分任务列表：created_at DESC（同刻 id 降序兜底），分页 §3.5（§22.1 同口径）。"""
-    total = db.scalar(select(func.count()).select_from(EvalRun))
-    rows = (
-        db.execute(
-            select(EvalRun)
-            .order_by(EvalRun.created_at.desc(), EvalRun.id.desc())
-            .offset((page - 1) * pageSize)
-            .limit(pageSize)
-        )
-        .scalars()
-        .all()
-    )
+    rows, total = eval_service.list_eval_runs(db, page, pageSize)
     return {
         "code": 0,
         "message": "ok",

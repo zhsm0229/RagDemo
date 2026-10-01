@@ -35,7 +35,7 @@ from app.db.models import Chunk, Conversation, Department, Document, Message, Qa
 from app.rag.prompt import REFUSAL_TEXT
 from app.services.chat import ChatDeps, TurnPlan, finalize_turn, mark_interrupted, prepare_turn
 from app.services.chat_cache import DailyCounter, ExactCache, HitCounter
-from app.services.retrieval import normalize_question, rerank_and_fold, search_chunks
+from app.services.retrieval import PgVectorStore, normalize_question, rerank_and_fold, search_chunks
 
 # ---------------------------------------------------------------------------
 # 种子与装配助手（ORM 直插，先例 tests/integration/test_retrieval.py）
@@ -138,6 +138,7 @@ def _make_deps(
         hit_counter=HitCounter(clock),
         settings=settings,
         prompts=load_prompt_pack(),
+        store=PgVectorStore(),
     )
 
 
@@ -176,6 +177,7 @@ def test_turn_plan_and_chat_deps_field_contracts() -> None:
         "hit_counter",
         "settings",
         "prompts",
+        "store",
     ]
 
 

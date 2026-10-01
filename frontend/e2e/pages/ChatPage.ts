@@ -15,6 +15,8 @@ export class ChatPage {
    * stub 改写污染问题向量——需要"语义自足的首问"用例（如 qa 直答）必须先开新会话。 */
   async newConversation(): Promise<void> {
     await this.page.getByRole('button', { name: /新会话/ }).click()
+    // 点击后列表重渲染，短暂让渡避免后续 ask 打在过渡态上
+    await this.page.waitForTimeout(300)
   }
 
   async ask(question: string): Promise<void> {

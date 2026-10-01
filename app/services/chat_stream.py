@@ -201,7 +201,19 @@ def _stream_generate(
         interrupt_turn(assistant_msg_id)
         yield "error", _error_payload(ERR_INTERNAL, _MSG_INTERRUPTED)
         return
-    yield "done", _finish_generated(deps, plan, assistant_msg_id, "".join(pieces), start)
+    content = "".join(pieces)
+    if not content.strip():
+        # 空正文防护（2026-10-01 事故）：推理模型把 max_tokens 全烧在 reasoning 上，
+        # 流"正常耗尽"但零正文——按上游失败收尾（中断标记 + error 可重试），
+        # 严禁把空串当正常回答落库/进缓存（拒答红线与缓存正确性双前提）。
+        logger.warning(
+            "LLM 流正常耗尽但零正文 assistant_message_id=%s（reasoning 耗尽预算？）",
+            assistant_msg_id,
+        )
+        interrupt_turn(assistant_msg_id)
+        yield "error", _error_payload(ERR_LLM_UNAVAILABLE, _MSG_LLM_UNAVAILABLE)
+        return
+    yield "done", _finish_generated(deps, plan, assistant_msg_id, content, start)
 
 
 def event_stream(

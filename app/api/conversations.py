@@ -2,23 +2,25 @@ r"""会话管理路由（Task 10，F-207）：列表 / 新建 / 历史消息 / �
 
 会话是个人资源：全部端点过 ReadyUser 门后按 user_id 归属过滤（部门过滤豁免说明：
 个人会话仅属一人，user_id 校验严格强于 dept 过滤，与 services.chat 的共享解析
-resolve_owned_conversation 同注同语义）。列表 §22 默认序 updated_at DESC（同刻
-id 降序兜底），分页 §3.5（page ≥1、pageSize 1-100 默认 20，Pydantic Query 校验
-非法 422/1003）；历史消息 ASC，assistant is_active=false 的中断占位行（CHAT-12
-遗留形态）不进列表，user 消息全返回；删除为软删（is_active=false，不物理删），
-重复删除幂等 200，他人会话一律 404/3003（IDOR 防线 §21.8）。DTO 键全 camelCase
-（§3.4），响应体 {code, message, data}。
+resolve_owned_conversation 同注同语义）。列表与历史查询在 services/chat（§1.6 api
+禁直写查询）；分页 §3.5（page ≥1、pageSize 1-100 默认 20，Pydantic Query 校验非法
+422/1003）；删除为软删（is_active=false，不物理删），重复删除幂等 200，他人会话一律
+404/3003（IDOR 防线 §21.8）。DTO 键全 camelCase（§3.4），响应体 {code, message, data}。
 """
 
 from typing import Annotated
 
 from fastapi import APIRouter, Query
-from sqlalchemy import func, or_, select
 
 from app.api.deps import DbSession, ReadyUser
 from app.core.errors import ERR_NOT_FOUND, ApiError
 from app.db.models import Conversation, Message
-from app.services.chat import MSG_CONVERSATION_NOT_FOUND, resolve_owned_conversation
+from app.services.chat import (
+    MSG_CONVERSATION_NOT_FOUND,
+    list_conversation_messages,
+    list_user_conversations,
+    resolve_owned_conversation,
+)
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
@@ -56,25 +58,13 @@ def list_conversations(
     pageSize: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> dict:
     """本人活跃会话列表（§22）：updated_at DESC（同刻 id 降序兜底），分页切片。"""
-    stmt = select(Conversation).where(
-        Conversation.user_id == user.id, Conversation.is_active.is_(True)
-    )
-    total = db.scalar(select(func.count()).select_from(stmt.subquery()))
-    rows = (
-        db.execute(
-            stmt.order_by(Conversation.updated_at.desc(), Conversation.id.desc())
-            .offset((page - 1) * pageSize)
-            .limit(pageSize)
-        )
-        .scalars()
-        .all()
-    )
+    rows, total = list_user_conversations(db, user.id, page, pageSize)
     return {
         "code": 0,
         "message": "ok",
         "data": {
             "items": [_conversation_payload(row) for row in rows],
-            "total": total or 0,
+            "total": total,
             "page": page,
             "pageSize": pageSize,
         },
@@ -97,18 +87,7 @@ def create_conversation(user: ReadyUser, db: DbSession) -> dict:
 def list_messages(conversation_id: int, user: ReadyUser, db: DbSession) -> dict:
     """会话历史消息（ASC）：归属校验 404/3003；中断占位行不出现，user 消息全返回。"""
     conversation = resolve_owned_conversation(db, user, conversation_id)
-    rows = (
-        db.execute(
-            select(Message)
-            .where(
-                Message.conversation_id == conversation.id,
-                or_(Message.role == "user", Message.is_active.is_(True)),
-            )
-            .order_by(Message.created_at.asc(), Message.id.asc())
-        )
-        .scalars()
-        .all()
-    )
+    rows = list_conversation_messages(db, conversation.id)
     return {"code": 0, "message": "ok", "data": {"items": [_message_payload(row) for row in rows]}}
 
 

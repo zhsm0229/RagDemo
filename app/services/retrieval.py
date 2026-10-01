@@ -217,3 +217,21 @@ def _parse_embedding(raw: Any) -> list[float]:
 def _cosine(left: list[float], right: list[float]) -> float:
     """余弦相似度：两向量均已 L2 归一化（入库侧保证），点积即余弦。"""
     return sum(a * b for a, b in zip(left, right, strict=True))
+
+
+class PgVectorStore:
+    """pgvector 实现（VectorStore 协议的首个实现，服务层无状态适配）。
+
+    检索 SQL 即本模块 match_qa/search_chunks——方法仅委托，协议存在的意义是替换缝
+    （scaling-plan §1.7 B 阶段 Milvus 第二实现在装配层与本类二选一），非 Middle Man
+    消极转发；db 按调用传入，本类不持连接。"""
+
+    def match_qa(
+        self, db: Session, query_vec: list[float], dept_ids: list[int], threshold: float
+    ) -> QaHit | None:
+        return match_qa(db, query_vec, dept_ids, threshold)
+
+    def search_chunks(
+        self, db: Session, query_vec: list[float], dept_ids: list[int], top_k: int, ef_search: int
+    ) -> list[DocHit]:
+        return search_chunks(db, query_vec, dept_ids, top_k, ef_search)

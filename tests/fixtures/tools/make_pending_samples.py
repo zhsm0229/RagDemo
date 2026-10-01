@@ -168,14 +168,22 @@ def build_scanned_pdf() -> None:
     f_body = ImageFont.truetype(str(FONT), 26)
     margin, y = 96, 90
     # 页眉（重复行，供清洗规则回归）
-    draw.text(((w - draw.textlength(f"{ORG}　内部制度", font=f_small)) / 2, 36),
-              f"{ORG}　内部制度", font=f_small, fill=(90, 90, 90))
+    draw.text(
+        ((w - draw.textlength(f"{ORG}　内部制度", font=f_small)) / 2, 36),
+        f"{ORG}　内部制度",
+        font=f_small,
+        fill=(90, 90, 90),
+    )
     t = TITLE
     draw.text(((w - draw.textlength(t, font=f_title)) / 2, y), t, font=f_title, fill="black")
     y += 66
     org_line = f"{ORG}（V1 · 2026 年 9 月修订）"
-    draw.text(((w - draw.textlength(org_line, font=f_small)) / 2, y), org_line,
-              font=f_small, fill=(60, 60, 60))
+    draw.text(
+        ((w - draw.textlength(org_line, font=f_small)) / 2, y),
+        org_line,
+        font=f_small,
+        fill=(60, 60, 60),
+    )
     y += 60
     for heading, paras in BODY_SECTIONS:
         draw.text((margin, y), heading, font=f_body, fill="black")
@@ -194,8 +202,12 @@ def build_scanned_pdf() -> None:
             y += 48
         if y > h - 220:  # 两页放不下则截断在附则前（样本只需一页即满足字符下限）
             break
-    draw.text(((w - draw.textlength("第 1 页 / 共 1 页", font=f_small)) / 2, h - 80),
-              "第 1 页 / 共 1 页", font=f_small, fill=(90, 90, 90))
+    draw.text(
+        ((w - draw.textlength("第 1 页 / 共 1 页", font=f_small)) / 2, h - 80),
+        "第 1 页 / 共 1 页",
+        font=f_small,
+        fill=(90, 90, 90),
+    )
     png = GOLDEN / "_tmp_scan_page.png"
     img.save(png)
     pdf = _new_pdf()

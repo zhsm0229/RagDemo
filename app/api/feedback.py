@@ -21,17 +21,13 @@ from typing import Literal
 
 from fastapi import APIRouter
 from pydantic import BaseModel, model_validator
-from sqlalchemy import select
-from sqlalchemy.orm import Session
 
 from app.api.deps import DbSession, ReadyUser
-from app.core.errors import ERR_NOT_FOUND, ApiError
-from app.db.models import Message, User
 from app.services.audit import record_audit
+from app.services.chat import resolve_own_answer
 
 router = APIRouter(prefix="/messages", tags=["messages"])
 
-_MSG_NOT_FOUND = "消息不存在或无权访问"
 _COMMENT_MIN = 1  # §21.5：点踩备注 strip 后 1-500 字
 _COMMENT_MAX = 500
 _BADCASE_PENDING = "待处理"  # F-702 治理队列初始状态（messages.badcase_status 枚举）
@@ -74,27 +70,13 @@ class FeedbackRequest(BaseModel):
         return self
 
 
-def _owned_answer(db: Session, user: User, message_id: int) -> Message:
-    """归属解析：本人 + assistant + is_active，任一不满足与不存在同判 404/3003
-    （不给探测空间，IDOR §21.8；user 消息不可反馈）。"""
-    message = db.scalar(select(Message).where(Message.id == message_id))
-    if (
-        message is None
-        or message.user_id != user.id
-        or message.role != "assistant"
-        or not message.is_active
-    ):
-        raise ApiError(ERR_NOT_FOUND, _MSG_NOT_FOUND, 404)
-    return message
-
-
 @router.post("/{message_id}/feedback")
 def leave_feedback(message_id: int, body: FeedbackRequest, user: ReadyUser, db: DbSession) -> dict:
     """消息反馈（F-208）：down 三列落库并入 badcase 队列（仅初始态置'待处理'）；up
     忽略备注/类型。改评不回退：down→up 清备注/类型、badcase_status 保持原值；重复
     down 幂等更新备注/类型，admin 终态（'已修语料'/'已忽略'）不被重开（W3 裁决）。
     审计 detail 不含 comment 原文；事务边界：反馈与审计同事务 commit。"""
-    message = _owned_answer(db, user, message_id)
+    message = resolve_own_answer(db, user.id, message_id)
     message.feedback = body.feedback
     message.feedback_comment = body.comment
     message.feedback_category = body.category

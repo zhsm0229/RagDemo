@@ -158,3 +158,36 @@ def _csv_line(cells: list[str]) -> str:
     buf = io.StringIO()
     csv.writer(buf).writerow(cells)
     return buf.getvalue()
+
+
+def main(argv: list[str] | None = None) -> None:
+    """周报导出 CLI（F-1010"每周自动生成"的调度载体，规范/规格审查补齐）。
+
+    用法：``python -m app.services.knowledge_gap [--week-offset 1] [--out 目录]``
+    供 OS 调度器每周一拉取上周榜单落盘（同 deploy/backup.sh 的 schtasks/cron 口径，
+    应用内不引入调度依赖——AGENTS"能不加就不加"）；--week-offset 缺省 1（上周）。
+    """
+    import argparse
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(description="知识缺口周报导出（F-1010）")
+    parser.add_argument("--week-offset", type=int, default=1, help="0=本周，1=上周（缺省）")
+    parser.add_argument("--out", default=".", help="CSV 输出目录（缺省当前目录）")
+    args = parser.parse_args(argv)
+
+    window = resolve_week_window(args.week_offset)
+    from app.db.base import SessionLocal  # 延迟导入：与 app.db.seed.main 同口径
+
+    with SessionLocal() as db:
+        lines = list(stream_export_lines(db, window, max_rows=EXPORT_LIMIT))
+        total = count_refused_questions(db, window)
+    path = Path(args.out) / f"knowledge-gap-{window.start:%Y%m%d}.csv"
+    path.write_text("".join(lines), encoding="utf-8-sig")  # BOM 内嵌，Excel 直接可读
+    print(
+        f"[knowledge-gap] 窗口 {window.start:%Y-%m-%d}~{window.end:%Y-%m-%d} "
+        f"去重拒答问题 {total} 条 → {path}"
+    )
+
+
+if __name__ == "__main__":
+    main()

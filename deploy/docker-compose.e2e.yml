@@ -1,0 +1,11 @@
+# E2E 专用覆盖（叠加主 compose）：TEST_MODE 硬编码 true——L1 确定性层的
+# 唯一事实源，杜绝 shell 环境传递丢变量导致的"真模式跑测试"事故。
+# 用法：docker compose -f docker-compose.yml -f deploy/docker-compose.e2e.yml up -d --build pg app
+services:
+  app:
+    environment:
+      TEST_MODE: "true"
+      # CI runner 无 TEI/MinerU：stub 全链（装配层 test_mode 分支）；
+      # 本机有 TEI 时此覆盖同样生效（test_mode 优先走 Stub，L2 真实层另行直连部署机）
+      EMBED_BASE_URL: http://tei-embed:80
+      RERANK_BASE_URL: http://tei-rerank:80

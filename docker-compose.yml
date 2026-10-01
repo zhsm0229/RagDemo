@@ -6,7 +6,9 @@ services:
       - "5433:5432"
     environment:
       POSTGRES_USER: rag
-      POSTGRES_PASSWORD: rag
+      # §12.7：口令经 .env 注入（缺省仅限 dev 弱口令；生产部署必须在 .env 覆盖）。
+      # 已初始化的卷不改名生效——变更口令须删除 pgdata 卷重建（initdb 只在首启读它）。
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rag}
       POSTGRES_DB: rag
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -23,7 +25,7 @@ services:
       - "5434:5432"
     environment:
       POSTGRES_USER: rag
-      POSTGRES_PASSWORD: rag
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rag}  # 同 pg：.env 注入，dev 缺省弱口令
       POSTGRES_DB: rag_test
 
   # TEI embedding（BGE-M3，dim=1024）。宿主 8081 被本机其他项目占用，dev 映射 8091；
@@ -32,6 +34,7 @@ services:
   # --model-id 指本地路径完全绕开在线下载；data/ 已被 gitignore。
   tei-embed:
     image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.2
+    restart: unless-stopped # OOM 自愈（问答可用性前提）
     container_name: ragdemo-tei-embed
     command: ["--model-id", "/data/bge-m3", "--pooling", "cls", "--max-batch-tokens", "2048"]
     ports:
@@ -49,6 +52,7 @@ services:
   # TEI rerank（bge-reranker-v2-m3，原始 logit 由应用侧 sigmoid 归一化，§4.4 分数口径）
   tei-rerank:
     image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.2
+    restart: unless-stopped # OOM 自愈
     container_name: ragdemo-tei-rerank
     command: ["--model-id", "/data/bge-reranker-v2-m3", "--max-batch-tokens", "2048"]
     ports:
@@ -99,13 +103,17 @@ services:
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: postgresql+psycopg://rag:rag@pg:5432/rag
+      DATABASE_URL: postgresql+psycopg://rag:${POSTGRES_PASSWORD:-rag}@pg:5432/rag
       STATIC_DIR: /srv/ragdemo/static
       TEST_MODE: ${TEST_MODE:-false}
+      # 容器内互联走服务名（.env 的 localhost 仅适用宿主机裸 uvicorn，§12.2 内网互联）
+      EMBED_BASE_URL: http://tei-embed:80
+      RERANK_BASE_URL: http://tei-rerank:80
+      MINERU_BASE_URL: http://mineru:8000
     env_file:
       - .env
     volumes:
-      - uploads:/srv/ragdemo/data
+      - ./data/uploads:/srv/ragdemo/data # dev bind：E2E 种子生成的唯一夹具宿主可直接上传
     depends_on:
       pg:
         condition: service_healthy
@@ -119,4 +127,3 @@ services:
 volumes:
   pgdata:
   mineru-models:
-  uploads:

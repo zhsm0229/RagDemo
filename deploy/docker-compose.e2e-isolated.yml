@@ -1,0 +1,27 @@
+# E2E 隔离库覆盖（叠加主 compose 与 e2e 覆盖，W7 规范审查"开放-6 隔离方案"落地）：
+# app 指向独立 pg-e2e 实例——套件硬复位（E2E_WIPE TRUNCATE）只打隔离库，试点库
+# （pg/rag）零接触；端点/端口与其余配置继承上层文件。
+# 用法（三文件叠加，在仓库根执行）：
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.e2e.yml \
+#     -f deploy/docker-compose.e2e-isolated.yml up -d pg-e2e app
+# 跑完恢复试点栈：docker compose -f docker-compose.yml up -d app
+services:
+  pg-e2e:
+    image: pgvector/pgvector:pg15
+    container_name: ragdemo-pg-e2e
+    environment:
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rag}  # 同主 compose 口径：env 注入
+      POSTGRES_DB: rag_e2e
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag -d rag_e2e"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    environment:
+      DATABASE_URL: postgresql+psycopg://rag:${POSTGRES_PASSWORD:-rag}@pg-e2e:5432/rag_e2e
+    depends_on:
+      pg-e2e:
+        condition: service_healthy

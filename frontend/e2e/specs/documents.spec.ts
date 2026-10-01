@@ -1,6 +1,12 @@
+import { fileURLToPath } from 'node:url'
+
 import { expect, test } from '@playwright/test'
 
 import { DocumentsPage } from '../pages/DocumentsPage'
+
+// 种子每轮生成内容唯一的上传夹具（容器写上传卷，宿主路径 data/uploads/e2e/），
+// 使 DOC-01 上传不被上一轮的 F-1001 精确查重秒拒。
+const LATEST = fileURLToPath(new URL('../../../data/uploads/e2e/e2e-upload-latest.docx', import.meta.url))
 
 // DOC-01/02（P0）：上传 docx → TEST_MODE 同步解析 → 列表"● 就绪"。
 // 标题带时间戳：uq_doc_active(dept_id, title) 唯一，重复运行不撞 409。
@@ -8,7 +14,7 @@ test('DOC-01/02: 上传文档同步解析并就绪展示', async ({ page }) => {
   const docs = new DocumentsPage(page)
   await docs.goto()
   const title = `e2e_报销小样_${Date.now()}`
-  await docs.upload('fixtures/files/报销小样.docx', { title, owner: 'e2e-bot' })
+  await docs.upload(LATEST, { title, owner: 'e2e-bot' })
   await docs.expectRowReady(title)
 })
 

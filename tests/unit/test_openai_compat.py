@@ -27,7 +27,7 @@ _SSE_HEADERS = {"content-type": "text/event-stream"}
 
 def _provider(
     handler: Callable[[httpx.Request], httpx.Response],
-    api_key: str = "sk-test-key",
+    api_key: str = "stub-key",
     **kwargs: object,
 ) -> OpenAICompatLLMProvider:
     return OpenAICompatLLMProvider(
@@ -159,6 +159,23 @@ def test_request_body_shape_matches_openai_stream_contract() -> None:
         "messages": [{"role": "user", "content": "介绍一下企业智能工作台"}],  # 原样（role+content）
         "stream_options": {"include_usage": True},
     }
+
+
+# 用例 ⑤b：effort 推理力度——设置时透传，缺席不下发（deepseek-flash reasoning 事故）
+
+
+def test_effort_passed_when_set_and_absent_when_none() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, content=_sse("[DONE]"), headers=_SSE_HEADERS)
+
+    list(_provider(handler, effort="low").chat_stream(_MESSAGES, max_tokens=16))
+    assert captured["body"]["effort"] == "low"
+
+    list(_provider(handler).chat_stream(_MESSAGES, max_tokens=16))
+    assert "effort" not in captured["body"]  # 缺席不下发（供应商缺省）
 
 
 # ---------------------------------------------------------------------------

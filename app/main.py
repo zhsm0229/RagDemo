@@ -27,6 +27,7 @@ from app.api import (
     chat,
     citations,
     conversations,
+    document_rebuild,
     documents,
     feedback,
     healthz,
@@ -45,7 +46,9 @@ from app.core.llm import (
 )
 from app.services.chat import ChatDeps
 from app.services.chat_cache import DailyCounter, ExactCache, HitCounter
+from app.services.retrieval import PgVectorStore
 from app.services.scheduler import add_hit_flush_job, build_scheduler
+from app.services.vector_store import VectorStore
 
 
 def _build_chat_deps(settings: Settings) -> ChatDeps:
@@ -64,6 +67,9 @@ def _build_chat_deps(settings: Settings) -> ChatDeps:
         embedder = build_embedder(settings)
         reranker = build_reranker(settings)
         llm = build_llm(settings, prompts.temperature)
+    # VectorStore 第六接口在装配层选择实现（services 层协议不进 core/assembly——
+    # 五层单向依赖）；pg 实现无状态不随 test_mode 变化（stub 的是向量产物，检索恒打真库）
+    store: VectorStore = PgVectorStore()
     clock = SystemClock()
     return ChatDeps(
         embedder=embedder,
@@ -74,6 +80,7 @@ def _build_chat_deps(settings: Settings) -> ChatDeps:
         hit_counter=HitCounter(clock),
         settings=settings,
         prompts=prompts,
+        store=store,
     )
 
 
@@ -99,6 +106,7 @@ def create_app() -> FastAPI:
     app.include_router(healthz.router)  # 无前缀：探针路径 /healthz（docker healthcheck 消费）
     app.include_router(auth.router, prefix="/api")
     app.include_router(documents.router, prefix="/api")
+    app.include_router(document_rebuild.router, prefix="/api")
     app.include_router(admin_qa_pairs.router, prefix="/api")
     app.include_router(admin_eval.router, prefix="/api")
     app.include_router(admin_eval.runs_router, prefix="/api")

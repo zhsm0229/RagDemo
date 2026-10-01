@@ -31,6 +31,7 @@ from app.db.models import AuditLog, Department, EvalQuestion, EvalRun, User
 from app.services import eval_engine, eval_service
 from app.services.chat import ChatDeps
 from app.services.chat_cache import DailyCounter, ExactCache, HitCounter
+from app.services.retrieval import PgVectorStore
 from tests.conftest import login_as
 
 # ---------------------------------------------------------------------------
@@ -76,6 +77,7 @@ def _make_deps() -> ChatDeps:
         hit_counter=HitCounter(clock),
         settings=settings,
         prompts=load_prompt_pack(),
+        store=PgVectorStore(),
     )
 
 

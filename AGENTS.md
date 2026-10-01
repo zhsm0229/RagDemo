@@ -69,6 +69,6 @@ make up / down  # docker compose 起/停（pg 等）
 
 Conventional Commits：`feat/fix/docs/refactor/test/chore: 简述`；一个提交一件事，提交前 ruff 必须通过。分支：`feat/<模块>-<简述>` / `fix/<问题>`，禁止直推 main。
 
-## 当前状态（2026-09-28）
+## 当前状态（2026-09-30）
 
-评审门禁 9 包件已全部通过，进入 TDD 实施阶段。已落地：`app/core`（config / clock 可注入时钟 / security bcrypt+JWT）、`app/db`（base / models / seed）、Alembic `0001_init` 及迁移集成测试。`api` / `services` / `rag` 层尚未开始。里程碑与周排期见 [docs/project-brief.md](docs/project-brief.md) 第七节。
+W1-W5 五个冲刺全部收口，**内测加固完成：恢复演练 RTO≈4min 达标、串库结构边界双向 0 泄漏、知识缺口/召回统计可裁剪项转正、用户手册与 runbook 定稿**。已落地：脚手架与入库管道（W1）、问答全链路（W2）、管理后台与评测（W3）、前端全页面（W4）、内测加固（W5：全局 401 统一/部门口径统一/知识缺口报告/chunk 召回统计/备份恢复基建+演练/用户手册/串库数据包）。后端 640 passed/2 skipped、前端 lint/type/217/build 四门全绿；接口契约见 [docs/api.md](docs/api.md)（47 端点）。**待部署机硬项**：串库真实阈值复测（runbook §5.5）、非功能基线 #7、备份调度实测、golden mineru 回归、合规清单签批——清单见 W5 账本 `.superpowers/sdd/2026-09-30-w5-hardening/progress.md` 终审节。W6=验收评审（七条硬指标）。注意：用户并行会话在途（TEI/MinerU 容器与 golden 样本落库），改共享文件前先重读。

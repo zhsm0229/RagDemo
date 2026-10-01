@@ -46,6 +46,7 @@ from app.rag.prompt import REFUSAL_TEXT
 from app.services import eval_engine, eval_service
 from app.services.chat import ChatDeps
 from app.services.chat_cache import DailyCounter, ExactCache, HitCounter
+from app.services.retrieval import PgVectorStore
 from tests.conftest import login_as
 
 # ---------------------------------------------------------------------------
@@ -148,6 +149,7 @@ def _make_deps(embedder: StubEmbedder, reranker, llm) -> ChatDeps:
         hit_counter=HitCounter(clock),
         settings=settings,
         prompts=load_prompt_pack(),
+        store=PgVectorStore(),
     )
 
 
@@ -605,8 +607,9 @@ def test_创建跑分_202与审计读回及GET接线(eval_client: TestClient, se
     assert missing.json()["code"] == ERR_NOT_FOUND
 
 
-def test_未知视角部门_422部门数据未初始化(eval_client: TestClient, session: Session) -> None:
-    """rider②（跑分侧）：perspectiveDeptCode 未播种 → 422"部门数据未初始化"，不建 run。"""
+def test_未知视角部门_422部门编码无效(eval_client: TestClient, session: Session) -> None:
+    """rider②（跑分侧）：perspectiveDeptCode 枚举外 → 422"部门编码无效"，不建 run。
+    （错误转换收敛到 services.departments.resolve_dept_id 后与上传表单同文案。）"""
     make_user(session, "evalrunadmin2", "right-one", role="admin")
     assert login_as(eval_client, "evalrunadmin2", "right-one").status_code == 200
 
@@ -616,7 +619,7 @@ def test_未知视角部门_422部门数据未初始化(eval_client: TestClient,
 
     assert resp.status_code == 422
     assert resp.json()["code"] == 1003
-    assert resp.json()["message"] == "部门数据未初始化：finance"
+    assert resp.json()["message"] == "部门编码无效：finance（可选 service/hr/all）"
     assert session.scalar(select(func.count()).select_from(EvalRun)) == 0
 
 

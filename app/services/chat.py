@@ -17,7 +17,7 @@ str, "model": str}。本模块只 flush 不 commit、只 HitCounter.add 不 flus
 
 from dataclasses import dataclass
 
-from sqlalchemy import update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.core.assembly import PromptPack
@@ -30,15 +30,15 @@ from app.services.chat_cache import DailyCounter, ExactCache, HitCounter
 from app.services.retrieval import (
     DocHit,
     QaHit,
-    match_qa,
     normalize_question,
     rerank_and_fold,
-    search_chunks,
 )
 from app.services.rewrite import rewrite_question
+from app.services.vector_store import VectorStore
 
 _REWRITE_ROUNDS: int = 3  # 改写历史取最近 3 轮（prompt 层不截条数，截断归调用方约定）
 MSG_CONVERSATION_NOT_FOUND: str = "会话不存在或无权访问"  # 404/3003 对外文案（归属/软删共用）
+MSG_MESSAGE_NOT_FOUND: str = "消息不存在或无权访问"  # 反馈归属失败对外文案（F-208）
 
 
 @dataclass
@@ -62,7 +62,8 @@ class TurnPlan:
 @dataclass
 class ChatDeps:
     """问答链路依赖包：Task 8 消费检索/提示词/缓存，Task 9 消费 counter（每日限额）
-    与 settings.chat_max_tokens（生成 clamp）。"""
+    与 settings.chat_max_tokens（生成 clamp）；store 为 VectorStore 第六接口
+    （规范/规格审查补齐，实现由装配层选择，见 services/vector_store）。"""
 
     embedder: Embedder
     reranker: Reranker
@@ -72,6 +73,7 @@ class ChatDeps:
     hit_counter: HitCounter
     settings: Settings
     prompts: PromptPack
+    store: "VectorStore"
 
 
 def prepare_turn(
@@ -102,7 +104,7 @@ def prepare_turn(
         return TurnPlan("cache", cached.get("citations", []), rewritten, None, cached, None)
     query_vec = deps.embedder.embed([rewritten])[0]  # 一次计算，qa 与文档链路复用
     dept_ids = [user_dept_id, all_dept_id]
-    qa_hit = match_qa(db, query_vec, dept_ids, deps.settings.qa_threshold)
+    qa_hit = deps.store.match_qa(db, query_vec, dept_ids, deps.settings.qa_threshold)
     if qa_hit is not None:
         return _qa_plan(qa_hit, rewritten, cache_key, deps.prompts.chat_system)
     folded = _retrieve_folded(db, deps, query_vec, dept_ids, rewritten)
@@ -115,8 +117,9 @@ def prepare_turn(
 def _retrieve_folded(
     db: Session, deps: ChatDeps, query_vec: list[float], dept_ids: list[int], rewritten: str
 ) -> list[DocHit]:
-    """向量召回 + 重排折叠：产物 DocHit.similarity 已是 rerank sigmoid 分（阈值口径）。"""
-    hits = search_chunks(
+    """向量召回（经 VectorStore 接口）+ 重排折叠：产物 DocHit.similarity 已是
+    rerank sigmoid 分（阈值口径）。"""
+    hits = deps.store.search_chunks(
         db, query_vec, dept_ids, deps.settings.retriever_top_k, deps.settings.hnsw_ef_search
     )
     return rerank_and_fold(
@@ -211,6 +214,84 @@ def mark_interrupted(db: Session, assistant_msg_id: int) -> None:
     """中断收尾（CHAT-12）：只置 is_active=false 标失败，不重复落库；flush 不 commit。"""
     db.execute(update(Message).where(Message.id == assistant_msg_id).values(is_active=False))
     db.flush()
+
+
+def load_recent_history(
+    db: Session, conversation_id: int, current_user_msg_id: int
+) -> list[tuple[str, str]]:
+    """最近 3 轮（6 条）历史（W2 自 api/chat.py 下沉，行为逐字保留）：created_at DESC
+    LIMIT 6 再 reversed。
+
+    id < current_user_msg_id 排除本轮 user 消息（prepare 的 question 另传，不得重复进
+    history）；is_active 过滤中断占位行；同事务 now() 同刻以 id 兜底排序；奇数条（上轮
+    断流留下悬空 user）丢弃最新一条，保证严格 (user, assistant) 轮次对。部门过滤豁免
+    说明：会话归属已在上游校验（resolve_owned_conversation），本查询随之继承本人边界。
+    """
+    rows = db.execute(
+        select(Message.role, Message.content)
+        .where(
+            Message.conversation_id == conversation_id,
+            Message.id < current_user_msg_id,
+            Message.is_active.is_(True),
+        )
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(6)
+    ).all()
+    if len(rows) % 2 == 1:
+        rows = rows[1:]
+    return [(role, content) for role, content in reversed(rows)]
+
+
+def list_user_conversations(
+    db: Session, user_id: int, page: int, page_size: int
+) -> tuple[list[Conversation], int]:
+    """本人活跃会话分页列表（F-207，自 api/conversations.py 下沉）：updated_at DESC
+    （同刻 id 降序兜底），返回 (当前页行, 总数)；user_id 归属过滤即隔离（个人资源）。"""
+    stmt = select(Conversation).where(
+        Conversation.user_id == user_id, Conversation.is_active.is_(True)
+    )
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    rows = (
+        db.execute(
+            stmt.order_by(Conversation.updated_at.desc(), Conversation.id.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        .scalars()
+        .all()
+    )
+    return list(rows), total
+
+
+def list_conversation_messages(db: Session, conversation_id: int) -> list[Message]:
+    """会话历史消息 ASC（F-207，自 api/conversations.py 下沉）：中断占位行
+    （CHAT-12 遗留形态 is_active=false）不进列表，user 消息全返回。"""
+    return list(
+        db.execute(
+            select(Message)
+            .where(
+                Message.conversation_id == conversation_id,
+                or_(Message.role == "user", Message.is_active.is_(True)),
+            )
+            .order_by(Message.created_at.asc(), Message.id.asc())
+        )
+        .scalars()
+        .all()
+    )
+
+
+def resolve_own_answer(db: Session, user_id: int, message_id: int) -> Message:
+    """反馈归属解析（W2 自 api/feedback.py 下沉）：本人 + assistant + is_active。
+
+    任一不满足与不存在同判 404/3003（不给探测空间，IDOR §21.8；user 消息与中断
+    占位行不可反馈）。按 id 过滤而非 db.get——messages 是 (id, created_at) 复合主键，
+    单值 db.get 无法构形。"""
+    message = db.scalar(select(Message).where(Message.id == message_id))
+    if message is None or message.user_id != user_id or message.role != "assistant":
+        raise ApiError(ERR_NOT_FOUND, MSG_MESSAGE_NOT_FOUND, 404)
+    if not message.is_active:
+        raise ApiError(ERR_NOT_FOUND, MSG_MESSAGE_NOT_FOUND, 404)
+    return message
 
 
 def resolve_owned_conversation(db: Session, user: User, conversation_id: int) -> Conversation:

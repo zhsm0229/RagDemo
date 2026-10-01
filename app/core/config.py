@@ -17,7 +17,9 @@ class Settings(BaseSettings):
     mineru_timeout_s: int = 300
     llm_base_url: str = ""  # OpenAI 兼容端点；非 test_mode 必填，为空装配期 fail-fast（§6.4）
     llm_api_key: str = ""  # 云端点鉴权密钥；严禁提交真实密钥
-    llm_model: str = ""  # 对话模型名（如 glm-4）
+    llm_model: str = ""  # 对话模型名（如 deepseek-flash）
+    llm_effort: str = "low"  # 推理力度（deepseek-flash: low/high/max）：RAG 证据型问答
+    # 正文优先，默认 low——high 会把 max_tokens 全烧在 reasoning 上致正文为空（2026-10-01 事故）
     llm_timeout_s: int = 60
     chat_max_tokens: int = 4096  # 回答生成 max_tokens 上限
     prompt_version: str = "v1"  # 提示词包版本（对应 prompts/ 头注释 # version）

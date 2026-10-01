@@ -1,7 +1,7 @@
 # RagDemo 接口文档（W1 - W5）
 
 > 依据 `docs/standards.md` §3（API 接口规范）编写，随代码演进（§19.1 文档随代码）。
-> 覆盖 `app/api/` 当前全部路由：auth 4 个、documents 6 个、chat 1 个、conversations 4 个、citations 1 个、messages（feedback）1 个、admin 管理端 30 个（问答对 6、评测 8、提问记录与 badcase 4、检索测试 1、概览与健康度 3（含零召回块下钻）、用户管理 4、审计查询 2、知识缺口报告 2），共 47 个端点。
+> 覆盖 `app/api/` 当前全部路由：auth 4 个、documents 9 个、chat 1 个、conversations 4 个、citations 1 个、messages（feedback）1 个、admin 管理端 30 个（问答对 6、评测 8、提问记录与 badcase 4、检索测试 1、概览与健康度 3（含零召回块下钻）、用户管理 4、审计查询 2、知识缺口报告 2），共 50 个端点。
 > 最后更新：W5 Task 5 台账翻转（计数 44→47：W5 新增知识缺口报告 2 端点，见 §4.9；零召回块下钻 `GET /api/admin/zero-recall-chunks` 1 端点，见 §4.5.3；§4.4.1 docs 项补 hitCount/lastHitAt 历史召回统计两键）。
 
 ## 1. 通用约定
@@ -137,6 +137,33 @@ POST SSE 须用 fetch + ReadableStream 消费（无 EventSource 自动重连）�
 | 请求体 | 无 |
 | 成功响应 | `200`，`data: {id, isActive: true}`（审计操作者为点击确认的管理员本人） |
 | 错误分支 | `404/1003` 文档不存在 |
+
+### 2.8a GET /api/documents/{id}/versions — 版本历史（W7 补齐，F-303）
+
+| 项 | 说明 |
+|----|------|
+| 鉴权 | AdminUser |
+| 成功响应 | `200`，`data: {items: [{id, version, status, isActive, effectiveDate, sizeBytes, ownerName, uploadedBy, createdAt}]}`——同部门同主题全部代次按 `version` 降序（含当前行）；归档版本 `isActive: false` 在案可追溯 |
+| 错误分支 | `404/3003` 文档不存在 |
+
+### 2.8b POST /api/documents/{id}/rebuild-index — 文档级重建索引（W7 补齐，F-304）
+
+| 项 | 说明 |
+|----|------|
+| 鉴权 | AdminUser |
+| 成功响应 | `202`，`data: {id, status}`（test_mode 同步执行响应即终态；生产 BackgroundTasks 逐文档独立会话） |
+| 语义 | 按**现行分块设置**重走解析→红线→清洗→分块→嵌入，单事务内删旧块写新块（原子切换，无无索引窗口）；版本号不变（重建≠新版本）；审计 `document.rebuild {before.chunks, after.chunks, status, isActive}`；成功响应前整清问答精确缓存 |
+| 错误分支 | `404/1003` 文档不存在；`422/1003` 仅 ready 可重建（failed 走 §2.7 retry）或已删除 |
+| 审计 | `document.rebuild`（actor=发起管理员；状态机自身另落 document.ready/document.failed） |
+
+### 2.8c POST /api/documents/rebuild-index — 全库级重建索引（W7 补齐，F-304）
+
+| 项 | 说明 |
+|----|------|
+| 鉴权 | AdminUser |
+| 成功响应 | `202`，`data: {accepted}`——受理的就绪文档数；后台逐文档独立事务重刷，单文档失败落 failed 不中断批次 |
+| 错误分支 | `401/2003`；`403/2004` |
+| 审计 | 逐文档 `document.rebuild` |
 
 ### 2.9 POST /api/documents/import-zip — zip 批量导入（W4 后端追加，F-1007）
 

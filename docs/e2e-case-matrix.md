@@ -42,7 +42,9 @@
 ## 运行方式
 
 ```bash
-# L1（本机，需 compose 栈：TEST_MODE=true docker compose up -d pg app + 种子）
+# L1 栈（TEST_MODE 由 deploy/docker-compose.e2e.yml 硬编码，杜绝环境传递丢失）：
+docker compose -f docker-compose.yml -f deploy/docker-compose.e2e.yml up -d --build pg app
+docker compose exec -T -e E2E_PASSWORD=e2e-ci-password app python -m app.db.e2e_seed
 cd frontend && E2E_CHANNEL=msedge npm run e2e     # 本机无 Playwright 浏览器下载通道时用系统 Edge
 # L2（部署机）：E2E_REAL=1 E2E_CHANNEL=chrome npm run e2e
 # CI：e2e job 自动（TEST_MODE，官方 CDN 装 chromium）

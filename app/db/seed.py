@@ -48,6 +48,9 @@ def seed(session: Session, echo: bool = True) -> User:
     session.add(admin)
     session.flush()
     if echo:
+        # §6.8"日志禁记密码"的登记豁免（规范审查裁决口径）：bootstrap 一次性凭据，
+        # 不打印则无人能完成首次登录；密码只进部署终端 stdout 不落日志文件，且首登
+        # 强制改密（must_change_password）后即失效。不得在 seed 之外复用此模式。
         print(f"[seed] admin 初始密码（仅此一次，首登强制改密）: {initial_password}")
     return admin
 
