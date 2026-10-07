@@ -23,7 +23,7 @@ test.describe('提问输入边界与安全', () => {
     await expect(send).toBeDisabled() // 前端拦截（后端 422 由 API 测试覆盖）
   })
 
-    test('CHAT-14: 全空格输入被拦截（发送禁用）', async ({ page }) => {
+  test('CHAT-14: 全空格输入被拦截（发送禁用）', async ({ page }) => {
     const input = page.locator('textarea[placeholder*="输入问题"]')
     const send = page.getByRole('button', { name: '发送' })
     await input.fill('   ')
@@ -31,7 +31,6 @@ test.describe('提问输入边界与安全', () => {
     // trim 后为空 → 禁发送（ChatInput 失焦/点击同口径内联校验）
     await expect(send).toBeDisabled()
   })
-
 
   test('SEC-02: script 标签按纯文本渲染不执行（Vue 默认转义，0 处 v-html）', async ({ page }) => {
     let dialogFired = false

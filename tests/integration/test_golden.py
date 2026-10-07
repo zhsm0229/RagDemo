@@ -313,8 +313,7 @@ def test_invariants_survive_sample_arrival(tmp_path: Path, monkeypatch: pytest.M
     """
     arrived = deepcopy(load_manifest())
     for entry in arrived:
-        if entry["kind"] == "dual_col":
-            del entry["pending"]  # 模拟对接人投放双栏真实样例
+        entry.pop("pending", None)  # 模拟对接人投放全部真实样例（现状：已全投放）
     fixtures = _tmp_fixtures(tmp_path, monkeypatch, arrived)
     (fixtures / "golden" / "hr_制度_双栏_v1.pdf").write_bytes(b"placeholder")
 
@@ -323,7 +322,7 @@ def test_invariants_survive_sample_arrival(tmp_path: Path, monkeypatch: pytest.M
     check_pending_uniformity(entries)
     lines = missing_samples()
     assert all("hr_制度_双栏_v1.pdf" not in line for line in lines)  # 已投放不再列入
-    assert any("hr_制度_表格_v1.docx" in line for line in lines)  # 其余 pending 仍在列
+    assert any("hr_制度_表格_v1.docx" in line for line in lines)  # 模拟仅投放 dual_col：其余仍在列
 
 
 def test_invariants_survive_extra_samples(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

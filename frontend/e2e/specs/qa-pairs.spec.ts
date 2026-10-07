@@ -16,7 +16,7 @@ test.describe('问答对管理', () => {
     await qa.goto()
   })
 
-  test('QA-01: 合规 Excel 导入全部入库', async ({ page }) => {
+  test('QA-01: 合规 Excel 导入全部入库', async () => {
     await qa.importExcel(abs('fixtures/files/qa_合规.xlsx'))
     await qa.expectRow('报销的时限是多少天')
     await qa.expectRow('年假有几天')
@@ -47,7 +47,9 @@ test.describe('问答对管理', () => {
     await chat.ask('报销的时限是多少天')
     await expect(page.locator('#cite-card-1')).toBeVisible()
     await expect(page.locator('.cite-panel, [class*="cite"]').last()).not.toContainText('问答对')
-    await expect(page.locator('.el-table__row', { hasText: '年假有几天' }).first().getByRole('switch')).not.toBeChecked()
+    await expect(
+      page.locator('.el-table__row', { hasText: '年假有几天' }).first().getByRole('switch'),
+    ).not.toBeChecked()
     // QA-05 断言（口径修正）：停用=行保留 + 启用开关关断（退出匹配），行不消失
     await qa.goto()
     const row = page.locator('.el-table__row', { hasText: '年假有几天' }).first()

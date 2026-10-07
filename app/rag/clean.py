@@ -17,6 +17,9 @@ from collections.abc import Callable
 _TOC_LINE_RE = re.compile(r"…\d+$|\.{3,}\s*\d+$")
 _PAGE_NUMBER_LINE_RE = re.compile(r"\d+")
 _BLANK_RUN_RE = re.compile(r"\n{3,}")
+# MinerU md 产物的图片占位行（F-1017）：![](images/xxx.jpg) 整行形态——图片本体即
+# OCR 输入，占位是输出的死文本副本，入库会污染向量与引用展示（2026-10-06 缺陷修复）
+_IMAGE_PLACEHOLDER_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 
 WATERMARK_MARKS: frozenset[str] = frozenset(
     {"内部资料", "内部文件", "仅供内部使用", "禁止外传", "未经授权禁止复制"}
@@ -63,6 +66,15 @@ def _drop_watermark_lines(text: str) -> str:
     return "\n".join(line for line in text.split("\n") if line.strip() not in WATERMARK_MARKS)
 
 
+def _drop_image_placeholder_lines(text: str) -> str:
+    """去图片占位行：整行（去首尾空白后）为 Markdown 图片占位（MinerU 产物形态）整行删除。
+
+    只删"整行即占位"的行——正文内嵌引用占位（少见）不误伤。"""
+    return "\n".join(
+        line for line in text.split("\n") if _IMAGE_PLACEHOLDER_RE.fullmatch(line.strip()) is None
+    )
+
+
 def _collapse_blank_lines(text: str) -> str:
     """折叠空行：3 个及以上连续换行折叠为一个空行（两个换行）。"""
     return _BLANK_RUN_RE.sub("\n\n", text)
@@ -78,6 +90,7 @@ RULES: list[Callable[[str], str]] = [
     _drop_toc_lines,
     _drop_page_number_lines,
     _drop_watermark_lines,
+    _drop_image_placeholder_lines,
     _collapse_blank_lines,
     _strip_edges,
 ]

@@ -9,3 +9,6 @@ services:
       # 本机有 TEI 时此覆盖同样生效（test_mode 优先走 Stub，L2 真实层另行直连部署机）
       EMBED_BASE_URL: http://tei-embed:80
       RERANK_BASE_URL: http://tei-rerank:80
+      # 图片 OCR（F-1017）依赖真实 MinerU：L1 确定性层显式关闭，
+      # 防宿主 .env 的 IMAGE_OCR_ENABLED=true 泄入使含图用例超时（2026-10-06 DOC-25 教训）
+      IMAGE_OCR_ENABLED: "false"

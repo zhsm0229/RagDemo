@@ -43,8 +43,18 @@ class ExactCache:
         self._entries: dict[str, tuple[dict, datetime]] = {}
         self._lock = threading.Lock()
 
-    def make_key(self, dept_id: int, question_normalized: str) -> str:
-        """缓存键（brief 规格）：部门进键，同问题不同部门绝不互串。"""
+    def make_key(
+        self, dept_id: int, question_normalized: str, user_suffix: str | None = None
+    ) -> str:
+        """缓存键（brief 规格）：部门进键，同问题不同部门绝不互串。
+
+        user_suffix 非空（调用方传 "u{user_id}"）时插在部门与问题之间——长期记忆
+        注入非空的回合（agent-evolution §3.4）：带不同画像的两人对同一问题不得互串
+        答案；缺省 None 时键与历史形态逐字节相同（无记忆用户继续共享部门级缓存，
+        注入面不影响缓存命中率）。键形态变化收敛在本方法一处。
+        """
+        if user_suffix:
+            return f"chat:{dept_id}:{user_suffix}:{question_normalized}"
         return f"chat:{dept_id}:{question_normalized}"
 
     def get(self, key: str) -> dict | None:

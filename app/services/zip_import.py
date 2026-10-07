@@ -252,7 +252,7 @@ def _parse_date(token: str) -> date | None:
 
 
 def _find_duplicate(session: Session, sha256: str) -> Document | None:
-    """库内精确查重（同 create_document 的 _reject_duplicate 口径）：软删行不占 hash。"""
+    """库内精确查重（同 create_document 的 reject_duplicate 口径）：软删行不占 hash。"""
     return session.scalars(
         select(Document).where(Document.content_hash == sha256, Document.deleted_at.is_(None))
     ).first()

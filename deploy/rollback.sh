@@ -17,12 +17,13 @@ APP_IMAGE="$IMAGE_REF" docker compose -f docker-compose.prod.yml pull app
 echo "[2/3] 回退 app 容器（pg/TEI/MinerU 不动）"
 APP_IMAGE="$IMAGE_REF" docker compose -f docker-compose.prod.yml up -d --no-deps app
 
+# 探活/冒烟一律打宿主 80（prod compose 唯一对外端口 "80:8000"，8000 不发布到宿主）
 echo "[3/3] 等待 healthz + 冒烟"
 ok=0
 for _ in $(seq 1 60); do
-  if curl -sf http://localhost:8000/healthz >/dev/null; then ok=1; break; fi
+  if curl -sf http://localhost/healthz >/dev/null; then ok=1; break; fi
   sleep 5
 done
 [ "$ok" -eq 1 ] || { echo "回滚后 healthz 未就绪——立即按 runbook §常见故障排查"; exit 1; }
-curl -sf -o /dev/null http://localhost:8000/
+curl -sf -o /dev/null http://localhost/
 echo "回滚完成：$IMAGE_REF（记得回填 deploy/releases.md 回滚记录）"

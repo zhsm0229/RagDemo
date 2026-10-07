@@ -3,8 +3,6 @@ import { expect, test } from '@playwright/test'
 import { LoginPage } from '../pages/LoginPage'
 import { UsersPage } from '../pages/UsersPage'
 
-const PASSWORD = process.env.E2E_PASSWORD ?? 'E2ePass#2026'
-
 // ADM-04/05 + AUTH-05（P0/P1）：用户管理全流程（admin storageState）。
 test.describe('用户管理', () => {
   let users: UsersPage
@@ -26,7 +24,7 @@ test.describe('用户管理', () => {
     await expect(page).toHaveURL(/change-password/)
   })
 
-  test('ADM-05: 用户名校验（重名/1 字）内联拦截', async ({ page }) => {
+  test('ADM-05: 用户名校验（重名/1 字）内联拦截', async () => {
     const dupErr = await users.createUserExpectError('e2e-hr') // 重名（已存在种子账号）
     expect(dupErr.length).toBeGreaterThan(0) // 后端 409 提示（toast/内联均有中文文案）
     const shortErr = await users.createUserExpectError('张')

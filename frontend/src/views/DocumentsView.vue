@@ -1,32 +1,52 @@
 <script setup lang="ts">
 /**
  * P3 知识库·文档管理（ui-spec §三，RAGFlow 模式 §8.2；对照原型 DocView）：
- * 筛选行（部门/状态/关键字 + 查询/重置同行 §22.1）+ 工具栏（上传/zip 导入/手动刷新）
+ * 筛选行（部门/状态/关键字 + 查询/重置同行 §22.1）+ 工具栏（上传/zip 导入/草稿审核/手动刷新）
  * + 表格（标题含版本与降级标注/部门/状态机/责任人/生效日期/操作）+ 分页（10/20/50/100 默认 20 右下）。
  * 状态轮询（§8.4）：列表存在 parsing 行时每 30s 静默自动刷新（不闪表格 loading），
  * 组件卸载清理定时器；增删操作成功 ElMessage、失败由 client 统一 toast，上传 422/409 在弹窗内联（§22.2）。
- * 操作列无后端契约的控件（删除置灰"暂不支持"、版本历史/重建索引未渲染）见 deviations #25。
+ * 操作列：预览（在线预览弹窗）/原文件（下载）/删除（软删+二次确认）均已后端可用。
+ * 草稿审核（agent-evolution #05）：工具栏「草稿审核」一键筛出待审核草稿；行内通过
+ * （confirm 双示审计提示）/驳回（prompt 必填原因）；红线：无审核不落地——驳回永不入库，
+ * 通过才进解析管道。草稿不显示"确认激活"（激活权在审核流，非敏感待确认语义）。
  */
-import { onMounted, onUnmounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { useRoute } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
+  approveDraft,
   confirmDocument,
   listDocuments,
+  rejectDraft,
   retryDocument,
   type DocumentItem,
+  type DocumentSourceType,
   type DocumentStatus,
+  type ReviewStatus,
+  docFileUrl,
+  deleteDocument,
 } from '@/api/documents'
-import { DEPT_LABELS, DEPT_OPTIONS, STATUS_OPTIONS } from '@/components/documents/options'
+import {
+  DEPT_LABELS,
+  DEPT_OPTIONS,
+  REVIEW_STATUS_TAGS,
+  STATUS_OPTIONS,
+} from '@/components/documents/options'
+import DocPreviewDialog from '@/components/documents/DocPreviewDialog.vue'
 import UploadDialog from '@/components/documents/UploadDialog.vue'
 import ZipImportDialog from '@/components/documents/ZipImportDialog.vue'
 
-/** F-1007 import-zip 已随 feat/w4-fe 合并（5878a01）：合并门禁解禁（T10 评审 M-7，
- * deviations #21 置灰态结束）。保留开关作应急一键回灰，不再指向未就绪语义。 */
-const ZIP_IMPORT_ENABLED = true
-
 const POLL_INTERVAL_MS = 30_000
 
-const filters = reactive({ dept: '', status: '' as DocumentStatus | '', keyword: '' })
+const route = useRoute()
+
+const filters = reactive({
+  dept: '',
+  status: '' as DocumentStatus | '',
+  keyword: '',
+  sourceType: '' as DocumentSourceType | '',
+  reviewStatus: '' as ReviewStatus | '',
+})
 const items = ref<DocumentItem[]>([])
 const total = ref(0)
 const page = ref(1)
@@ -34,6 +54,13 @@ const pageSize = ref(20)
 const loading = ref(false)
 const uploadVisible = ref(false)
 const zipVisible = ref(false)
+const previewVisible = ref(false)
+const previewDoc = ref<DocumentItem | null>(null)
+
+/** 草稿审核视图激活态：来源=草稿 且 审核状态=待审核 的快捷筛选（工具栏按钮高亮） */
+const isDraftReview = computed(
+  () => filters.sourceType === 'draft' && filters.reviewStatus === '待审核',
+)
 
 let pollTimer: number | null = null
 
@@ -44,6 +71,8 @@ async function load(silent = false): Promise<void> {
       dept: filters.dept,
       status: filters.status,
       keyword: filters.keyword,
+      sourceType: filters.sourceType,
+      reviewStatus: filters.reviewStatus,
       page: page.value,
       pageSize: pageSize.value,
     })
@@ -77,7 +106,26 @@ function refresh(): void {
   void load()
 }
 
-onMounted(() => void load())
+/**
+ * 路由 query 预填筛选（agent-evolution #08 模板生成"去审核"落点）：参数名对齐本页
+ * 筛选字段（sourceType/reviewStatus，即 #05 草稿审核的筛选口径），白名单外的值忽略，
+ * 非法参数不报错只回落全量列表。
+ */
+function prefillFromQuery(): void {
+  // useRoute 在无 router 上下文（单测直挂）时为 undefined：可选链兜底，预填只是增强路径
+  const query = route?.query
+  const sourceType = query?.sourceType
+  const reviewStatus = query?.reviewStatus
+  if (sourceType === 'upload' || sourceType === 'draft') filters.sourceType = sourceType
+  if (reviewStatus === '待审核' || reviewStatus === '已通过' || reviewStatus === '已驳回') {
+    filters.reviewStatus = reviewStatus
+  }
+}
+
+onMounted(() => {
+  prefillFromQuery()
+  void load()
+})
 onUnmounted(() => {
   if (pollTimer !== null) window.clearInterval(pollTimer)
   pollTimer = null
@@ -88,10 +136,24 @@ function search(): void {
   void load()
 }
 
+/** 草稿审核入口：一键切换"draft + 待审核"快捷筛选（再点还原全量列表） */
+function toggleDraftReview(): void {
+  if (isDraftReview.value) {
+    filters.sourceType = ''
+    filters.reviewStatus = ''
+  } else {
+    filters.sourceType = 'draft'
+    filters.reviewStatus = '待审核'
+  }
+  search()
+}
+
 function resetFilters(): void {
   filters.dept = ''
   filters.status = ''
   filters.keyword = ''
+  filters.sourceType = ''
+  filters.reviewStatus = ''
   search()
 }
 
@@ -110,15 +172,74 @@ function deptName(code: string): string {
   return DEPT_LABELS[code] ?? code
 }
 
+/** 审核状态 → 语义色（模板 row 为 any，索引 REVIEW_STATUS_TAGS 会触发 TS7053，收敛到函数） */
+function reviewTagType(status: ReviewStatus): 'success' | 'warning' | 'danger' | 'info' {
+  return REVIEW_STATUS_TAGS[status].type
+}
+
 async function retry(row: DocumentItem): Promise<void> {
   await retryDocument(row.id)
   ElMessage.success('重试已提交，文档重新进入解析队列')
   void load()
 }
 
+function openPreview(row: DocumentItem): void {
+  previewDoc.value = row
+  previewVisible.value = true
+}
+
+async function removeDoc(row: DocumentItem): Promise<void> {
+  const action = await ElMessageBox.confirm(
+    `删除后文档不可恢复（软删保留审计），检索与问答将不再命中「${row.title}」。确认删除？`,
+    '删除文档',
+    { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+  ).catch(() => 'cancel')
+  if (action === 'cancel') return
+  await deleteDocument(row.id)
+  ElMessage.success('文档已删除')
+  void load()
+}
+
 async function confirmRow(row: DocumentItem): Promise<void> {
   await confirmDocument(row.id)
   ElMessage.success('文档已确认激活，参与检索')
+  void load()
+}
+
+/** 草稿审核通过（agent-evolution #05）：confirm 双示审计提示；通过后进解析入库管道 */
+async function approveDraftRow(row: DocumentItem): Promise<void> {
+  const action = await ElMessageBox.confirm(
+    `通过后「${row.title}」将立即进入解析入库管道，收口后可被检索命中；本操作将记入审计日志。确认通过？`,
+    '草稿审核 · 通过',
+    { type: 'warning', confirmButtonText: '通过并入库', cancelButtonText: '取消' },
+  ).catch(() => 'cancel')
+  if (action === 'cancel') return
+  await approveDraft(row.id)
+  ElMessage.success('草稿已通过，进入解析入库队列')
+  void load()
+}
+
+/** 草稿驳回：prompt 必填原因（弹窗校验 + 视图内联双闸），原因留档并记入审计日志 */
+async function rejectDraftRow(row: DocumentItem): Promise<void> {
+  const result = await ElMessageBox.prompt(
+    '驳回后草稿永不入库（不进解析与检索），原因留档并记入审计日志。',
+    '草稿审核 · 驳回',
+    {
+      type: 'warning',
+      confirmButtonText: '确认驳回',
+      cancelButtonText: '取消',
+      inputPlaceholder: '请填写驳回原因（必填）',
+      inputValidator: (input: string) => (input.trim() === '' ? '驳回原因不能为空' : true),
+    },
+  ).catch(() => null)
+  if (result === null) return
+  const reason = String(result.value ?? '').trim()
+  if (reason === '') {
+    ElMessage.warning('请填写驳回原因后再提交')
+    return
+  }
+  await rejectDraft(row.id, reason)
+  ElMessage.success('草稿已驳回')
   void load()
 }
 
@@ -166,7 +287,10 @@ function onZipImported(): void {
       <el-button @click="resetFilters">重置</el-button>
       <span class="spacer"></span>
       <el-button :loading="loading" @click="refresh">刷新</el-button>
-      <el-button :disabled="!ZIP_IMPORT_ENABLED" @click="zipVisible = true">zip 批量导入</el-button>
+      <el-button :type="isDraftReview ? 'primary' : 'default'" @click="toggleDraftReview">
+        草稿审核
+      </el-button>
+      <el-button @click="zipVisible = true">zip 批量导入</el-button>
       <el-button type="primary" @click="uploadVisible = true">＋ 上传文档</el-button>
     </div>
 
@@ -174,18 +298,27 @@ function onZipImported(): void {
       <el-table-column label="标题" min-width="200">
         <template #default="{ row }">
           {{ row.title }} <span class="ver">v{{ row.version }}</span>
+          <el-tag v-if="row.sourceType === 'draft'" size="small" class="gap-tag">草稿</el-tag>
           <el-tag v-if="row.degraded" size="small" type="info" class="gap-tag">降级解析</el-tag>
         </template>
       </el-table-column>
       <el-table-column label="部门" width="90">
         <template #default="{ row }">{{ deptName(row.deptCode) }}</template>
       </el-table-column>
-      <el-table-column label="状态" width="200">
+      <el-table-column label="状态" width="220">
         <template #default="{ row }">
           <el-tag v-if="row.status === 'ready'" type="success">● 就绪</el-tag>
           <span v-else-if="row.status === 'parsing'" class="parsing-cell">
-            <el-tag type="warning">◐ 解析中</el-tag>
+            <el-tag type="warning">◐ {{ row.parseStage || '解析中' }}</el-tag>
+            <!-- 真实进度（后端按阶段/嵌入批次落库）；无值时回退不确定动画（如旧数据） -->
             <el-progress
+              v-if="row.parseProgress != null"
+              class="bar"
+              :percentage="row.parseProgress"
+              :stroke-width="6"
+            />
+            <el-progress
+              v-else
               class="bar"
               :percentage="50"
               :indeterminate="true"
@@ -196,13 +329,40 @@ function onZipImported(): void {
           </span>
           <el-tooltip
             v-else-if="row.status === 'failed'"
-            :content="row.parseError || '解析失败'"
+            :content="
+              (row.parseError || '解析失败') +
+              (row.parseErrorDetail ? '\n' + row.parseErrorDetail : '')
+            "
             placement="top"
+            popper-class="parse-err-tip"
           >
             <el-tag type="danger">✖ 失败(悬停看原因)</el-tag>
           </el-tooltip>
           <el-tag v-else type="info">◔ 排队中</el-tag>
-          <el-tag v-if="!row.isActive" type="warning" size="small" class="gap-tag">待确认</el-tag>
+          <el-tag
+            v-if="!row.isActive && row.sourceType !== 'draft'"
+            type="warning"
+            size="small"
+            class="gap-tag"
+          >
+            待确认
+          </el-tag>
+          <!-- 草稿审核状态（agent-evolution #05）：已驳回悬停看原因 -->
+          <el-tooltip
+            v-if="row.reviewStatus === '已驳回' && row.rejectReason"
+            :content="row.rejectReason"
+            placement="top"
+          >
+            <el-tag size="small" type="danger" class="gap-tag">已驳回</el-tag>
+          </el-tooltip>
+          <el-tag
+            v-else-if="row.reviewStatus"
+            size="small"
+            :type="reviewTagType(row.reviewStatus)"
+            class="gap-tag"
+          >
+            {{ row.reviewStatus }}
+          </el-tag>
         </template>
       </el-table-column>
       <el-table-column label="责任人" width="100">
@@ -211,24 +371,55 @@ function onZipImported(): void {
       <el-table-column label="生效日期" width="110">
         <template #default="{ row }">{{ row.effectiveDate }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="180" fixed="right">
+      <el-table-column label="操作" width="290" fixed="right">
         <template #default="{ row }">
+          <el-button
+            v-if="row.sourceType === 'draft' && row.reviewStatus === '待审核'"
+            link
+            type="success"
+            @click="approveDraftRow(row)"
+          >
+            通过
+          </el-button>
+          <el-button
+            v-if="row.sourceType === 'draft' && row.reviewStatus === '待审核'"
+            link
+            type="danger"
+            @click="rejectDraftRow(row)"
+          >
+            驳回
+          </el-button>
           <el-button v-if="row.status === 'failed'" link type="warning" @click="retry(row)">
             重试
           </el-button>
-          <el-button v-if="!row.isActive" link type="success" @click="confirmRow(row)">
+          <el-button
+            v-if="!row.isActive && row.sourceType !== 'draft'"
+            link
+            type="success"
+            @click="confirmRow(row)"
+          >
             确认激活
           </el-button>
-          <el-tooltip content="暂不支持" placement="top">
-            <span class="tip-host">
-              <el-button link type="danger" disabled>删除</el-button>
-            </span>
-          </el-tooltip>
+          <el-button v-if="row.status === 'ready'" link type="primary" @click="openPreview(row)">
+            预览
+          </el-button>
+          <el-button
+            v-if="row.status === 'ready'"
+            link
+            type="primary"
+            tag="a"
+            :href="docFileUrl(row.id)"
+            target="_blank"
+            rel="noopener"
+          >
+            原文件
+          </el-button>
+          <el-button link type="danger" @click="removeDoc(row)">删除</el-button>
         </template>
       </el-table-column>
       <template #empty>
-        <el-empty description="还没有文档" :image-size="60">
-          <el-button type="primary" size="small" @click="uploadVisible = true"
+        <el-empty :description="isDraftReview ? '暂无待审核草稿' : '还没有文档'" :image-size="60">
+          <el-button v-if="!isDraftReview" type="primary" size="small" @click="uploadVisible = true"
             >上传第一份文档</el-button
           >
         </el-empty>
@@ -247,12 +438,13 @@ function onZipImported(): void {
       />
     </div>
 
-    <UploadDialog
-      :visible="uploadVisible"
-      @close="onUploadClosed"
-      @uploaded="onUploaded"
-    />
+    <UploadDialog :visible="uploadVisible" @close="onUploadClosed" @uploaded="onUploaded" />
     <ZipImportDialog :visible="zipVisible" @close="zipVisible = false" @imported="onZipImported" />
+    <DocPreviewDialog
+      :visible="previewVisible"
+      :target="previewDoc"
+      @close="previewVisible = false"
+    />
   </div>
 </template>
 
@@ -287,6 +479,11 @@ function onZipImported(): void {
 }
 .parsing-cell .bar {
   width: 90px;
+}
+/* 失败 tooltip 双行（友好原因 + 技术详情），popper 挂 body 需全局样式 */
+:global(.parse-err-tip) {
+  white-space: pre-line;
+  max-width: 460px;
 }
 .gap-tag {
   margin-left: 4px;

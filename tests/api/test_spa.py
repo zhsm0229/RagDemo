@@ -49,3 +49,22 @@ def test_without_static_dir_behavior_unchanged(monkeypatch):
     monkeypatch.delenv("STATIC_DIR", raising=False)
     client = TestClient(create_app())
     assert client.get("/").status_code == 404
+
+
+def test_spa_index_and_client_routes_no_cache(tmp_path, monkeypatch):
+    """index.html（含客户端路由 fallback 与根部文件）必须 no-cache：强制协商校验，
+    否则浏览器启发式缓存旧壳、发版后继续加载旧 JS（2026-10-02 旧文案事故根因）。"""
+    monkeypatch.setenv("STATIC_DIR", str(_make_dist(tmp_path)))
+    client = TestClient(create_app())
+    for path in ("/", "/chat", "/favicon.ico"):
+        resp = client.get(path)
+        assert resp.headers["Cache-Control"] == "no-cache", path
+
+
+def test_spa_hashed_assets_immutable_cache(tmp_path, monkeypatch):
+    """/assets 为 vite hash 文件名产物：immutable 长缓存安全且省协商开销。"""
+    monkeypatch.setenv("STATIC_DIR", str(_make_dist(tmp_path)))
+    client = TestClient(create_app())
+    resp = client.get("/assets/app.js")
+    assert resp.status_code == 200
+    assert resp.headers["Cache-Control"] == "public, max-age=31536000, immutable"

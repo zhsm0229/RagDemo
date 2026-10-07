@@ -44,10 +44,16 @@ export class UsersPage {
       inline.first().waitFor({ state: 'visible', timeout: 10_000 }),
       toast.waitFor({ state: 'visible', timeout: 10_000 }),
     ])
-    const text = (await inline.first().isVisible().catch(() => false))
+    const text = (await inline
+      .first()
+      .isVisible()
+      .catch(() => false))
       ? ((await inline.first().textContent()) ?? '')
       : ((await toast.textContent()) ?? '')
-    await dialog.getByRole('button', { name: /取消/ }).click().catch(() => undefined)
+    await dialog
+      .getByRole('button', { name: /取消/ })
+      .click()
+      .catch(() => undefined)
     await expect(dialog).toBeHidden()
     return text
   }

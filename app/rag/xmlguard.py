@@ -21,15 +21,17 @@ def scan_entry(
 ) -> None:
     """自读条目守规（§6.1）：声明超限即拒；流式分块扫描 DOCTYPE/ENTITY（重叠窗口防跨界漏检）。"""
     if declared > max_entry_xml_bytes:
-        raise ApiError(ERR_PARSE_FAILED, "docx 单个条目解压后超过 64MB 上限", 422)
+        raise ApiError(ERR_PARSE_FAILED, "OOXML 单个条目解压后超过 64MB 上限", 422)
     tail = b""
     read = 0
     with archive.open(name) as fh:
         while chunk := fh.read(XML_SCAN_CHUNK):
             read += len(chunk)
             if read > max_entry_xml_bytes:  # 实读限量：谎报声明头的第二道闸
-                raise ApiError(ERR_PARSE_FAILED, "docx 单个条目解压后超过 64MB 上限", 422)
+                raise ApiError(ERR_PARSE_FAILED, "OOXML 单个条目解压后超过 64MB 上限", 422)
             window = (tail + chunk).lower()  # 仅块级小写副本，无全量 data.lower()
             if b"<!doctype" in window or b"<!entity" in window:
-                raise ApiError(ERR_PARSE_FAILED, "docx 内含 DOCTYPE/ENTITY 声明，已拒绝解析", 422)
+                raise ApiError(
+                    ERR_PARSE_FAILED, "OOXML 包内含 DOCTYPE/ENTITY 声明，已拒绝解析", 422
+                )
             tail = window[-SCAN_OVERLAP:]

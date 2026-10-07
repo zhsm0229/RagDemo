@@ -55,7 +55,13 @@ async function mountChange(): Promise<{
   const pinia = createPinia()
   setActivePinia(pinia)
   const auth = useAuthStore()
-  auth.user = { userId: 3, username: '新员工小李', role: 'member', mustChangePassword: true }
+  auth.user = {
+    userId: 3,
+    username: '新员工小李',
+    role: 'member',
+    mustChangePassword: true,
+    memoryEnabled: true,
+  }
   auth.loaded = true
   const router = makeRouter()
   await router.push('/change-password')
@@ -140,6 +146,7 @@ describe('改密提交与后端交互', () => {
       username: '新员工小李',
       role: 'member',
       mustChangePassword: false,
+      memoryEnabled: true,
     })
     await fillAndSubmit(wrapper, 'OldPass123', 'NewPass1234', 'NewPass1234')
     expect(postMock).toHaveBeenCalledWith(

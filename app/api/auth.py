@@ -25,12 +25,17 @@ class ChangePasswordRequest(BaseModel):
 
 
 def _user_payload(user: User) -> dict:
-    """用户信息响应（camelCase，standards §3.4；数据库行不直接返回）。"""
+    """用户信息响应（camelCase，standards §3.4；数据库行不直接返回）。
+
+    memoryEnabled（0006，F-210）：前端"我的记忆"开关初值来源——本响应同时被
+    login / me / change-password 复用，三处形状一致（多余键对既有消费者无害）。
+    """
     return {
         "userId": user.id,
         "username": user.username,
         "role": user.role,
         "mustChangePassword": user.must_change_password,
+        "memoryEnabled": user.memory_enabled,
     }
 
 
@@ -47,6 +52,19 @@ def login(body: LoginRequest, request: Request, db: DbSession) -> JSONResponse:
         httponly=True,
         samesite="lax",  # Secure 与否随部署形态配置化（§6.5），内网 http 不启用
     )
+    return response
+
+
+@router.post("/logout")
+def logout(request: Request) -> JSONResponse:
+    """登出：令牌 jti 记入进程内黑名单（§5.3，登出即时失效）+ 下发过期 Cookie。
+
+    不设登录门（CurrentUser）：令牌缺失/已失效也照常 200 清 Cookie（幂等），
+    登出是客户端意图操作，拒绝只会让旧 Cookie 清不掉，亦防借登出探测令牌有效性。
+    """
+    auth_service.logout(request.cookies.get(COOKIE_NAME))
+    response = JSONResponse(content={"code": 0, "message": "ok", "data": None})
+    response.delete_cookie(COOKIE_NAME, httponly=True, samesite="lax")  # 属性与登录下发一致
     return response
 
 

@@ -3,12 +3,11 @@
  * zip 批量导入对话框（F-1007，ui-spec §三上传对话框"支持 zip 批量"）：
  * 选 .zip → 提交 → 逐文件结果表（filename/status/reason，四态中文映射）+ 汇总。
  * 422（非有效 zip / 安全超限）内联展示且弹窗不关闭（§22.2）；有入库条目时通知父级刷新。
- * 端点属 T3 分支（36da916）未合入 feat/w4-fe：入口按钮暂置灰（deviations #21），
- * 组件与调用已按 T3 契约就位，合并后启用按钮即可用。
+ * 端点 POST /documents/import-zip 已上线（2026-09-30 起），入口按钮无条件可用。
  */
 import { ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import type { UploadFile } from 'element-plus'
+import type { UploadFile, UploadInstance } from 'element-plus'
 import { ApiClientError } from '@/api/client'
 import { importDocumentsZip, type ZipImportSummary } from '@/api/documents'
 import { ZIP_STATUS_TAGS } from './options'
@@ -16,6 +15,11 @@ import { ZIP_STATUS_TAGS } from './options'
 const props = defineProps<{ visible: boolean }>()
 const emit = defineEmits<{ close: []; imported: [] }>()
 
+// 每次打开弹窗都换 key 强制 el-upload 重挂：其内部列表非受控，仅靠 clearFiles/reset
+// 清理在"关→开"时序下仍会让二次选包失效（on-exceed 吞掉 on-change，DOC-23 实测）。
+// 重挂 = 内部状态绝对干净，reset 只负责业务 refs。
+const zipEpoch = ref(0)
+const uploadRef = ref<UploadInstance>()
 const file = ref<UploadFile | null>(null)
 const fileErr = ref('')
 const error = ref('')
@@ -27,12 +31,16 @@ function reset(): void {
   fileErr.value = ''
   error.value = ''
   summary.value = null
+  uploadRef.value?.clearFiles()
 }
 
 watch(
   () => props.visible,
   (visible) => {
-    if (visible) reset()
+    if (visible) {
+      zipEpoch.value += 1
+      reset()
+    }
   },
 )
 
@@ -75,9 +83,10 @@ defineExpose({ handleFile, submit })
     width="640px"
     :close-on-click-modal="false"
     @update:model-value="emit('close')"
-    @closed="reset"
   >
     <el-upload
+      :key="zipEpoch"
+      ref="uploadRef"
       drag
       :auto-upload="false"
       :limit="1"
@@ -88,7 +97,8 @@ defineExpose({ handleFile, submit })
       <div style="padding: 20px">
         将 zip 压缩包拖到此处，或 <em>点击选择</em><br />
         <span style="font-size: 12px; color: var(--el-text-color-secondary)">
-          条目须为 pdf / docx；文件名按 部门_主题_日期 命名可自动补元数据，否则跳过待补
+          条目支持 pdf / docx / md / txt / csv / xlsx / pptx / html（doc / ppt / xls
+          自动转换）；文件名按 部门_主题_日期 命名可自动补元数据，否则跳过待补
         </span>
       </div>
     </el-upload>

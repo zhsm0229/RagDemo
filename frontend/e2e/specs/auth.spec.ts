@@ -31,11 +31,18 @@ test('AUTH-04: 首登强制改密后才能进入业务页', async ({ page }) => 
   await page.goto('/kb/documents')
   await expect(page).toHaveURL(/change-password/)
   // 完成改密（种子会在下轮重置回 must_change，幂等）
-  await page.locator('.el-form-item', { hasText: '原密码' }).locator('input').fill(
-    process.env.E2E_PASSWORD ?? 'E2ePass#2026',
-  )
-  await page.locator('.el-form-item', { hasText: '新密码' }).locator('input').fill('E2eRotated#2026')
-  await page.locator('.el-form-item', { hasText: '确认密码' }).locator('input').fill('E2eRotated#2026')
+  await page
+    .locator('.el-form-item', { hasText: '原密码' })
+    .locator('input')
+    .fill(process.env.E2E_PASSWORD ?? 'E2ePass#2026')
+  await page
+    .locator('.el-form-item', { hasText: '新密码' })
+    .locator('input')
+    .fill('E2eRotated#2026')
+  await page
+    .locator('.el-form-item', { hasText: '确认密码' })
+    .locator('input')
+    .fill('E2eRotated#2026')
   await page.locator('button.submit').click()
   await expect(page).toHaveURL(/\/chat/)
 })

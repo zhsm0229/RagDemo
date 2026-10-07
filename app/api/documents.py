@@ -1,4 +1,5 @@
-r"""文档路由（薄控制器）：multipart 上传 / zip 批量导入 / 文件名建议 / 列表 / 重试 / 确认，业务全部委托 services。
+r"""文档入库路由（薄控制器，自原 documents.py 按域拆分的本体）：multipart 上传 / zip 批量
+导入 / 文件名建议 + 异步段装配与后台任务体。
 
 上传（admin-only）：表单元数据（camelCase）→ 合规勾选与部门 code 卡口（422）→
 同步段 create_document（白名单/SHA-256 查重/落盘/登记 parsing，422/409 经全局
@@ -6,51 +7,55 @@ r"""文档路由（薄控制器）：multipart 上传 / zip 批量导入 / 文�
 （W1 测试断言用），否则 BackgroundTasks 独立会话执行。zip 批量导入（F-1007，
 admin-only）：安全预扫描（§6.3）与逐条目元数据解析在 services/zip_import，
 本层只接线调度回调——test_mode 同步解析，否则逐条挂 BackgroundTasks（依添加
-顺序串行，并发=1 与单文件共用餐票）。列表（admin-only）：dept/status/keyword
-过滤 + 分页（pageSize 1-100 默认 20，§22.1），created_at 降序（同刻以 id 降序
-兜底），响应键名全 camelCase。retry（DOC-11）仅 failed 可重跑；confirm 激活
-待确认文档（is_active=False → True）。两者成功响应前整清问答精确缓存
-（request.app.state.chat_deps.cache.clear()，W3 Task 1）：文档状态变化改变可
-检索事实，陈旧答案不能等 TTL 自然过期（W2 移交②）。
+顺序串行，并发=1 与单文件共用餐票）。
+
+按域拆分（行数红线 §1.4，同 document_rebuild.py 先例）：文档治理（列表/版本/
+retry/confirm/delete）在 document_admin.py，用户侧回显（file/preview/images）在
+document_files.py——三者同 prefix=/documents、tags=documents，main.py 分别注册。
+build_ingest_deps 是异步段依赖包唯一装配点（document_admin / document_rebuild 共用）。
 """
 
 from datetime import date
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, Query, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, UploadFile
 
 from app.api.deps import AdminUser, DbSession
-from app.core.assembly import build_embedder
+from app.core.assembly import build_converter, build_embedder, build_storage
 from app.core.clock import get_clock
 from app.core.config import get_settings
 from app.core.errors import ERR_PARAM_INVALID, ApiError
-from app.core.storage import LocalFileStorage
 from app.db.base import SessionLocal
-from app.db.models import Document
 from app.services import ingest as ingest_service
 from app.services import metadata_suggest, zip_import
 from app.services.departments import resolve_dept_id
-from app.services.document_views import list_documents as list_document_rows
-from app.services.document_views import list_versions
 from app.services.ingest import IngestDeps, process_document
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
-_ALLOWED_STATUS: tuple[str, ...] = ("pending", "parsing", "ready", "failed")  # 与 DDL CHECK 同源
 _MAX_UPLOAD_BYTES: int = 50 * 1024 * 1024  # 与 check_sync 的 50MB 上限同源（API 侧早拒用）
-_MSG_NOT_FOUND = "文档不存在"
 
 
 def build_ingest_deps() -> IngestDeps:
-    """异步段依赖包（装配口径同 T13，供本文件与 document_rebuild 共用）：
-    embedder 走装配工厂（真实 TEI；test_mode 回 Stub）。"""
+    """异步段依赖包（装配口径同 T13，供本文件与 document_admin/document_rebuild 共用）：
+    embedder/storage/converter 全部走 core/assembly 装配工厂（findings I5：实现类只在
+    装配层实例化）；converter 依赖 Gotenberg（convert_base_url 空=未配置，老格式解析时
+    报中文原因）。"""
     settings = get_settings()
     return IngestDeps(
         parser_settings=settings,
         embedder=build_embedder(settings),
         clock=get_clock(),
-        storage=LocalFileStorage(settings.storage_dir),
+        storage=build_storage(settings),
+        converter=build_converter(settings),
     )
+
+
+def process_in_background(doc_id: int) -> None:
+    """后台进程段入口（BackgroundTasks 任务体，上传/zip/retry 共用）：请求会话已关，
+    独立 SessionLocal 执行；失败由状态机落 failed。"""
+    with SessionLocal() as session:
+        process_document(session, build_ingest_deps(), doc_id)
 
 
 def _early_reject_oversize(file: UploadFile) -> None:
@@ -64,36 +69,6 @@ def _early_reject_oversize(file: UploadFile) -> None:
     file.file.seek(0)
     if size > _MAX_UPLOAD_BYTES:
         raise ApiError(ERR_PARAM_INVALID, "文件超过 50MB 上限", 422)
-
-
-def _process_in_background(doc_id: int) -> None:
-    """后台进程段入口：请求会话已关，独立 SessionLocal 执行；失败由状态机落 failed。"""
-    with SessionLocal() as session:
-        process_document(session, build_ingest_deps(), doc_id)
-
-
-def _doc_payload(doc: Document, dept_code: str) -> dict:
-    """列表项（camelCase，standards §3.4）：数据库行不直接返回。"""
-    return {
-        "id": doc.id,
-        "title": doc.title,
-        "deptId": doc.dept_id,
-        "deptCode": dept_code,
-        "originalFilename": doc.original_filename,
-        "mime": doc.mime,
-        "sizeBytes": doc.size_bytes,
-        "version": doc.version,
-        "effectiveDate": doc.effective_date.isoformat(),
-        "expiryDate": doc.expiry_date.isoformat() if doc.expiry_date else None,
-        "ownerName": doc.owner_name,
-        "status": doc.status,
-        "parseEngine": doc.parse_engine,
-        "parseError": doc.parse_error,
-        "isActive": doc.is_active,
-        "uploadedBy": doc.uploaded_by,
-        "createdAt": doc.created_at.isoformat(),
-        "updatedAt": doc.updated_at.isoformat(),
-    }
 
 
 @router.post("", status_code=202)
@@ -122,7 +97,7 @@ def upload_document(
     }
     doc = ingest_service.create_document(
         db,
-        LocalFileStorage(get_settings().storage_dir),
+        build_storage(get_settings()),
         user,
         meta,
         file.file.read(),
@@ -132,7 +107,7 @@ def upload_document(
     if get_settings().test_mode:  # 测试模式同步执行，响应即可断言终态；生产走后台任务
         process_document(db, build_ingest_deps(), doc.id)
     else:
-        background.add_task(_process_in_background, doc.id)
+        background.add_task(process_in_background, doc.id)
     return {"code": 0, "message": "ok", "data": {"id": doc.id, "status": doc.status}}
 
 
@@ -155,11 +130,11 @@ def import_documents_zip(
         if get_settings().test_mode:
             process_document(db, build_ingest_deps(), doc_id)
         else:
-            background.add_task(_process_in_background, doc_id)
+            background.add_task(process_in_background, doc_id)
 
     data = zip_import.import_zip(
         db,
-        LocalFileStorage(get_settings().storage_dir),
+        build_storage(get_settings()),
         user,
         file.file,
         on_accepted,
@@ -188,100 +163,3 @@ def suggest_metadata(
             "suggestedEffectiveDate": meta.effective_date.isoformat(),
         },
     }
-
-
-@router.get("")
-def list_documents(
-    user: AdminUser,
-    db: DbSession,
-    dept: Annotated[str | None, Query()] = None,
-    status: Annotated[str | None, Query()] = None,
-    keyword: Annotated[str | None, Query()] = None,
-    page: Annotated[int, Query(ge=1)] = 1,
-    pageSize: Annotated[int, Query(ge=1, le=100)] = 20,
-) -> dict:
-    """文档列表（§22.1）：过滤条件可选，created_at 降序（同刻 id 降序兜底），分页返回。
-    过滤语句与分页在 services/document_views（§1.6 api 禁直写查询），本层只做参数
-    校验（dept code 枚举 / status 枚举）与 DTO 组装。"""
-    _check_status(status)
-    rows, total = list_document_rows(
-        db,
-        dept_id=resolve_dept_id(db, dept) if dept is not None else None,
-        status=status,
-        keyword=keyword,
-        page=page,
-        page_size=pageSize,
-    )
-    return {
-        "code": 0,
-        "message": "ok",
-        "data": {
-            "items": [_doc_payload(doc, code) for doc, code in rows],
-            "total": total,
-            "page": page,
-            "pageSize": pageSize,
-        },
-    }
-
-
-def _check_status(status: str | None) -> None:
-    """status 枚举校验：取值外 422 中文原因（与 DDL CHECK 同源的 _ALLOWED_STATUS）。"""
-    if status is not None and status not in _ALLOWED_STATUS:
-        raise ApiError(ERR_PARAM_INVALID, f"状态取值无效：{status}", 422)
-
-
-@router.get("/{doc_id}/versions")
-def get_document_versions(doc_id: int, user: AdminUser, db: DbSession) -> dict:
-    """版本历史（F-303，W7 补齐）：同部门同主题全部代次按 version 降序（含当前行），
-    归档版本在案可追溯；寻址文档不存在 404。查询在 services/document_views。"""
-    rows = list_versions(db, doc_id)
-    return {
-        "code": 0,
-        "message": "ok",
-        "data": {
-            "items": [
-                {
-                    "id": row.id,
-                    "version": row.version,
-                    "status": row.status,
-                    "isActive": row.is_active,
-                    "effectiveDate": row.effective_date.isoformat(),
-                    "sizeBytes": row.size_bytes,
-                    "ownerName": row.owner_name,
-                    "uploadedBy": row.uploaded_by,
-                    "createdAt": row.created_at.isoformat(),
-                }
-                for row in rows
-            ]
-        },
-    }
-
-
-@router.post("/{doc_id}/retry")
-def retry_document(
-    doc_id: int, user: AdminUser, db: DbSession, background: BackgroundTasks, request: Request
-) -> dict:
-    """失败重试（DOC-11）：仅 failed 可重跑；非测试模式先落 parsing 再交后台接管。
-    成功响应前整清问答精确缓存：重试改变文档可检索事实，TTL 不可依赖（W3 Task 1）。"""
-    doc = db.get(Document, doc_id)
-    if doc is None:
-        raise ApiError(ERR_PARAM_INVALID, _MSG_NOT_FOUND, 404)
-    if doc.status != "failed":
-        raise ApiError(ERR_PARAM_INVALID, "仅失败状态的文档可以重试", 422)
-    if get_settings().test_mode:
-        process_document(db, build_ingest_deps(), doc.id)
-    else:
-        doc.status = "parsing"  # 后台接管前先落 parsing：列表即时反馈（DOC-11 状态回 parsing）
-        db.commit()
-        background.add_task(_process_in_background, doc.id)
-    request.app.state.chat_deps.cache.clear()  # 成功响应前失效：宁可多一次生成不留旧答案
-    return {"code": 0, "message": "ok", "data": {"id": doc.id, "status": doc.status}}
-
-
-@router.post("/{doc_id}/confirm")
-def confirm_document(doc_id: int, user: AdminUser, db: DbSession, request: Request) -> dict:
-    """待确认激活：管理员确认敏感/近似命中文档 → is_active=True（service 负责审计与提交）。
-    成功响应前整清问答精确缓存：激活改变可检索事实，TTL 不可依赖（W3 Task 1）。"""
-    doc = ingest_service.confirm_document(db, doc_id, actor_user_id=user.id)
-    request.app.state.chat_deps.cache.clear()  # 成功响应前失效（同 retry，W2 移交②）
-    return {"code": 0, "message": "ok", "data": {"id": doc.id, "isActive": doc.is_active}}

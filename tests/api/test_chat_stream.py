@@ -154,6 +154,7 @@ def test_rag_stream_full_event_order_and_message_persisted(chat_client, session)
         "n": 1,
         "refType": "doc",
         "refId": chunk.id,
+        "docId": chunk.document_id,  # 文档主键：引用弹窗取原文件/图片按文档寻址（≠chunk id）
         "title": DOC_TITLE,
         "page": None,
         "titlePath": DOC_TITLE,

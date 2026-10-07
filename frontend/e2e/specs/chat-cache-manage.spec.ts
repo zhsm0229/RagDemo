@@ -29,11 +29,15 @@ test.describe('缓存与会话管理', () => {
     await chat.expectConversationListed(QUESTION)
     const item = page.locator('.conv-item', { hasText: QUESTION }).first()
     await item.hover()
-    await item.getByRole('button', { name: '删除' }).click({ force: true }).catch(() =>
-      item.evaluate((el) => (el.querySelector('.del') as HTMLElement | null)?.click()),
-    )
+    await item
+      .getByRole('button', { name: '删除' })
+      .click({ force: true })
+      .catch(() => item.evaluate((el) => (el.querySelector('.del') as HTMLElement | null)?.click()))
     // 二次确认（ElMessageBox，§22.2 禁遮罩关闭）
-    await page.getByRole('button', { name: /确定|删除/ }).last().click()
+    await page
+      .getByRole('button', { name: /确定|删除/ })
+      .last()
+      .click()
     await expect(page.locator('.conv-item', { hasText: QUESTION })).toHaveCount(0)
   })
 })

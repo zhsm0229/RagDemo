@@ -105,6 +105,62 @@ _ALLOWED_WIPE = frozenset(
 )
 
 
+# 上传夹具清单（{stamp} 为每轮时间戳占位，函数内 format 填充）。用例映射：
+# latest=DOC-01；dup 与 latest 字节同源（DOC-06 查重面）；doc13 v1/v2=DOC-13 版本递增；
+# fail-redline=DOC-11 重试恒败（清洗后 <100 字触发 §10.3 红线）；docspec=documents.spec 专用。
+_E2E_BODY: tuple[str, ...] = (
+    "第四条 住宿费一线城市每晚六百元封顶，超标部分自理。",
+    "第五条 报销须在出差结束后十个工作日内提交费用系统。",
+    "第六条 城市间交通费凭票据实报销，鼓励乘坐公共交通工具。",
+)
+_FIXTURE_TEMPLATES: list[tuple[str, tuple[str, ...]]] = [
+    ("e2e-upload-latest.docx", ("流水号 {stamp}。", *_E2E_BODY)),
+    ("e2e-upload-dup.docx", ("流水号 {stamp}。", *_E2E_BODY)),  # 与 latest 字节同源
+    (
+        "e2e-doc13-v1.docx",
+        (
+            "考勤与休假制度 v1（流水号 {stamp}）。",
+            "工作日上午九点至下午六点，午休一小时。",
+            "年假需提前三个工作日在 OA 系统申请，由直属主管审批后报人事部备案。",
+            "迟到早退月度累计三次以上者，取消当月全勤奖金并计入年度考核记录。",
+        ),
+    ),
+    (
+        "e2e-doc13-v2.docx",
+        (
+            "考勤与休假制度 v2（流水号 {stamp}）。",
+            "工作日弹性打卡时段为八点半至九点半。",
+            "年假需提前五个工作日在 OA 系统申请，超过五天需部门总监加签确认。",
+            "旷工半天以上者扣发当日工资并全公司通报批评，情节严重者解除劳动合同。",
+        ),
+    ),
+    ("e2e-fail-redline.docx", ("短正文",)),  # 清洗后 <100 字 → §10.3 红线失败（重试恒失败）
+    (
+        "e2e-upload-docspec.docx",
+        (
+            "DOC-01 专用流水号 {stamp}。",
+            "第七条 本夹具仅供 documents.spec 的入库用例使用，内容与 latest 互异。",
+        ),
+    ),
+    (
+        # SEC-AGENT-01（agent-evolution #09）串库边界断言用：上传时归属客服部门、仅客服
+        # 可见，稳定标记 SVCONLY-7f3a92 供 hr 侧 agent 运行"产出/事件流不含客服域语料"
+        # 的取反断言（检索工具 dept 过滤在服务端强制，标记越界出现即回归）。
+        "e2e-svc-only.docx",
+        (
+            (
+                "客服专属话术标记 SVCONLY-7f3a92（流水号 {stamp}）。本夹具归属客服部门，"
+                "仅客服成员可见，其他部门 agent 运行的产出与事件流不得包含本标记。"
+            ),
+            (
+                "客户咨询退货时，客服先核对订单号与购买日期，七天无理由范围内直接登记退货工单，"
+                "告知客户仓库三个工作日内完成验收、退款原路返回。"
+            ),
+        ),
+    ),
+]
+
+
 def main() -> None:
     wipe = os.environ.get("E2E_WIPE") == "1"
     if wipe:
@@ -128,8 +184,8 @@ def _write_upload_fixture() -> None:
     """按用例生成内容互异的上传夹具到上传卷（宿主 = ./data/uploads/e2e/）。
 
     每轮内嵌时间戳 → 与历史轮次内容不同（F-1001 不误伤）；套件内各用例内容互异
-    → 同轮不互撞。映射：latest=DOC-01；latest 复传=DOC-06 查重；doc13v1/v2=DOC-13
-    版本递增；fail-redline=DOC-11 重试（正文 <100 字触发 §10.3 红线，重试恒失败）。
+    → 同轮不互撞。清单表驱动（findings C5：单函数 ≤50 行），用例映射见
+    _FIXTURE_TEMPLATES 注释。
     """
     import time
     from pathlib import Path
@@ -139,45 +195,13 @@ def _write_upload_fixture() -> None:
     out_dir = Path("/srv/ragdemo/data/e2e")
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = str(time.time()).replace(".", "")
-
-    def make(name: str, paragraphs: list[str]) -> None:
+    for name, paragraphs in _FIXTURE_TEMPLATES:
         doc = Document()
         doc.add_heading("员工差旅费报销小样", level=0)
         for para in paragraphs:
-            doc.add_paragraph(para)
+            doc.add_paragraph(para.format(stamp=stamp))
         doc.save(out_dir / name)
-
-    body = [
-        "第四条 住宿费一线城市每晚六百元封顶，超标部分自理。",
-        "第五条 报销须在出差结束后十个工作日内提交费用系统。",
-        "第六条 城市间交通费凭票据实报销，鼓励乘坐公共交通工具。",
-    ]
-    make("e2e-upload-latest.docx", [f"流水号 {stamp}。", *body])
-    make("e2e-upload-dup.docx", [f"流水号 {stamp}。", *body])  # 与 latest 字节同源
-    make(
-        "e2e-doc13-v1.docx",
-        [
-            f"考勤与休假制度 v1（流水号 {stamp}）。",
-            "工作日上午九点至下午六点，午休一小时。",
-            "年假需提前三个工作日在 OA 系统申请，由直属主管审批后报人事部备案。",
-            "迟到早退月度累计三次以上者，取消当月全勤奖金并计入年度考核记录。",
-        ],
-    )
-    make(
-        "e2e-doc13-v2.docx",
-        [
-            f"考勤与休假制度 v2（流水号 {stamp}）。",
-            "工作日弹性打卡时段为八点半至九点半。",
-            "年假需提前五个工作日在 OA 系统申请，超过五天需部门总监加签确认。",
-            "旷工半天以上者扣发当日工资并全公司通报批评，情节严重者解除劳动合同。",
-        ],
-    )
-    make("e2e-fail-redline.docx", ["短正文"])  # 清洗后 <100 字 → §10.3 红线失败（重试恒失败）
-    make(
-        "e2e-upload-docspec.docx",
-        [f"DOC-01 专用流水号 {stamp}。", "第七条 本夹具仅供 documents.spec 的入库用例使用，内容与 latest 互异。"],
-    )
-    print("[e2e-seed] 上传夹具已生成（5 份，内容互异）")
+    print("[e2e-seed] 上传夹具已生成（7 份，内容互异）")
 
 
 if __name__ == "__main__":

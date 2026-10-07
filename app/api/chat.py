@@ -15,14 +15,22 @@ SSE 线格式化（`event: {name}\ndata: {json}\n\n`，presentation 关切）。
 一次（事务①提交、prepare 后再提交终结 autobegin 的读事务），连接即还池——在途 SSE
 流期间请求级会话不占池中连接，依赖 teardown 在响应发完后才执行，不能依赖它释放。
 测试经 monkeypatch 把 services.chat_stream.SessionLocal 指向测试连接
-（tests/api/conftest.py chat_client），使生成器短会话与用例读回同处测试事务。
+（tests/api/conftest.py chat_client）。
+
+长期记忆抽取（F-210 §3.2，agent-evolution）：qa/rag 计划在构造 StreamingResponse 前
+挂 BackgroundTasks——响应发完后由任务体（memory_extract.extract_memory_task，自管
+SessionLocal 短会话）按 assistant_msg_id 读回收尾后的回答再抽取，cache 命中与 refuse
+不挂任务；端点阶段回答尚未生成，"test_mode 同步执行"（documents.py 先例）在此不
+适用——同步跑在端点内读到的是空占位正文；测试可依赖 TestClient 同步驱动完整 ASGI
+生命周期（后台任务在响应体发完后、client.post 返回前执行完毕），可断言性与同步
+模式等价。
 """
 
 import json
 from collections.abc import Iterator
 from time import perf_counter
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session
@@ -40,6 +48,7 @@ from app.services.chat import (
 )
 from app.services.chat_stream import event_stream, interrupt_turn
 from app.services.departments import all_dept_id
+from app.services.memory_extract import extract_memory_task
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -120,7 +129,11 @@ def _persist_placeholder(
 
 @router.post("/stream")
 def chat_stream(
-    body: ChatStreamRequest, user: ReadyUser, db: DbSession, request: Request
+    body: ChatStreamRequest,
+    user: ReadyUser,
+    db: DbSession,
+    request: Request,
+    background: BackgroundTasks,
 ) -> StreamingResponse:
     """问答流式端点：请求阶段完成限额/落库/计划（brief 第 1-5 步），生成器只管流与收尾。"""
     deps: ChatDeps = request.app.state.chat_deps
@@ -130,10 +143,16 @@ def chat_stream(
     user_msg_id, assistant_msg_id = _persist_placeholder(db, conversation, user, body.question)
     history = load_recent_history(db, conversation.id, user_msg_id)
     try:
-        plan = prepare_turn(db, deps, user.dept_id, all_dept_id(db), body.question, history)
+        plan = prepare_turn(
+            db, deps, user.dept_id, all_dept_id(db), body.question, history, user_id=user.id
+        )
     except UpstreamError:
         interrupt_turn(assistant_msg_id)  # CHAT-12：事务①已提交，不留 is_active=true 幽灵占位
         raise  # 开流前失败：交全局 500 兜底（话术脱敏不变），事务随依赖 teardown 回滚
+    if plan.kind in ("qa", "rag"):
+        # 长期记忆抽取（F-210 §3.2）：仅 qa/rag 挂后台任务，cache/refuse 不抽取；
+        # 任务体自管短会话读回收尾后的回答执行（响应发完后运行，失败静默不影响主链路）
+        background.add_task(extract_memory_task, deps, user.id, assistant_msg_id, body.question)
     db.commit()  # 终结 history/prepare 的 autobegin 读事务：连接还池，流期间不占连接
     return StreamingResponse(
         _format_stream(event_stream(deps, plan, assistant_msg_id, perf_counter())),

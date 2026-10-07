@@ -10,6 +10,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import KnowledgeGapCard from '@/components/overview/KnowledgeGapCard.vue'
+import ServicesHealthPanel from '@/components/admin/ServicesHealthPanel.vue'
 import { getHealth, getOverview, type HealthData, type OverviewData } from '@/api/overview'
 import { deptCodeLabel } from '@/components/admin/options'
 import { fmtTime } from '@/utils/format'
@@ -130,6 +131,8 @@ function expiryClass(expiryDate: string): string {
     </section>
 
     <KnowledgeGapCard />
+
+    <ServicesHealthPanel />
 
     <section v-if="health" class="panel" data-test="health-panel">
       <h4>语料健康度</h4>

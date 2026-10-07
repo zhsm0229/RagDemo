@@ -22,15 +22,27 @@ const auth = useAuthStore()
 const route = useRoute()
 const router = useRouter()
 
-// 权限矩阵（ui-spec §一）：member 仅问答页；知识库/管理两组 admin 专属
+// 权限矩阵（ui-spec §一 + agent-ui-design §1）：member 可问答/我的记忆/帮助；
+// 记忆是个人数据与问答同属员工日常动线（不放"知识库/管理"两组）；知识库/管理两组 admin 专属
 const menuGroups = computed<MenuGroup[]>(() => {
-  const groups: MenuGroup[] = [{ title: '', items: [{ path: '/chat', label: '智能问答' }] }]
+  const groups: MenuGroup[] = [
+    {
+      title: '',
+      items: [
+        { path: '/chat', label: '智能问答' },
+        { path: '/memory', label: '我的记忆' },
+        { path: '/help', label: '帮助' },
+      ],
+    },
+  ]
   if (auth.isAdmin) {
     groups.push({
       title: '知识库',
       items: [
         { path: '/kb/documents', label: '文档管理' },
         { path: '/kb/qa-pairs', label: '问答对管理' },
+        // 模板生成（agent-ui-design §1.1）：仅 admin，产物草稿流向"问答对管理"审核
+        { path: '/kb/template-gen', label: '模板生成' },
       ],
     })
     groups.push({

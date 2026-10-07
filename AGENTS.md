@@ -41,7 +41,7 @@ make up / down  # docker compose 起/停（pg 等）
 4. 密钥只走 `.env`（git 已忽略），仓库只留 `.env.example`；密钥禁止出现在日志/响应/前端。
 5. 上传三重白名单（扩展名 + Content-Type + 魔数）；文件名 UUID 落盘；解析/解压设上限（§6.3）。
 6. LLM 调用：`max_tokens` 服务端 clamp；用户问题只走 user role；召回内容包裹 `<data>` 标签声明不可信（§17.5）。
-7. 提交前自查：参数绑定 ✓ 密钥不泄漏 ✓ 输入校验 ✓ LLM 安全约束 ✓ 审计留痕 ✓ 错误脱敏 ✓（§23.2）。
+7. 提交前自查：参数绑定 ✓ 密钥不泄漏 ✓ 输入校验 ✓ LLM 安全约束 ✓ 审计留痕 ✓ 错误脱敏 ✓ 界面文案同步 ✓（改界面原文必须同步 docs/user-guide.md 与 frontend/src/help/，§23.2）。
 
 ## 代码风格
 
@@ -69,6 +69,6 @@ make up / down  # docker compose 起/停（pg 等）
 
 Conventional Commits：`feat/fix/docs/refactor/test/chore: 简述`；一个提交一件事，提交前 ruff 必须通过。分支：`feat/<模块>-<简述>` / `fix/<问题>`，禁止直推 main。
 
-## 当前状态（2026-09-30）
+## 当前状态（2026-10-06）
 
-W1-W5 五个冲刺全部收口，**内测加固完成：恢复演练 RTO≈4min 达标、串库结构边界双向 0 泄漏、知识缺口/召回统计可裁剪项转正、用户手册与 runbook 定稿**。已落地：脚手架与入库管道（W1）、问答全链路（W2）、管理后台与评测（W3）、前端全页面（W4）、内测加固（W5：全局 401 统一/部门口径统一/知识缺口报告/chunk 召回统计/备份恢复基建+演练/用户手册/串库数据包）。后端 640 passed/2 skipped、前端 lint/type/217/build 四门全绿；接口契约见 [docs/api.md](docs/api.md)（47 端点）。**待部署机硬项**：串库真实阈值复测（runbook §5.5）、非功能基线 #7、备份调度实测、golden mineru 回归、合规清单签批——清单见 W5 账本 `.superpowers/sdd/2026-09-30-w5-hardening/progress.md` 终审节。W6=验收评审（七条硬指标）。注意：用户并行会话在途（TEI/MinerU 容器与 golden 样本落库），改共享文件前先重读。
+W1-W5 五个冲刺全部收口，**内测加固完成：恢复演练 RTO≈4min 达标、串库结构边界双向 0 泄漏、知识缺口/召回统计可裁剪项转正、用户手册与 runbook 定稿**。已落地：脚手架与入库管道（W1）、问答全链路（W2）、管理后台与评测（W3）、前端全页面（W4）、内测加固（W5：全局 401 统一/部门口径统一/知识缺口报告/chunk 召回统计/备份恢复基建+演练/用户手册/串库数据包）。后端 729+ passed、前端 lint/type/235/build 四门全绿；接口契约见 [docs/api.md](docs/api.md)（**端点总数：57**，头部标记行由 `tests/unit/test_api_contract.py` 从 FastAPI 实际路由对账，改端点必须同步该标记行与文档章节）。**待部署机硬项**：串库真实阈值复测（runbook §5.5）、非功能基线 #7、备份调度实测、golden mineru 回归、合规清单签批——清单见 W5 账本 `.superpowers/sdd/2026-09-30-w5-hardening/progress.md` 终审节。W6=验收评审（七条硬指标）。注意：用户并行会话在途（TEI/MinerU 容器与 golden 样本落库），改共享文件前先重读。

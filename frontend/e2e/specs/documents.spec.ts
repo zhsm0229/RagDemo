@@ -6,7 +6,9 @@ import { DocumentsPage } from '../pages/DocumentsPage'
 
 // 种子每轮生成内容唯一的上传夹具（容器写上传卷，宿主路径 data/uploads/e2e/），
 // 使 DOC-01 上传不被上一轮的 F-1001 精确查重秒拒。
-const DOC_SPEC = fileURLToPath(new URL('../../../data/uploads/e2e/e2e-upload-docspec.docx', import.meta.url))
+const DOC_SPEC = fileURLToPath(
+  new URL('../../../data/uploads/e2e/e2e-upload-docspec.docx', import.meta.url),
+)
 
 // DOC-01/02（P0）：上传 docx → TEST_MODE 同步解析 → 列表"● 就绪"。
 // 标题带时间戳：uq_doc_active(dept_id, title) 唯一，重复运行不撞 409。

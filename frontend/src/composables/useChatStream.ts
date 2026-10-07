@@ -19,6 +19,14 @@ import type { ChatStreamEvent, CitationItem, FeedbackKind } from '@/api/types'
 
 export type MessageStatus = 'streaming' | 'done' | 'failed'
 
+/**
+ * 等待阶段提示（2026-10-06 用户体验缺陷修复：发送后到首 token 之间气泡全白无交互）：
+ * search=检索知识库中（涵盖改写/召回/重排——prepare_turn 在后端开流前执行，此窗口
+ * 只有 citations 事件可为界）；generate=引用已就绪等待生成。首个 token 到达即置 null，
+ * 内容开始流式呈现后提示退场。
+ */
+export type StreamStage = 'search' | 'generate'
+
 export interface ChatMessage {
   /** 本地渲染 key（流式占位在后端回 id 前为 null） */
   key: number
@@ -27,6 +35,10 @@ export interface ChatMessage {
   content: string
   citations: CitationItem[]
   status: MessageStatus
+  /** 等待阶段提示（仅流式占位期非空；历史/终态消息恒 null） */
+  stage: StreamStage | null
+  /** 占位创建时刻（等待提示的"已等待 N 秒"计时起点） */
+  startedAt: number | null
   refused: boolean
   cacheHit: boolean
   /** done 事件下发的用量（对照原型 msg-meta 的 token·耗时；历史接口无此字段恒 null） */
@@ -66,6 +78,8 @@ function userMessage(question: string, keyOf: () => number): ChatMessage {
     content: question,
     citations: [],
     status: 'done',
+    stage: null,
+    startedAt: null,
     refused: false,
     cacheHit: false,
     promptTokens: null,
@@ -87,6 +101,8 @@ function assistantPlaceholder(keyOf: () => number): ChatMessage {
     content: '',
     citations: [],
     status: 'streaming',
+    stage: 'search', // 发问即示"正在检索知识库"（改写/召回/重排窗口），citations 到达转"生成中"
+    startedAt: Date.now(),
     refused: false,
     cacheHit: false,
     promptTokens: null,
@@ -115,6 +131,8 @@ export function mapHistory(items: MessageItem[], keyOf: () => number): ChatMessa
       content: item.content,
       citations: item.citations ?? [],
       status: 'done',
+      stage: null,
+      startedAt: null,
       refused: item.answerType === 'refuse',
       cacheHit: item.cacheHit,
       promptTokens: null,
@@ -140,6 +158,8 @@ export function mapHistory(items: MessageItem[], keyOf: () => number): ChatMessa
         content: '',
         citations: [],
         status: 'failed',
+        stage: null,
+        startedAt: null,
         refused: false,
         cacheHit: false,
         promptTokens: null,
@@ -160,12 +180,15 @@ function applyEvent(message: ChatMessage, event: ChatStreamEvent): void {
   switch (event.event) {
     case 'citations':
       message.citations = event.items
+      message.stage = 'generate' // 引用已就绪：等待提示切"正在生成回答"
       break
     case 'token':
       message.content += event.content
+      message.stage = null // 内容开始流式呈现，提示退场（光标接管）
       break
     case 'done':
       message.status = 'done'
+      message.stage = null
       message.id = event.messageId
       message.refused = event.refused
       message.cacheHit = event.cacheHit
@@ -175,6 +198,7 @@ function applyEvent(message: ChatMessage, event: ChatStreamEvent): void {
       break
     case 'error':
       message.status = 'failed'
+      message.stage = null
       message.failure = event.message
       message.retryable = event.retryable
       break
@@ -255,6 +279,7 @@ export function useChatStream(hooks: ChatStreamHooks = {}) {
       )
     } catch (error) {
       placeholder.status = 'failed'
+      placeholder.stage = null
       if (error instanceof ApiClientError && error.code === ABORTED_CODE) {
         // 用户停止：不打失败原因文案，可重问（重试=同问题新发一条）
         placeholder.stopped = true

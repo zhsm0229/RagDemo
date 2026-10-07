@@ -3,3 +3,5 @@ dist
 coverage
 node_modules
 src/api/schema.d.ts
+e2e/.artifacts
+.mimosa/

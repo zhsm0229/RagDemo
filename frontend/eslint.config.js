@@ -11,7 +11,14 @@ export default defineConfigWithVueTs(
   },
   {
     name: 'app/files-to-ignore',
-    ignores: ['dist/**', 'coverage/**', 'node_modules/**', 'src/api/schema.d.ts'],
+    // e2e/.artifacts 为 Playwright 运行产物（trace viewer 构建物），2026-10 起出现，不属源码
+    ignores: [
+      'dist/**',
+      'coverage/**',
+      'node_modules/**',
+      'src/api/schema.d.ts',
+      'e2e/.artifacts/**',
+    ],
   },
   pluginVue.configs['flat/essential'],
   vueTsConfigs.recommended,

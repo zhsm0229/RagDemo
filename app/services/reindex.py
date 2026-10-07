@@ -15,7 +15,7 @@ parsing/pending 属状态冲突 422）；全库重建逐文档独立事务，单
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.core.errors import ERR_PARAM_INVALID, ApiError
+from app.core.errors import ERR_NOT_FOUND, ERR_PARAM_INVALID, ApiError
 from app.db.models import Chunk, Document
 from app.services.audit import record_audit
 from app.services.ingest import process_document
@@ -35,9 +35,12 @@ def _chunk_count(session: Session, doc_id: int) -> int:
 
 
 def ensure_rebuildable(doc: Document | None) -> Document:
-    """受理校验（api 受理段与执行段共用，错误文案单一事实来源）：存在、未软删、ready。"""
+    """受理校验（api 受理段与执行段共用，错误文案单一事实来源）：存在、未软删、ready。
+
+    不存在 404/3003（findings I13：documents 域寻址失败与全仓口径统一）；软删/非
+    ready 是状态冲突 422/1003（参数与状态类，非寻址语义）。"""
     if doc is None:
-        raise ApiError(ERR_PARAM_INVALID, _MSG_NOT_FOUND, 404)
+        raise ApiError(ERR_NOT_FOUND, _MSG_NOT_FOUND, 404)
     if doc.deleted_at is not None:
         raise ApiError(ERR_PARAM_INVALID, _MSG_DELETED, 422)
     if doc.status != "ready":

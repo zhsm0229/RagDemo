@@ -158,7 +158,9 @@ def _doc_audits(session: Session, doc_id: int) -> list[AuditLog]:
 
 
 def test_upload_doc_rejected_with_chinese_reason(client, session, sandbox_storage, test_mode):
-    """上传 .doc：422 code=1001，中文原因提示另存为 docx，不入库。"""
+    """上传 .doc：422 code=1001，中文原因提示格式不支持，不入库。
+    2026-10-05：.doc 已进入转换链白名单（F-1015），但 binary 占位内容无 OLE 魔数 →
+    仍被 magic_mismatch 拒收；文案断言从"docx"改为格式不符通用语。"""
     admin_login(client, session)
     resp = post_document(
         client, filename="note.doc", content=b"legacy word binary", mime="application/msword"
@@ -166,7 +168,7 @@ def test_upload_doc_rejected_with_chinese_reason(client, session, sandbox_storag
     assert resp.status_code == 422
     body = resp.json()
     assert body["code"] == ERR_UNSUPPORTED_FORMAT
-    assert "docx" in body["message"]
+    assert "格式" in body["message"]
     assert session.scalar(select(func.count()).select_from(Document)) == 0
 
 
@@ -413,7 +415,7 @@ def test_upload_normal_mode_schedules_background(client, session, sandbox_storag
 
     scheduled: list[int] = []
     monkeypatch.setattr(
-        documents_api, "_process_in_background", lambda doc_id: scheduled.append(doc_id)
+        documents_api, "process_in_background", lambda doc_id: scheduled.append(doc_id)
     )
     admin_login(client, session)
 

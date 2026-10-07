@@ -46,6 +46,7 @@ const MEMBER: UserInfo = {
   username: '客服小王',
   role: 'member',
   mustChangePassword: false,
+  memoryEnabled: true,
 }
 const FRESH_MEMBER: UserInfo = { ...MEMBER, mustChangePassword: true }
 

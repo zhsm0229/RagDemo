@@ -76,6 +76,13 @@ CREATE TABLE documents (
                       CHECK (status IN ('pending','parsing','ready','failed')),
     parse_engine      TEXT,                          -- mineru / pypdf / python-docx / pypdf-degraded
     parse_error       TEXT,                          -- 失败原因（中文）
+    source_type       TEXT NOT NULL DEFAULT 'upload'
+                      CHECK (source_type IN ('upload','draft')),
+                                                 -- 来源=上传|Agent 生成草稿（agent-evolution #05，迁移 0007）
+    review_status     TEXT
+                      CHECK (review_status IN ('待审核','已通过','已驳回')),
+                                                 -- 草稿审核状态，仅 source_type='draft' 有值（无审核不落地红线）
+    reject_reason     TEXT,                          -- 驳回原因（中文，审核人填写），仅已驳回有值
     is_active         BOOLEAN NOT NULL DEFAULT TRUE, -- 生效版本；新版本上传旧版置 false
     deleted_at        TIMESTAMPTZ,                   -- 软删时间（区别于版本归档：is_active=false 且 deleted_at IS NULL 为归档版本）
     uploaded_by       BIGINT NOT NULL REFERENCES users(id),
@@ -326,3 +333,79 @@ FROM messages WHERE role = 'assistant' GROUP BY 1, 2, 3;
 - §4.7 审计覆盖管理动作 ✅（audit_logs + F-801 清单）
 - 100x 预留：messages 分区已建成、ACL/同步/配额表 DDL 到位待触发 ✅
 - M10 治理字段：documents.content_hash（唯一索引）/ simhash / expiry_date，chunks.hit_count / last_hit_at / dup_of ✅
+
+## 六、Agent 演进表预告（2026-10-06 立项）
+
+> 来源：[agent-evolution.md](agent-evolution.md)（决策文档）与 features.md F-210 ~ F-212。本节为**设计意图预告**，最终列/约束/索引以实现工单评审为准；**迁移落地以实际迁移链为准则：0006（user_memories + users.memory_enabled）→ 0007（documents 草稿列 source_type/review_status，见 §三 注记）→ 0008（agent_runs）→ 0009（agent_steps，自 0008 分出并按实现工单补 `error` 列，见 §六.17 勾稽注）**，编号若与并行在途变更冲突，以实际迁移链顺延调整、不改设计内容。2026-10-06 工单 09 已按 0006-0009 逐列核对（差异以勾稽注标注）。
+
+### 16. user_memories 用户长期记忆（迁移 0006，F-210）
+
+```sql
+CREATE TABLE user_memories (
+    id                BIGSERIAL PRIMARY KEY,
+    user_id           BIGINT NOT NULL REFERENCES users(id),    -- 归属用户；记忆按用户隔离（非部门维度），只注入本人会话
+    content           TEXT NOT NULL CHECK (length(content) BETWEEN 1 AND 40),  -- 单条画像 ≤40 字（服务层抽取约束，CHECK 兜底）
+    source_message_id BIGINT,                                  -- 抽取来源消息（逻辑引用 messages.id，不建物理 FK——分区表限制；保留期内可追溯来源）
+    is_active         BOOLEAN NOT NULL DEFAULT TRUE,           -- 软删统一标记：管理页删除与"上限 30 淘汰最旧"均置 false，不物理删
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_user_memories_user ON user_memories(user_id, created_at DESC) WHERE is_active;
+-- 注入取最近 ≤10 条时间倒序，部分索引即可覆盖；不建向量索引
+-- 配套（同迁移 0006）：users 增列 memory_enabled BOOLEAN NOT NULL DEFAULT TRUE（用户级记忆开关，全局开关为部署配置项不进库）
+```
+
+设计意图与约定：
+
+- **无向量列**：注入是"最近发生的画像"（时间倒序）而非"最相关的画像"（语义召回），语义检索无必要；未来画像量大到需要语义检索时按触发线评审再加（agent-evolution §三.1、§25 禁清单纪律）。
+- 上限 30 条在服务层维护（写入超限将最旧 is_active 置 false）；敏感信息排除（复用 F-1006 口径）为服务层抽取前置条件，CHECK 只兜长度。
+- 迁移中每列加中文注释（业务含义与取值范围，§4.6 惯例）；删除/淘汰一律软删，物理清理随 retention 统一评估。
+- **2026-10-06 勾稽注（实现为准）**：0006 实际 CHECK 为 `length(content) BETWEEN 1 AND 200`——自动抽取 ≤40 字由服务层约束（`memory_extract` 截断+校验），CHECK 上限 200 兜的是管理页手动添加通道（上限 200 字）；设计稿的 1-40 CHECK 未采纳，其余列/索引/部分索引与设计一致。
+
+### 17. agent_runs / agent_steps Agent 任务与轨迹（agent_runs=迁移 0008，agent_steps=迁移 0009，F-211/F-212）
+
+```sql
+CREATE TABLE agent_runs (
+    id                BIGSERIAL PRIMARY KEY,
+    user_id           BIGINT NOT NULL REFERENCES users(id),
+    dept_id           BIGINT NOT NULL REFERENCES departments(id),  -- 检索类工具的隔离口径来源（F-502 同源），审计与隔离排查用
+    run_type          TEXT NOT NULL,                -- 任务类型：template_draft / ...（枚举随任务扩展，TEXT + CHECK 迁移友好）
+    status            TEXT NOT NULL DEFAULT 'running'
+                      CHECK (status IN ('running','succeeded','failed','cancelled')),
+    input             JSONB NOT NULL,               -- 任务输入快照
+    output            JSONB,                        -- 草稿/结果（审核前皆为草稿，无审核不落地）
+    error             TEXT,                         -- 失败中文摘要（技术细节只进服务端日志，错误脱敏）
+    model             TEXT,
+    prompt_tokens     INT NOT NULL DEFAULT 0,       -- 成本口径同 messages（F-209）
+    completion_tokens INT NOT NULL DEFAULT 0,
+    latency_ms        INT,
+    started_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at       TIMESTAMPTZ,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_agent_runs_user ON agent_runs(user_id, created_at DESC);
+CREATE INDEX idx_agent_runs_dept_time ON agent_runs(dept_id, created_at DESC);
+
+CREATE TABLE agent_steps (
+    id          BIGSERIAL PRIMARY KEY,
+    run_id      BIGINT NOT NULL REFERENCES agent_runs(id),
+    seq         INT NOT NULL,                       -- 步序（run 内从 1 递增）
+    step_type   TEXT NOT NULL CHECK (step_type IN ('llm','tool','planning')),
+    tool_name   TEXT,                               -- step_type='tool' 时必填；子代理与文件系统操作逐工具落此列（审计面逐工具落实）
+    args        JSONB,                              -- 工具参数快照（截断上限实现期定，防膨胀）
+    observation TEXT,                               -- 工具/模型观察结果（截断存储）
+    latency_ms  INT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    -- 只增不改：无 updated_at（同 audit_logs 口径）；审计字段在 ToolProvider.invoke 层统一写入，工具实现不自行落库
+);
+CREATE INDEX idx_agent_steps_run ON agent_steps(run_id, seq);
+```
+
+设计意图与约定：
+
+- runs/steps 属**审计面**（agent-evolution §四.5）：DeepAgents 子代理与虚拟文件系统操作逐工具落 steps，不做事后补记；每个新 ToolProvider 接入时审计字段完整性为评审强制项。
+- runs 可更新（running → 终态 + output/用量回填）；steps 只增不改，与"审核回放"职责一致。
+- **2026-10-06 勾稽注（实现为准）**：①agent_steps 实际随迁移 0009 落地（0008 先落 agent_runs，拆批见迁移头注释），并在设计稿列集外**补 `error` 列**（工具失败中文原因快照，脱敏话术与 run.error 同口径，成功为 NULL）；②agent_runs.run_type 实际为 TEXT 不设 CHECK（迁移友好，注释口径）；③两表其余列/约束/索引与设计一致，逐列中文注释齐备。
+- 保留策略预告：比照提问记录 90 天两段式（§4.6）评估；因承担审核回放职责倾向延长保留期，**以实现工单与合规签批为准**。
+- AG-UI 事件流（F-212）与 steps 一一对应：前端事件序 = 库内轨迹序，收缩旧端点后仍可回放。

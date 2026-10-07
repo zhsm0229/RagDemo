@@ -12,8 +12,11 @@ import { useAuthStore } from '@/stores/auth'
 import LoginView from '@/views/LoginView.vue'
 import ChangePasswordView from '@/views/ChangePasswordView.vue'
 import ChatView from '@/views/ChatView.vue'
+import MemoryView from '@/views/MemoryView.vue'
+import HelpView from '@/views/HelpView.vue'
 import DocumentsView from '@/views/DocumentsView.vue'
 import QaPairsView from '@/views/QaPairsView.vue'
+import TemplateGenView from '@/views/TemplateGenView.vue'
 import RetrievalTestView from '@/views/RetrievalTestView.vue'
 import UsersView from '@/views/UsersView.vue'
 import MessagesView from '@/views/MessagesView.vue'
@@ -33,6 +36,10 @@ const router = createRouter({
       component: MainLayout,
       children: [
         { path: 'chat', name: 'chat', component: ChatView, meta: { title: '智能问答' } },
+        // 我的记忆：个人数据页，全员可见（不设 requiresAdmin，agent-ui-design §2.8）
+        { path: 'memory', name: 'memory', component: MemoryView, meta: { title: '我的记忆' } },
+        // 帮助中心：全员可见（不设 requiresAdmin），纯静态内容页
+        { path: 'help', name: 'help', component: HelpView, meta: { title: '帮助' } },
         {
           path: 'kb/documents',
           name: 'kb-documents',
@@ -44,6 +51,14 @@ const router = createRouter({
           name: 'kb-qa-pairs',
           component: QaPairsView,
           meta: { title: '知识库·问答对管理', requiresAdmin: true },
+        },
+        // 模板生成（agent-evolution #08，agent-ui-design §1.2）：AG-UI 单次运行工作台，
+        // 产物草稿流向文档管理审核，紧邻问答对管理形成"生成 → 审核"动线
+        {
+          path: 'kb/template-gen',
+          name: 'kb-template-gen',
+          component: TemplateGenView,
+          meta: { title: '知识库·模板生成', requiresAdmin: true },
         },
         {
           path: 'admin/retrieval-test',

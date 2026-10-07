@@ -19,9 +19,15 @@ dependencies = [
     "python-docx",
     "pypdf",
     "openpyxl==3.1.5",
+    "python-pptx",
     "pydantic-settings",
     "apscheduler",
     "httpx",
+    # ---- Agent 演进（F-211/212，工单 #04，详见 docs/specs/agent-evolution.md §四/§六）----
+    "deepagents>=0.7.22",  # deep agent harness（LangGraph 基座）：模板生成首任务的四件套
+    "langgraph>=1.2.14",  # deepagents 传递依赖：agent 循环与状态机（显式声明便于锁定审计）
+    "langchain-core>=1.6.7",  # app/core/agent_model.py 直接导入：BaseChatModel 最小面适配
+    "ag-ui-protocol>=1.0.0",  # /api/agent/runs SSE 的 AG-UI 事件类型（F-212，不另造方言）
 ]
 
 [project.optional-dependencies]

@@ -29,6 +29,14 @@ class Document(Base):
             "status IN ('pending','parsing','ready','failed')",
             name="documents_status_check",
         ),
+        CheckConstraint(
+            "source_type IN ('upload','draft')",
+            name="documents_source_type_check",
+        ),
+        CheckConstraint(
+            "review_status IN ('待审核','已通过','已驳回')",
+            name="documents_review_status_check",
+        ),
         UniqueConstraint("dept_id", "title", "version", name="uq_doc_title_dept_ver"),
         # 单一生效版本数据库级强制：同部门同主题仅一个 is_active 版本（§11.6）
         Index("uq_doc_active", "dept_id", "title", unique=True, postgresql_where=text("is_active")),
@@ -57,7 +65,30 @@ class Document(Base):
     owner_name: Mapped[str] = mapped_column(Text)  # 责任人必填
     status: Mapped[str] = mapped_column(Text, server_default=text("'pending'"))
     parse_engine: Mapped[str | None] = mapped_column(Text)
-    parse_error: Mapped[str | None] = mapped_column(Text)  # 失败原因（中文）
+    parse_error: Mapped[str | None] = mapped_column(Text)  # 失败原因（中文，用户可见）
+    parse_stage: Mapped[str | None] = mapped_column(
+        Text, comment="解析当前阶段文案（排队中/解析中/分块中/向量化中），仅 parsing 期有值"
+    )
+    parse_progress: Mapped[int | None] = mapped_column(
+        Integer, comment="解析真实进度 0-100（向量化阶段按嵌入批次推进），收口置空"
+    )
+    parse_error_detail: Mapped[str | None] = mapped_column(
+        Text, comment="技术错误摘要（异常类型+消息+末栈帧），管理端定位用，与用户文案双轨"
+    )
+    # 以下三列 comment 与 0007 迁移逐字一致（autogenerate 零差异守卫依赖，同 qa_pairs.is_active 先例）
+    source_type: Mapped[str] = mapped_column(
+        Text,
+        server_default=text("'upload'"),
+        comment="来源=上传|Agent 生成草稿（upload|draft）",
+    )
+    review_status: Mapped[str | None] = mapped_column(
+        Text,
+        comment="草稿审核状态（待审核/已通过/已驳回），仅 source_type='draft' 有值",
+    )
+    reject_reason: Mapped[str | None] = mapped_column(
+        Text,
+        comment="驳回原因（中文，审核人填写），仅 review_status='已驳回' 有值",
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     deleted_at: Mapped[datetime | None] = mapped_column(_ts())  # 软删时间
     uploaded_by: Mapped[int] = mapped_column(BigInteger)
@@ -138,3 +169,48 @@ class QaPair(Base):
     created_by: Mapped[int] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(_ts(), server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(_ts(), server_default=text("now()"))
+
+
+class DocumentImage(Base):
+    """文档内嵌图片资产登记（F-1017）：OCR 前的原图落盘记录，支撑引用弹窗回显。
+
+    行在 commit_ready（ingest_commit，#08 拆分后）与 chunks 同事务写入；解析失败时盘上文件为无害孤儿（行未写）。"""
+
+    __tablename__ = "document_images"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["document_id"], ["documents.id"], name="document_images_document_id_fkey"
+        ),
+        UniqueConstraint("document_id", "image_index", name="uq_doc_image_index"),
+        Index("idx_doc_images_doc", "document_id"),
+    )
+
+    # 列 comment 与 0005 迁移逐字一致（autogenerate 零差异守卫依赖，同 qa_pairs.is_active 先例）
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True, comment="主键"
+    )
+    document_id: Mapped[int] = mapped_column(
+        BigInteger,
+        comment="所属文档 id（documents.id，随文档软删/归档不动，回显走文档闸）",
+    )
+    image_index: Mapped[int] = mapped_column(
+        Integer, comment="文档内图片序号（1 起，与切片'图片N：'标记对应）"
+    )
+    file_path: Mapped[str] = mapped_column(
+        Text, comment="图片落盘相对路径（storage_dir 下 images/{doc_id}/img_{n}.{ext}）"
+    )
+    mime: Mapped[str] = mapped_column(
+        Text, comment="图片 MIME（image/png 等，回显响应 Content-Type）"
+    )
+    page_no: Mapped[int | None] = mapped_column(
+        Integer, comment="所在页码/幻灯片序号（无来源为 NULL）"
+    )
+    ocr_chars: Mapped[int] = mapped_column(
+        Integer, server_default=text("0"), comment="该图 OCR 提取的字符数（0=图无文字）"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        _ts(), server_default=text("now()"), comment="创建时间"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        _ts(), server_default=text("now()"), comment="更新时间"
+    )

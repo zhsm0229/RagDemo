@@ -2,8 +2,8 @@
 /**
  * 跑分报告面板（F-603，api.md §4.2.7 + F-1012 阈值扫描区）：totals 四键卡 +
  * byDept/byQtype 两表 + [阈值扫描]。报告 running/failed 也可出（部分明细+真实状态）。
- * 阈值扫描端点已随 feat/w4-fe 合并（5878a01）：FEATURE_FLAGS.thresholdScan 默认
- * true（T13 评审 #44 解禁，同 #21），开关仅作应急回灰。曲线 accuracy 为重放口径
+ * 阈值扫描端点已随 feat/w4-fe 合并（5878a01）：T13 评审 #44 解禁，扫描入口
+ * 无条件启用（历史开关 FEATURE_FLAGS 已移除）。曲线 accuracy 为重放口径
  * ≠ 报告 accuracy（T5 评审裁决，文案注明）；scope.note（qa 曲线口径局限）原样
  * 展示（T5 裁决）。
  */
@@ -17,7 +17,7 @@ import {
   type ThresholdScanResult,
 } from '@/api/evalAdmin'
 import { deptCodeLabel } from '@/components/admin/options'
-import { FEATURE_FLAGS, formatPercent, qtypeLabel, runStatusTag } from './options'
+import { formatPercent, qtypeLabel, runStatusTag } from './options'
 
 const props = defineProps<{ runId: number | null; visible: boolean }>()
 
@@ -54,7 +54,7 @@ async function load(): Promise<void> {
 }
 
 async function doScan(): Promise<void> {
-  if (!FEATURE_FLAGS.thresholdScan || scanning.value || props.runId === null) return
+  if (scanning.value || props.runId === null) return
   scanning.value = true
   scanErr.value = ''
   try {
@@ -127,12 +127,7 @@ defineExpose({ load, doScan })
 
     <h4 class="sec-title">阈值扫描</h4>
     <div class="scan-bar">
-      <el-button
-        type="primary"
-        :disabled="!FEATURE_FLAGS.thresholdScan"
-        :loading="scanning"
-        data-test="scan-btn"
-        @click="doScan"
+      <el-button type="primary" :loading="scanning" data-test="scan-btn" @click="doScan"
         >扫描阈值曲线</el-button
       >
       <span v-if="scan" class="muted">

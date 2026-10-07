@@ -12,18 +12,53 @@ U+FFFD 的字符占比。simhash64 为
 """
 
 import hashlib
+import io
 import re
+import zipfile
 from pathlib import PureWindowsPath
 from typing import NamedTuple
 
-ALLOWED_EXTS: frozenset[str] = frozenset({".pdf", ".docx"})
-ALLOWED_MIMES: frozenset[str] = frozenset(
-    {"application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+# 支持格式（2026-10-05 扩展决策，standards §10.1）：知识文档八类 + 老格式三类（转换链）
+ALLOWED_EXTS: frozenset[str] = frozenset(
+    {".pdf", ".docx", ".md", ".txt", ".csv", ".xlsx", ".pptx", ".html", ".doc", ".ppt", ".xls"}
 )
+# 宏格式一律拒收（宏是 OOXML 主要攻击面；F-1014）——先于白名单检查以给出专属文案
+MACRO_EXTS: frozenset[str] = frozenset({".xlsm", ".docm", ".pptm"})
+# 文本类：跳过魔数（无二进制头），改校验 UTF-8 可解码且无 NUL 字节
+TEXT_EXTS: frozenset[str] = frozenset({".txt", ".md", ".csv", ".html"})
 MAX_SYNC_BYTES: int = 50 * 1024 * 1024
-MAGIC_BY_EXT: dict[str, bytes] = {".pdf": b"%PDF", ".docx": b"PK\x03\x04"}
-GARBLE_THRESHOLD: float = 0.05
+
+# 按扩展名给合法 MIME 集合：单上传的 Content-Type 由客户端给出（存在变体），
+# zip 导入由调用方按扩展名补齐——集合判定兼容变体（如 md 的 text/markdown 与 text/plain）
+_MIMES_BY_EXT: dict[str, frozenset[str]] = {
+    ".pdf": frozenset({"application/pdf"}),
+    ".docx": frozenset({"application/vnd.openxmlformats-officedocument.wordprocessingml.document"}),
+    ".xlsx": frozenset({"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}),
+    ".pptx": frozenset(
+        {"application/vnd.openxmlformats-officedocument.presentationml.presentation"}
+    ),
+    ".doc": frozenset({"application/msword"}),
+    ".xls": frozenset({"application/vnd.ms-excel"}),
+    ".ppt": frozenset({"application/vnd.ms-powerpoint"}),
+    ".md": frozenset({"text/markdown", "text/plain"}),
+    ".txt": frozenset({"text/plain"}),
+    ".csv": frozenset({"text/csv", "application/csv", "text/plain"}),
+    ".html": frozenset({"text/html"}),
+}
+ALLOWED_MIMES: frozenset[str] = frozenset().union(*_MIMES_BY_EXT.values())  # 兼容旧引用
+MAGIC_BY_EXT: dict[str, bytes] = {
+    ".pdf": b"%PDF",
+    **{ext: b"PK\x03\x04" for ext in (".docx", ".xlsx", ".pptx")},  # OOXML 家族同为 zip 头
+    **{ext: b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" for ext in (".doc", ".ppt", ".xls")},  # OLE2
+}
+# OOXML 子类型判型：扩展名 → [Content_Types].xml 必含的家族标记（防改名混入，F-1014）
+_OOXML_FAMILY_BY_EXT: dict[str, str] = {
+    ".docx": "wordprocessingml",
+    ".xlsx": "spreadsheetml",
+    ".pptx": "presentationml",
+}
 SIMHASH_NEAR: int = 3
+GARBLE_THRESHOLD: float = 0.05  # 乱码率阈值（清洗后全文判定，ingest_pipeline 消费）
 
 # 全部预编译为模块常量；定长/有界量词 + 数字边界环视，回溯有界（SEC-07 ReDoS 防护）
 _ID_CARD_RE = re.compile(r"(?<![0-9Xx])[0-9]{17}[0-9Xx](?![0-9Xx])")
@@ -81,22 +116,62 @@ def luhn_valid(number: str) -> bool:
 
 
 def check_sync(filename: str, mime: str, content: bytes) -> SyncResult:
-    """同步预检闸门：扩展名 → MIME → 大小 → 魔数，按序短路，失败给稳定 reason 码。
+    """同步预检闸门：宏扩展名 → 扩展名 → MIME → 大小 → 内容判型，按序短路，失败给稳定 reason 码。
 
-    魔数≠内容安全：魔数只挡改名的裸文件，内容级风险（PDF 内嵌 JS/OpenAction、
-    docx XXE/解压炸弹）由解析器（rag/parser.py）与 W2 生成链路处置。
+    内容判型分三类：OOXML（PK 头 → 读 [Content_Types].xml 判家族并拒宏条目，防改名
+    混入，F-1014）；文本类（UTF-8 可解码且无 NUL 字节）；其余按魔数头。损坏 zip 放行
+    给解析器报"包非法"（与现状一致）；魔数≠内容安全：内容级风险由解析器与生成链路处置。
     """
     sha256 = hashlib.sha256(content).hexdigest()
     ext = PureWindowsPath(filename).suffix.lower()
+    if ext in MACRO_EXTS:
+        return SyncResult(False, "macro_not_allowed", sha256)
     if ext not in ALLOWED_EXTS:
         return SyncResult(False, "ext_not_allowed", sha256)
-    if mime not in ALLOWED_MIMES:
+    if mime not in _MIMES_BY_EXT.get(ext, frozenset()):
         return SyncResult(False, "mime_not_allowed", sha256)
     if len(content) > MAX_SYNC_BYTES:
         return SyncResult(False, "too_large", sha256)
+    if ext in TEXT_EXTS:
+        if _is_valid_text(content):
+            return SyncResult(True, None, sha256)
+        return SyncResult(False, "magic_mismatch", sha256)
     if not content.startswith(MAGIC_BY_EXT[ext]):
         return SyncResult(False, "magic_mismatch", sha256)
+    if ext in _OOXML_FAMILY_BY_EXT:
+        ok, reason = _validate_ooxml_family(ext, content)
+        if not ok:
+            return SyncResult(False, reason, sha256)
     return SyncResult(True, None, sha256)
+
+
+def _is_valid_text(content: bytes) -> bool:
+    """文本类校验：UTF-8 严格解码成功且不含 NUL 字节（二进制伪装文本的最廉信号）。"""
+    if b"\x00" in content:
+        return False
+    try:
+        content.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def _validate_ooxml_family(ext: str, content: bytes) -> tuple[bool, str | None]:
+    """OOXML 子类型判型（F-1014）：zip 可读时校验 ① 包内无 vbaProject.bin（宏拒收）
+    ② [Content_Types].xml 含本扩展名家族标记（防改名混入）。zip 损坏放行给解析器
+    报"包非法"（与现状一致）；判型不通过给 magic_mismatch。"""
+    family = _OOXML_FAMILY_BY_EXT[ext]
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            names = archive.namelist()
+            if any(name.endswith("vbaProject.bin") for name in names):
+                return False, "macro_not_allowed"
+            content_types = archive.read("[Content_Types].xml").decode("utf-8", "ignore")
+    except zipfile.BadZipFile:
+        return True, None  # 非法 zip 由 parser._validate_package 给中文原因
+    if family not in content_types:
+        return False, "magic_mismatch"
+    return True, None
 
 
 async def check_async(filename: str, mime: str, content: bytes) -> SyncResult:

@@ -1,10 +1,11 @@
 /**
  * 文档管理页共享枚举文案（对照原型 S.deptName 与部门/状态下拉口径）。
  * 值与后端枚举同源：dept code（service/hr/all）、文档状态机（pending/parsing/ready/failed）、
- * zip 导入逐文件报告状态（accepted/duplicate/rejected/skipped_metadata，T3 契约）。
+ * zip 导入逐文件报告状态（accepted/duplicate/rejected/skipped_metadata，T3 契约）、
+ * 草稿审核状态（待审核/已通过/已驳回，agent-evolution #05 迁移 0007 CHECK 同源）。
  * 状态列 tag 文案在 DocumentsView 模板内逐分支对照原型书写（单一真相源：原型即基线）。
  */
-import type { ZipEntryStatus } from '@/api/documents'
+import type { ReviewStatus, ZipEntryStatus } from '@/api/documents'
 
 export interface Option {
   value: string
@@ -39,4 +40,14 @@ export const ZIP_STATUS_TAGS: Record<
   duplicate: { label: '重复跳过', type: 'warning' },
   rejected: { label: '已拒绝', type: 'danger' },
   skipped_metadata: { label: '元数据待补', type: 'info' },
+}
+
+/** 草稿审核状态三态中文映射与语义色（agent-evolution #05） */
+export const REVIEW_STATUS_TAGS: Record<
+  ReviewStatus,
+  { label: string; type: 'success' | 'warning' | 'danger' | 'info' }
+> = {
+  待审核: { label: '待审核', type: 'warning' },
+  已通过: { label: '已通过', type: 'success' },
+  已驳回: { label: '已驳回', type: 'danger' },
 }

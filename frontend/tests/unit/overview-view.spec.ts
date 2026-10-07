@@ -22,6 +22,14 @@ const fetchMock = vi.fn()
 
 const T0 = '2026-09-28T10:00:00+08:00'
 
+/** 相对当天偏移 N 天的 ISO 日期（YYYY-MM-DD）：待过期/已到期 fixture 用，
+ * 硬编码日期跨月后断言失效（2026-10-02 事故：'2026-10-02' 写死于 9 月用例）。 */
+function isoDaysFromToday(offset: number): string {
+  const d = new Date()
+  d.setDate(d.getDate() + offset)
+  return d.toISOString().slice(0, 10)
+}
+
 const overviewData = {
   totals: { questions: 128, hitRate: 0.875, refuseRate: 0.09, downRate: 0.04, tokens: 2150000 },
   byDept: [
@@ -51,8 +59,44 @@ const healthData = {
   pendingConfirm: 3,
   zeroRecall: [{ id: 5, title: '旧版报销制度', deptCode: 'hr', createdAt: T0 }],
   expiringSoon: [
-    { id: 6, title: '客服话术 v1', expiryDate: '2026-10-02' },
-    { id: 7, title: '已到期未下线文档', expiryDate: '2026-09-01' },
+    { id: 6, title: '客服话术 v1', expiryDate: isoDaysFromToday(3) },
+    { id: 7, title: '已到期未下线文档', expiryDate: isoDaysFromToday(-7) },
+  ],
+}
+
+/** 服务健康 mock（ServicesHealthPanel 挂载即拉）；日期动态生成消时间脆弱 */
+const servicesHealthData = {
+  overall: 'up',
+  services: [
+    { key: 'pg', label: 'PostgreSQL', status: 'up', latencyMs: 2, detail: '' },
+    {
+      key: 'embed',
+      label: '向量化 (TEI)',
+      status: 'up',
+      latencyMs: 5,
+      detail: 'TEST_MODE 桩，未探活',
+    },
+    {
+      key: 'rerank',
+      label: '重排 (TEI)',
+      status: 'up',
+      latencyMs: 5,
+      detail: 'TEST_MODE 桩，未探活',
+    },
+    {
+      key: 'llm',
+      label: '大模型 (LLM)',
+      status: 'up',
+      latencyMs: 8,
+      detail: 'TEST_MODE 桩，未探活',
+    },
+    {
+      key: 'mineru',
+      label: '文档解析 (MinerU)',
+      status: 'not_configured',
+      latencyMs: 0,
+      detail: '未配置',
+    },
   ],
 }
 
@@ -103,6 +147,7 @@ function routeFetch(url: string): Response {
   if (url === '/api/admin/overview?days=1') return okEnvelope(overviewData)
   if (url === '/api/admin/overview?days=7') return okEnvelope(overviewData)
   if (url === '/api/admin/health') return okEnvelope(healthData)
+  if (url === '/api/admin/services/health') return okEnvelope(servicesHealthData)
   if (url === '/api/admin/knowledge-gap?weekOffset=0') return okEnvelope(gapData)
   if (url === '/api/admin/knowledge-gap?weekOffset=-1') return okEnvelope(gapData)
   if (url === '/api/admin/knowledge-gap?weekOffset=-2') return okEnvelope(gapData)
@@ -169,11 +214,12 @@ async function mountOverview(): Promise<VueWrapper> {
 }
 
 describe('统计卡与 days 切换', () => {
-  it('挂载即拉 overview?days=1 / health / 知识缺口周榜三接口；四卡渲染提问数与百分比（1 位小数）', async () => {
+  it('挂载即拉 overview?days=1 / health / 知识缺口周榜 / 服务健康四接口；四卡渲染提问数与百分比（1 位小数）', async () => {
     const wrapper = await mountOverview()
-    // 缺口卡为子组件：Vue 先挂子组件再走父 onMounted，故其取数最先发起
+    // 缺口卡/服务健康卡为子组件：Vue 先挂子组件再走父 onMounted，故其取数最先发起
     expect(fetchMock.mock.calls.map((c) => String(c[0]))).toEqual([
       '/api/admin/knowledge-gap?weekOffset=0',
+      '/api/admin/services/health',
       '/api/admin/overview?days=1',
       '/api/admin/health',
     ])
@@ -308,7 +354,7 @@ describe('语料健康度面板', () => {
     // 已到期未下线：到期日早于今天，标红告警
     const expired = wrapper.find('.expired')
     expect(expired.exists()).toBe(true)
-    expect(expired.text()).toBe('2026-09-01')
+    expect(expired.text()).toBe(isoDaysFromToday(-7))
     // 零召回/待过期行点击 → 跳转文档管理（P3）
     const rows = wrapper.findAll('.el-table__row')
     await rows[rows.length - 1]!.trigger('click')

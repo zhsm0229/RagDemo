@@ -22,6 +22,7 @@ EXPECTED_COLUMNS: dict[str, list[str]] = {
         "failed_attempts",
         "locked_until",
         "last_login_at",
+        "memory_enabled",
         "created_at",
         "updated_at",
     ],
@@ -42,6 +43,9 @@ EXPECTED_COLUMNS: dict[str, list[str]] = {
         "status",
         "parse_engine",
         "parse_error",
+        "source_type",
+        "review_status",
+        "reject_reason",
         "is_active",
         "deleted_at",
         "uploaded_by",
@@ -136,6 +140,45 @@ EXPECTED_COLUMNS: dict[str, list[str]] = {
         "ip",
         "created_at",
     ],
+    "user_memories": [
+        "id",
+        "user_id",
+        "content",
+        "source_message_id",
+        "is_active",
+        "created_at",
+        "updated_at",
+    ],
+    "agent_runs": [
+        "id",
+        "user_id",
+        "dept_id",
+        "run_type",
+        "status",
+        "input",
+        "output",
+        "error",
+        "model",
+        "prompt_tokens",
+        "completion_tokens",
+        "latency_ms",
+        "started_at",
+        "finished_at",
+        "created_at",
+        "updated_at",
+    ],
+    "agent_steps": [
+        "id",
+        "run_id",
+        "seq",
+        "step_type",
+        "tool_name",
+        "args",
+        "observation",
+        "error",
+        "latency_ms",
+        "created_at",
+    ],
 }
 
 
@@ -191,6 +234,9 @@ def test_all_tables_exist(session):
         "eval_questions",
         "eval_runs",
         "audit_logs",
+        "user_memories",
+        "agent_runs",
+        "agent_steps",
     ]:
         assert t in rows
 
@@ -270,6 +316,23 @@ def test_documents_constraints_and_partial_unique_indexes(session):
     assert "UNIQUE" in sql and "WHERE (deleted_at IS NULL)" in sql
     list_sql = _indexdef(session, "idx_documents_list")
     assert "(dept_id, is_active, created_at DESC)" in list_sql
+
+
+def test_documents_draft_columns_and_checks(session):
+    """0007（agent-evolution #05）：source_type 默认 upload + 双 CHECK 具名在案。
+
+    检索红线不依赖新列：草稿登记期 status='pending' 且 is_active=False，
+    检索侧"仅 ready 且 is_active"过滤天然不命中（test_draft_review.py 读回断言）。"""
+    names = _constraint_names(session, "documents")
+    assert "documents_source_type_check" in names
+    assert "documents_review_status_check" in names
+    dflt = session.execute(
+        text(
+            "SELECT column_default FROM information_schema.columns "
+            "WHERE table_name='documents' AND column_name='source_type'"
+        )
+    ).scalar()
+    assert "'upload'" in (dflt or "")
 
 
 def test_chunks_hnsw_index_and_partial_dept_index(session):
@@ -379,6 +442,35 @@ def test_audit_logs_composite_pk_and_indexes(session):
     assert pk_def is not None and "id" in pk_def and "created_at" in pk_def
     assert _indexdef(session, "idx_audit_time") is not None
     assert _indexdef(session, "idx_audit_actor") is not None
+
+
+def test_user_memories_constraints_and_partial_index(session):
+    """0006（F-210）：content 1-200 CHECK、user_id 具名 FK、source_message_id 无 FK、
+    users.memory_enabled 默认 true、注入部分索引 (user_id, created_at DESC) WHERE is_active。"""
+    names = _constraint_names(session, "user_memories")
+    assert "user_memories_content_check" in names
+    assert "user_memories_user_id_fkey" in names
+    assert "user_memories_source_message_id_fkey" not in names  # 逻辑引用不建物理 FK（分区表限制）
+    sql = _normalized_indexdef(session, "idx_user_memories_user")
+    assert "(user_id, created_at DESC)" in sql and "WHERE is_active" in sql
+    dflt = session.execute(
+        text(
+            "SELECT column_default FROM information_schema.columns "
+            "WHERE table_name='users' AND column_name='memory_enabled'"
+        )
+    ).scalar()
+    assert "true" in (dflt or "")
+
+
+def test_agent_steps_constraints_index_and_append_only(session):
+    """0009（agent-evolution #06）：step_type 具名 CHECK、run_id 具名 FK、回放索引
+    (run_id, seq)、无 updated_at（只增不改，audit_logs 同口径）。"""
+    names = _constraint_names(session, "agent_steps")
+    assert "agent_steps_step_type_check" in names
+    assert "agent_steps_run_id_fkey" in names
+    sql = _indexdef(session, "idx_agent_steps_run")
+    assert "(run_id, seq)" in sql
+    assert "updated_at" not in _columns(session, "agent_steps")
 
 
 def test_autogenerate_diff_is_empty(pg):

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /**
  * 上传文档对话框（对照原型 upload 两步流程，F-1001~F-1008）：
- * 第 1 步选文件（白名单即时校验，.doc 即时拒收提示 §10.1）→ 第 2 步元数据表单
+ * 第 1 步选文件（白名单即时校验，与后端 precheck ALLOWED_EXTS 同口径；.doc/.ppt/.xls
+ * 放行，老格式转换由后端 Gotenberg 兜底）→ 第 2 步元数据表单
  * （必填失焦校验 §21.3 + 合规确认必勾 §7.4）→ 提交 202 → emit uploaded 由父级
  * 关弹窗、回第 1 页刷新（§22.3）。
  * F-1008 元数据建议：选中文件后调 metadata-suggest 回填（建议值可改，仅预填）；
@@ -53,16 +54,11 @@ watch(
   },
 )
 
-/** 文件白名单（扩展名 + 体积；魔数由后端 check_sync 把关）：.doc 即时拒收提示 */
+/** 文件白名单（扩展名 + 体积；魔数由后端 check_sync 把关），与后端 precheck ALLOWED_EXTS 同口径 */
 function handleFile(uploadFile: UploadFile): void {
   const name = uploadFile.name.toLowerCase()
-  if (name.endsWith('.doc')) {
-    fileErr.value = '.doc 不支持，请另存为 docx 后上传'
-    file.value = null
-    return
-  }
-  if (!/\.(pdf|docx)$/.test(name)) {
-    fileErr.value = '仅支持 pdf / docx 文件'
+  if (!/\.(pdf|docx|md|txt|csv|xlsx|pptx|html|doc|ppt|xls)$/.test(name)) {
+    fileErr.value = '仅支持 pdf / docx / md / txt / csv / xlsx / pptx / html / doc / ppt / xls 文件'
     file.value = null
     return
   }
@@ -146,14 +142,14 @@ defineExpose({ handleFile, submit })
         drag
         :auto-upload="false"
         :limit="1"
-        accept=".pdf,.docx,.doc"
+        accept=".pdf,.docx,.md,.txt,.csv,.xlsx,.pptx,.html,.doc,.ppt,.xls"
         :on-change="handleFile"
         :file-list="file ? [file] : []"
       >
         <div style="padding: 20px">
           将文件拖到此处，或 <em>点击选择</em><br />
           <span style="font-size: 12px; color: var(--el-text-color-secondary)">
-            仅支持 pdf / docx，≤50MB；.doc 请先另存为 docx
+            支持 pdf / docx / md / txt / csv / xlsx / pptx / html（doc / ppt / xls 自动转换），≤50MB
           </span>
         </div>
       </el-upload>

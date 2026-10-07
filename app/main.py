@@ -4,10 +4,12 @@
 只 import 本模块暴露的 app（uvicorn app.main:app）。
 """
 
+import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
@@ -21,19 +23,31 @@ from app.api import (
     admin_overview,
     admin_qa_pairs,
     admin_retrieval_test,
+    admin_services_health,
     admin_users,
     admin_views,
+    agent_runs,
     auth,
     chat,
     citations,
     conversations,
+    document_admin,
+    document_files,
     document_rebuild,
     documents,
     feedback,
     healthz,
+    memories,
 )
 from app.core import errors
-from app.core.assembly import build_embedder, build_llm, build_reranker, load_prompt_pack
+from app.core.agent_model import ChannelTurn, OpenAICompatToolChannel
+from app.core.assembly import (
+    build_embedder,
+    build_llm,
+    build_reranker,
+    build_storage,
+    load_prompt_pack,
+)
 from app.core.clock import SystemClock
 from app.core.config import Settings, get_settings
 from app.core.llm import (
@@ -43,6 +57,14 @@ from app.core.llm import (
     StubEmbedder,
     StubLLMProvider,
     StubReranker,
+)
+from app.core.tools import ToolRegistry
+from app.services.agent_runs import AgentDeps
+from app.services.agent_tools import (
+    KnowledgeBaseSearchTool,
+    KnowledgeSearchDeps,
+    SaveDraftDeps,
+    SaveDraftTool,
 )
 from app.services.chat import ChatDeps
 from app.services.chat_cache import DailyCounter, ExactCache, HitCounter
@@ -84,6 +106,84 @@ def _build_chat_deps(settings: Settings) -> ChatDeps:
     )
 
 
+class ScriptedAgentChannel:
+    """脚本化确定性通道（test_mode agent 装配用，Stub 三件套同哲学：同输入必同输出、
+    零网络）。按脚本顺序吐 ChannelTurn，脚本耗尽后恒重放末条（agent 循环多轮也不失
+    控）。定义在装配模块而非 core：core 只承载协议与适配层，业务剧本属装配选择
+    （main 内定义实现类有 _HashedAssets 先例）。"""
+
+    def __init__(self, turns: list[ChannelTurn]) -> None:
+        if not turns:
+            raise ValueError("脚本化通道至少需要一个回合")
+        self._turns = turns
+        self._calls = 0
+
+    def complete(
+        self, messages: Any, tools: Any, max_tokens: int
+    ) -> ChannelTurn:  # AgentModelChannel 协议面：messages/tools 只透传不消费
+        index = min(self._calls, len(self._turns) - 1)
+        self._calls += 1
+        return self._turns[index]
+
+
+# test_mode 装配的 agent 演示剧本（ScriptedAgentChannel 注入）：
+# 首轮发起一次 knowledge_base_search 工具调用、次轮给最终正文——恰好覆盖 AG-UI 的
+# 工具事件组与文本事件组，事件序测试即以此剧本为准。
+_TEST_AGENT_TURNS = (
+    ChannelTurn(
+        content="",
+        tool_calls=(
+            {
+                "name": "knowledge_base_search",
+                "args": {"query": "年假"},
+                "id": "call_1",
+                "type": "tool_call",
+            },
+        ),
+    ),
+    ChannelTurn(content="根据《考勤制度》，年假按工龄五到十天。"),
+)
+
+
+def _build_agent_deps(settings: Settings, chat_deps: ChatDeps) -> AgentDeps:
+    """Agent 链路依赖装配（F-212，工单 #07/#06）：检索工具与问答共享 embedder/reranker/
+    store（test_mode 同为 Stub/PgVectorStore 组合）；save_draft 包装草稿审核流数据面
+    （draft_review.create_draft），storage 走装配工厂单例。工具注册表是全集——每任务
+    实际绑定哪些工具由任务档案（services/agent_tasks.TASK_PROFILES）白名单决定。
+    通道按档位设置装配，留空复用主问答通道（Settings.agent_model_* 注释口径），
+    test_mode 换脚本化通道（零网络确定性）。counter 直取 chat_deps 同一实例：
+    agent 与问答共享每日额度，换端点不绕限。"""
+    registry = ToolRegistry()
+    registry.register(
+        KnowledgeBaseSearchTool(
+            KnowledgeSearchDeps(
+                embedder=chat_deps.embedder,
+                store=chat_deps.store,
+                reranker=chat_deps.reranker,
+                settings=settings,
+            )
+        )
+    )
+    registry.register(SaveDraftTool(SaveDraftDeps(storage=build_storage(settings))))
+    if settings.test_mode:
+        channel = ScriptedAgentChannel(_TEST_AGENT_TURNS)
+    else:
+        channel = OpenAICompatToolChannel(
+            base_url=settings.agent_model_base_url or settings.llm_base_url,
+            api_key=settings.agent_model_api_key or settings.llm_api_key,
+            model=settings.agent_model_model or settings.llm_model,
+            timeout_s=settings.agent_model_timeout_s,
+            effort=settings.llm_effort or None,
+        )
+    return AgentDeps(
+        settings=settings,
+        registry=registry,
+        channel=channel,
+        react_fallback=settings.agent_model_react_fallback,
+        counter=chat_deps.counter,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """生命周期挂接：装配问答依赖挂 app.state + 定时任务（Task 7 交接④：HitCounter
@@ -94,6 +194,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     scheduler = build_scheduler(settings)
     add_hit_flush_job(scheduler, chat_deps.hit_counter, settings.cache_ttl_s)
     app.state.chat_deps = chat_deps
+    app.state.agent_deps = _build_agent_deps(settings, chat_deps)
     try:
         yield
     finally:
@@ -102,21 +203,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app() -> FastAPI:
+    # 根日志在装配前初始化：解析管道/调度器的 logger 依赖 root handler 输出——此前
+    # 无任何 logging 配置，logger.info 全被 lastResort 吞掉、异常 traceback 丢失，
+    # 排障无日志可查（2026-10-02 试点反馈）。LOG_LEVEL 可调，缺省 INFO。
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO"),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     app = FastAPI(title="企业智能工作台", version="0.1.0", lifespan=lifespan)
     app.include_router(healthz.router)  # 无前缀：探针路径 /healthz（docker healthcheck 消费）
     app.include_router(auth.router, prefix="/api")
+    # documents 域按域拆三个子 router（行数红线 §1.4，同 prefix=/documents）：入库/治理/回显
     app.include_router(documents.router, prefix="/api")
+    app.include_router(document_admin.router, prefix="/api")
+    app.include_router(document_files.router, prefix="/api")
     app.include_router(document_rebuild.router, prefix="/api")
     app.include_router(admin_qa_pairs.router, prefix="/api")
     app.include_router(admin_eval.router, prefix="/api")
     app.include_router(admin_eval.runs_router, prefix="/api")
     app.include_router(chat.router, prefix="/api")
+    app.include_router(
+        agent_runs.router, prefix="/api"
+    )  # AG-UI 双轨新轨（工单 #07），旧四事件契约冻结
     app.include_router(citations.router, prefix="/api")
     app.include_router(conversations.router, prefix="/api")
     app.include_router(feedback.router, prefix="/api")
+    app.include_router(memories.router, prefix="/api")
     app.include_router(admin_views.router, prefix="/api")
     app.include_router(admin_retrieval_test.router, prefix="/api")
     app.include_router(admin_overview.router, prefix="/api")
+    app.include_router(admin_services_health.router, prefix="/api")
     app.include_router(admin_users.router, prefix="/api")
     app.include_router(admin_audit.router, prefix="/api")
     app.include_router(admin_knowledge_gap.router, prefix="/api")
@@ -128,18 +244,37 @@ def create_app() -> FastAPI:
     return app
 
 
+class _HashedAssets(StaticFiles):
+    """/assets 响应追加 immutable 长缓存（vite hash 文件名，内容变则名变）。"""
+
+    def file_response(self, *args: Any, **kwargs: Any) -> FileResponse:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
+
+def _no_cache(response: FileResponse) -> FileResponse:
+    """index.html 等无 hash 入口文件：no-cache = 可缓存但每次必须协商校验。"""
+    response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 def _mount_spa(app: FastAPI) -> None:
     """前端 dist 托管（§12.2 生产仅 app 发布 80 端口的形态）。
 
     STATIC_DIR 未设置（本机 dev 裸 uvicorn、CI 的 test_mode API 测试）时不挂载，
     行为与历史完全一致；设置了且存在 index.html 才托管。必须最后注册：catch-all
     只兜未匹配路径（/docs、/api/** 等先注册者优先生效）。
+
+    缓存策略：/assets 是 vite hash 文件名产物（内容变则名变）→ immutable 长缓存；
+    index.html 无 hash，必须 no-cache 强制协商校验——否则浏览器启发式缓存旧壳，
+    发新版后用户仍加载旧 JS（2026-10-02 zip 按钮旧文案事故的根因之一）。
     """
     static_dir = os.getenv("STATIC_DIR", "")
     if not static_dir or not (Path(static_dir) / "index.html").is_file():
         return
     root = Path(static_dir)
-    app.mount("/assets", StaticFiles(directory=root / "assets"), name="spa-assets")
+    app.mount("/assets", _HashedAssets(directory=root / "assets"), name="spa-assets")
 
     @app.get("/{spa_path:path}", include_in_schema=False)
     async def _spa(spa_path: str) -> FileResponse:
@@ -147,8 +282,8 @@ def _mount_spa(app: FastAPI) -> None:
             raise HTTPException(status_code=404)
         candidate = (root / spa_path).resolve()
         if spa_path and candidate.is_relative_to(root.resolve()) and candidate.is_file():
-            return FileResponse(candidate)  # vite 根部零散文件（favicon 等）
-        return FileResponse(root / "index.html")  # 客户端路由（/chat、/kb/**）fallback
+            return _no_cache(FileResponse(candidate))  # vite 根部零散文件（favicon 等）
+        return _no_cache(FileResponse(root / "index.html"))  # 客户端路由（/chat、/kb/**）fallback
 
 
 app = create_app()

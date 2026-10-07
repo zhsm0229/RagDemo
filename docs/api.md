@@ -1,15 +1,16 @@
 # RagDemo 接口文档（W1 - W5）
 
 > 依据 `docs/standards.md` §3（API 接口规范）编写，随代码演进（§19.1 文档随代码）。
-> 覆盖 `app/api/` 当前全部路由：auth 4 个、documents 9 个、chat 1 个、conversations 4 个、citations 1 个、messages（feedback）1 个、admin 管理端 30 个（问答对 6、评测 8、提问记录与 badcase 4、检索测试 1、概览与健康度 3（含零召回块下钻）、用户管理 4、审计查询 2、知识缺口报告 2），共 50 个端点。
-> 最后更新：W5 Task 5 台账翻转（计数 44→47：W5 新增知识缺口报告 2 端点，见 §4.9；零召回块下钻 `GET /api/admin/zero-recall-chunks` 1 端点，见 §4.5.3；§4.4.1 docs 项补 hitCount/lastHitAt 历史召回统计两键）。
+> 覆盖 `app/api/` 当前全部路由：auth 5 个、documents 13 个（documents 11 + rebuild 2）、chat 1 个、conversations 4 个、citations 1 个、messages（feedback）1 个、admin 管理端 31 个（问答对 6、评测 8、提问记录与 badcase 4、检索测试 1、概览与健康度 3（含零召回块下钻）、服务健康 1、用户管理 4、审计查询 2、知识缺口报告 2）、healthz 探针 1 个（`GET /healthz`，docker healthcheck 消费，不设业务章节）。
+> **端点总数：64**（本行由 `tests/unit/test_api_contract.py` 从 FastAPI app 实际路由解析校验：新增/删除端点未同步本行即测试红，计数漂移清零，findings I10）。
+> 最后更新：W5 Task 5 台账翻转（计数 44→47（W5）→48：2026-10-02 新增服务健康卡 1 端点（§4.5.4）；W5 新增知识缺口报告 2 端点，见 §4.9；零召回块下钻 `GET /api/admin/zero-recall-chunks` 1 端点，见 §4.5.3；§4.4.1 docs 项补 hitCount/lastHitAt 历史召回统计两键；2026-10-05 新增文档在线预览 1 端点 §2.10d，chat 引用 citation 增 docId 键 §3.1；2026-10-06 文档契约对账：头部计数改为"端点总数：56"标记行并交契约测试守护（I10）、§2.10c 删除成功响应体更正为 `{id, deleted: true}`（实现为准，I9）、§1.2 补"响应体以实现为准"统一注记；2026-10-06 jti 登出黑名单落地（findings I4）：新增 `POST /api/auth/logout` 1 端点 §2.4a，auth 4→5、总数 56→57；2026-10-06 草稿审核流（agent-evolution #05）：新增 `POST /api/documents/{id}/draft/approve` §2.10e 与 `/draft/reject` §2.10f 共 2 端点，documents 11→13、总数 57→59；2026-10-06 计数对齐实现现状 64：其余增量（memories ×4、agent runs ×1）由并行车道（记忆管理/agent 轨迹）随各自工单补章节登记）；2026-10-06 模板生成首任务（agent-evolution #06）：§5.1 taskType 白名单放开 `template_draft`、补 `save_draft` 工具与 `agent_steps` 逐步轨迹落库说明（无新增端点，总数不变）。
 
 ## 1. 通用约定
 
 ### 1.1 鉴权
 
-- 除 `POST /api/auth/login` 外全部接口需要登录：请求须携带登录时下发的 `jwt` Cookie
-  （httpOnly、SameSite=Lax，有效期默认 8 小时）。
+- 除 `POST /api/auth/login`、`POST /api/auth/logout` 外全部接口需要登录：请求须携带登录时下发的 `jwt` Cookie
+  （httpOnly、SameSite=Lax，有效期默认 8 小时）；logout 不设登录门（幂等清 Cookie，见 §2.4a）。
 - 权限门两级：
   - **ReadyUser**（已登录且已完成首登改密）：问答 / 会话 / 反馈 / 引用正文全部端点；
   - **AdminUser**（admin 角色，链在改密门之后）：文档管理（含 zip 批量导入与元数据建议）+ 全部管理端点（问答对 / 评测 / 提问记录与 badcase 治理 / 检索测试 / 运营概览与语料健康度 / 用户管理 / 审计查询）。
@@ -24,6 +25,10 @@
 `code=0` 成功；非 0 见错误码表（§1.4）。HTTP 状态码用标准语义（§3-3）。
 JSON 键名统一 camelCase（§3-4）；列表响应统一 `{items, total, page, pageSize}`；
 分页统一 `page`（≥1）+ `pageSize`（1-100，默认 20）（§3-5）。
+
+> **响应体以实现为准**：当前全部端点均未声明 `response_model`（无 Pydantic 出参模型），
+> 本文档"成功响应"描述与代码返回 dict 逐键对齐；若两者出现出入，以实现为准修文档
+> （2026-10-06 §2.10c 删除响应体即属此类更正，findings I9），并列入 golden 契约回归核对项。
 
 参数校验失败统一 `422/1003`，`data` 携带字段级错误数组：
 
@@ -47,7 +52,7 @@ POST SSE 须用 fetch + ReadableStream 消费（无 EventSource 自动重连）�
 
 | code | HTTP | 中文说明 | 典型端点 |
 |------|------|---------|---------|
-| 1001 | 422 | 文件格式不支持 / 未通过同步预检（.doc 请另存为 docx 后上传） | POST /api/documents |
+| 1001 | 422 | 文件格式不支持 / 未通过同步预检（宏格式提示"另存为无宏版本"；老格式转换失败提示"另存为对应新格式"；OOXML 判型不符提示"文件内容与扩展名不符"） | POST /api/documents、POST /api/documents/import-zip |
 | 1002 | — | 语料解析失败（包体非法/超限/含危险声明；异步段落 failed 态，不经响应体返回） | 文档解析管道 |
 | 1003 | 422 | 请求参数校验失败（缺字段/超限/格式非法，data 带字段级原因） | 全部端点 |
 | 2001 | 401/400 | 用户名或密码错误（登录失败计数扣减提示；改密时"原密码不正确"同为 2001，HTTP 400） | login / change-password |
@@ -57,7 +62,7 @@ POST SSE 须用 fetch + ReadableStream 消费（无 EventSource 自动重连）�
 | 2005 | 429 | 登录请求过于频繁（进程内滑动窗口限流） | login |
 | 3001 | 409 | 上传文件与库内已有文档完全重复。**一码双文案**：同步查重命中（F-1001）带已有文档 ID——"文件与已有文档完全重复（已有文档 ID N），如需更新请上传新版本"；并发撞唯一索引（DOC-06）为通用文案——"文件与已有文档重复，请勿重复上传" | POST /api/documents |
 | 3002 | 429 | 单用户每日提问次数已达上限（问答端点开流前拒绝） | POST /api/chat/stream |
-| 3003 | 404 | 会话/消息不存在或无权访问（归属校验 IDOR 防线，§21.8；不区分"不存在"与"无权"）。W3 管理端寻址失败同码：提问记录不存在 / 点踩记录不存在 / 评测任务不存在 | chat / conversations / feedback / admin 治理与评测端点 |
+| 3003 | 404 | 会话/消息不存在或无权访问（归属校验 IDOR 防线，§21.8；不区分"不存在"与"无权"）。W3 管理端寻址失败同码：提问记录不存在 / 点踩记录不存在 / 评测任务不存在；documents 域寻址失败同码（I13，2026-10-06 统一）：文档不存在（retry/confirm/rebuild-index/file/preview/images/delete） | chat / conversations / feedback / documents / admin 治理与评测端点 |
 | 3004 | 422 | 评测任务状态冲突：仅 status=done 收口的跑分可人工录分 / 阈值扫描（running 时后台正逐题写 detail，failed 明细不完整；扫描另有"无可重放题目"分支，见 4.2.8） | POST /api/admin/eval-runs/{id}/judgments、POST /api/admin/eval-runs/{id}/threshold-scan |
 | 3005 | 409 | 用户名已存在（F-102 发放账号重名；并发撞 users_username_key 唯一索引同码兜底） | POST /api/admin/users |
 | 5000 | 500 | 兜底系统错误（响应体只给通用提示"系统繁忙，请稍后重试"，堆栈进日志） | 全部端点 |
@@ -102,12 +107,22 @@ POST SSE 须用 fetch + ReadableStream 消费（无 EventSource 自动重连）�
 | 成功响应 | `200`，`data: {pong: true}` |
 | 错误分支 | `401/2003`；`403/2004` 非 admin |
 
+### 2.4a POST /api/auth/logout — 登出（jti 黑名单，AUTH-08 / findings I4）
+
+| 项 | 说明 |
+|----|------|
+| 鉴权 | 无登录门（幂等：令牌缺失或已失效也 `200` 清 Cookie，不借登出探测令牌有效性） |
+| 请求体 | 无 |
+| 成功响应 | `200`，`data: null`；`Set-Cookie: jwt=""; Max-Age=0; HttpOnly; SameSite=Lax`（前端随之清掉本地 Cookie）；令牌有效时把其 jti 记入进程内黑名单（standards §5.3：条目 TTL=令牌剩余有效期，进程重启清空，残余风险书面接受；A 阶段迁 Redis §25.3-A） |
+| 效果 | 登出后旧令牌**即时失效**：再带旧 jwt Cookie 请求任意需登录端点一律 `401/2003`（AUTH-08）；黑名单按 jti 生效，重新登录换发的新令牌不受牵连 |
+| 错误分支 | 无（恒 `200`） |
+
 ### 2.5 POST /api/documents — 上传文档
 
 | 项 | 说明 |
 |----|------|
 | 鉴权 | AdminUser |
-| 请求 | multipart/form-data：`file`（文件本体，≤50MB，白名单格式）；`title`（≥1 字符）；`dept`（部门 code：service / hr / all）；`owner`（≥1 字符）；`effectiveDate`（YYYY-MM-DD）；`expiryDate`（可选，YYYY-MM-DD）；`complianceConfirmed`（bool，须为 true） |
+| 请求 | multipart/form-data：`file`（文件本体，≤50MB；支持 pdf / docx / md / txt / csv / xlsx / pptx / html，doc / ppt / xls 自动转换；宏格式 xlsm/docm/pptm 拒收）；`title`（≥1 字符）；`dept`（部门 code：service / hr / all）；`owner`（≥1 字符）；`effectiveDate`（YYYY-MM-DD）；`expiryDate`（可选，YYYY-MM-DD）；`complianceConfirmed`（bool，须为 true） |
 | 成功响应 | `202`，`data: {id, status}`（status=parsing；test_mode 下同步执行解析管道，响应即可断言终态 ready/failed） |
 | 错误分支 | `422/1003` 合规未勾选、文件超 50MB、部门编码无效、元数据缺失、Pydantic 校验失败；`422/1001` 格式不支持 / 未通过同步预检；`409/3001` 精确查重命中（一码双文案见 §1.4） |
 
@@ -116,9 +131,9 @@ POST SSE 须用 fetch + ReadableStream 消费（无 EventSource 自动重连）�
 | 项 | 说明 |
 |----|------|
 | 鉴权 | AdminUser |
-| 查询参数 | `dept`（code，可选）、`status`（pending/parsing/ready/failed，可选）、`keyword`（标题/原始文件名模糊，可选）、`page`（≥1，默认 1）、`pageSize`（1-100，默认 20） |
-| 成功响应 | `200`，`data: {items: [...], total, page, pageSize}`，created_at 降序（同刻 id 降序兜底）。items 项字段：`id, title, deptId, deptCode, originalFilename, mime, sizeBytes, version, effectiveDate, expiryDate, ownerName, status, parseEngine, parseError, isActive, uploadedBy, createdAt, updatedAt` |
-| 错误分支 | `422/1003` 分页越界、status 取值无效、部门编码无效 |
+| 查询参数 | `dept`（code，可选）、`status`（pending/parsing/ready/failed，可选）、`keyword`（标题/原始文件名模糊，可选）、`sourceType`（upload/draft，可选）、`reviewStatus`（待审核/已通过/已驳回，可选）、`page`（≥1，默认 1）、`pageSize`（1-100，默认 20） |
+| 成功响应 | `200`，`data: {items: [...], total, page, pageSize}`，created_at 降序（同刻 id 降序兜底）。items 项字段：`id, title, deptId, deptCode, originalFilename, mime, sizeBytes, version, effectiveDate, expiryDate, ownerName, status, parseEngine, parseError, parseErrorDetail(技术错误摘要，仅 failed 非空——管理端定位用，与用户文案双轨), parseStage(解析阶段文案，仅 parsing 非空), parseProgress(真实进度 0-100，仅 parsing 非空), degraded(ready 且带降级标注), sourceType(来源 upload/draft), reviewStatus(草稿审核状态，仅 draft 非空), rejectReason(驳回原因，仅已驳回非空), isActive, uploadedBy, createdAt, updatedAt` |
+| 错误分支 | `422/1003` 分页越界、status/sourceType/reviewStatus 取值无效、部门编码无效 |
 
 ### 2.7 POST /api/documents/{id}/retry — 失败重试（DOC-11）
 
@@ -127,7 +142,7 @@ POST SSE 须用 fetch + ReadableStream 消费（无 EventSource 自动重连）�
 | 鉴权 | AdminUser |
 | 请求体 | 无 |
 | 成功响应 | `200`，`data: {id, status}`（非测试模式先落 parsing 再交后台接管；test_mode 同步执行） |
-| 错误分支 | `404/1003` 文档不存在；`422/1003` 仅 failed 状态可重试 |
+| 错误分支 | `404/3003` 文档不存在（I13 统一）；`422/1003` 仅 failed 状态可重试 |
 
 ### 2.8 POST /api/documents/{id}/confirm — 待确认文档激活
 
@@ -136,7 +151,7 @@ POST SSE 须用 fetch + ReadableStream 消费（无 EventSource 自动重连）�
 | 鉴权 | AdminUser |
 | 请求体 | 无 |
 | 成功响应 | `200`，`data: {id, isActive: true}`（审计操作者为点击确认的管理员本人） |
-| 错误分支 | `404/1003` 文档不存在 |
+| 错误分支 | `404/3003` 文档不存在（I13 统一） |
 
 ### 2.8a GET /api/documents/{id}/versions — 版本历史（W7 补齐，F-303）
 
@@ -153,7 +168,7 @@ POST SSE 须用 fetch + ReadableStream 消费（无 EventSource 自动重连）�
 | 鉴权 | AdminUser |
 | 成功响应 | `202`，`data: {id, status}`（test_mode 同步执行响应即终态；生产 BackgroundTasks 逐文档独立会话） |
 | 语义 | 按**现行分块设置**重走解析→红线→清洗→分块→嵌入，单事务内删旧块写新块（原子切换，无无索引窗口）；版本号不变（重建≠新版本）；审计 `document.rebuild {before.chunks, after.chunks, status, isActive}`；成功响应前整清问答精确缓存 |
-| 错误分支 | `404/1003` 文档不存在；`422/1003` 仅 ready 可重建（failed 走 §2.7 retry）或已删除 |
+| 错误分支 | `404/3003` 文档不存在（I13 统一）；`422/1003` 仅 ready 可重建（failed 走 §2.7 retry）或已删除 |
 | 审计 | `document.rebuild`（actor=发起管理员；状态机自身另落 document.ready/document.failed） |
 
 ### 2.8c POST /api/documents/rebuild-index — 全库级重建索引（W7 补齐，F-304）
@@ -177,6 +192,65 @@ POST SSE 须用 fetch + ReadableStream 消费（无 EventSource 自动重连）�
 | 成功响应 | `202`，`data: {results, accepted, rejected, skipped}`。results 逐条目 `{filename, status, documentId?, reason?}`，status 四态枚举：`accepted`（入库并进解析队列，带 documentId）/ `duplicate`（SHA-256 与已有文档完全重复，带已有 documentId 与 reason）/ `rejected`（白名单 / 单条目超限等，带 reason）/ `skipped_metadata`（命名不符，带 reason）。`skipped` = duplicate + skipped_metadata；批量部分成功语义（逐条目独立事务），accepted 条目后台解析（test_mode 同步执行，响应即可断言终态） |
 | 错误分支 | `422/1003` 非 zip 包 / 条目数超上限 / 解压总量超 500MB / 嵌套 zip / 加密条目（整包拒收，中文原因指名条目）；`401/2003`；`403/2004` |
 | 审计 | `document.import_zip {total, accepted, rejected, skipped}` |
+
+### 2.10a GET /api/documents/{id}/images/{index} — 解析图片回显（F-1017，2026-10-06 追加）
+
+| 项 | 说明 |
+|----|------|
+| 权限 | 登录用户 + 部门隔离（仅本部门/全员文档）；未激活或非 ready → 404 |
+| 成功响应 | `200`，图片字节（Content-Type 按存储 mime）；index 为"图片N："标记中的 N（1 起） |
+| 错误分支 | `401/2003`；`404/3003`（文档不存在/未激活/图片序号不存在，I13 统一） |
+
+### 2.10b GET /api/documents/{id}/file — 原文件下载/打开（F-1018，2026-10-06 追加）
+
+| 项 | 说明 |
+|----|------|
+| 权限 | 登录用户 + 部门隔离（仅本部门/全员文档）；未激活或非 ready → 404 |
+| 成功响应 | `200`，原上传文件字节（Content-Disposition 以 original_filename 命名，attachment）；doc/ppt/xls 返回的是入库转换产物（2026-10-05 起为 PDF，见 2.10d 附注） |
+| 错误分支 | `401/2003`；`404/3003`（不存在/未激活，I13 统一） |
+
+
+### 2.10c DELETE /api/documents/{id} — 文档删除（F-305，2026-10-06 立项实施）
+
+| 项 | 说明 |
+|----|------|
+| 权限 | 仅 admin（AdminUser）；member 一律 `403/2004`，未登录 `401/2003` |
+| 语义 | 软删（deleted_at+is_active=false）+ 级联停用其 chunks（is_active=false，向量保留——重传同内容经查重拦截属预期）；document_images 行保留（回显随文档闸失效）；**parsing 态 422**（防中断任务竞态，等终态后再删）；审计 document.delete；预览缓存 previews/{doc_id}/ 随档 best-effort 清理 |
+| 成功响应 | `200`，`data: {id, deleted: true}`（deleted 为语义标记；库内行保留原 status 并落软删位 deleted_at+is_active=false，前端按 deleted 消费） |
+| 错误分支 | `401/2003`、`403/2004`、`404/3003`（不存在，I13 统一）；`422/1003` parsing 态删除（提示等解析终态） |
+
+### 2.10d GET /api/documents/{id}/preview — 原文件在线预览（2026-10-05 追加）
+
+| 项 | 说明 |
+|----|------|
+| 权限 | 登录用户 + 部门隔离（与 /file 同口径 `_viewable_document` 闸）；未激活/非 ready/软删 → 404 |
+| 语义 | 统一以 **PDF inline** 返回（`Content-Disposition: inline`，文件名=原名去扩展名+.pdf），前端 iframe 内嵌渲染。pdf 与老格式（入库已转 PDF）直通；docx/pptx/xlsx 经 Gotenberg 转 PDF，结果按 `previews/{doc_id}/{content_hash}.pdf` 缓存（命中直回）；删除文档时缓存随档清理 |
+| 错误分支 | `401/2003`；`404/3003`（不存在/未激活，I13 统一）；`422/1001` 文本类格式（md/txt/csv/html，前端走 /file 转义渲染）或转换服务未配置；`502/1002` 转换失败（技术细节进日志） |
+
+> **2.10d 附注（2026-10-05 F-1015 裁定）**：Gotenberg 8 libreoffice 路由只输出 PDF（容器实测），
+> 老格式（doc/ppt/xls）入库转换目标由 OOXML 更正为 PDF——同一份 PDF 落盘既作解析输入
+> （走 pdf 链：文字版 pypdf 快速通道/扫描件 MinerU OCR）也作预览直通来源。
+
+### 2.10e POST /api/documents/{id}/draft/approve — 草稿审核通过（agent-evolution #05，2026-10-06）
+
+| 项 | 说明 |
+|----|------|
+| 权限 | 仅 admin（AdminUser）；member `403/2004`，未登录 `401/2003` |
+| 背景 | Agent 生成产物一律是草稿（documents.source_type='draft'，登记即 review_status='待审核'；draft 创建走 services/draft_review.create_draft——预检三闸/精确查重与上传同源，FileStorage 落盘，不触发解析）。红线（agent-evolution §五）：**无审核不落地**——草稿 status='pending' 且 is_active=False，检索侧"仅 ready 且 is_active"过滤天然不命中，审核通过前绝不可被检索（tests/integration/test_draft_review.py 读回断言） |
+| 语义 | 待审核 → 已通过（审计 document.draft_approve，与状态变更同事务）→ 立即触发既有解析入库管道（编排同 retry：test_mode 同步，生产置 parsing 挂 BackgroundTasks；预检/查重/敏感扫描全走无旁路）；成功响应前整清问答精确缓存（通过改变可检索事实，W2 移交②） |
+| 成功响应 | `200`，`data: {id, reviewStatus, status}`（test_mode 下 status 为管道收口终态；生产为 parsing） |
+| 错误分支 | `404/3003`（不存在，I13 统一）；`422/1003` 非 draft 来源审核 / 重复审核（非法迁移 fail-fast） |
+| 契约登记 | 迁移 0007（source_type/review_status/reject_reason，每列中文注释 + CHECK）；前端 DocumentsView「草稿审核」入口（draft+待审核快捷筛选，行内通过 confirm / 驳回 prompt） |
+
+### 2.10f POST /api/documents/{id}/draft/reject — 草稿审核驳回（agent-evolution #05，2026-10-06）
+
+| 项 | 说明 |
+|----|------|
+| 权限 | 仅 admin（AdminUser）；member `403/2004`，未登录 `401/2003` |
+| 请求体 | `{"reason": str}`（1-500 字必填；空串 `422/1003`） |
+| 语义 | 待审核 → 已驳回 + 原因留档（reject_reason，审计 document.draft_reject）；永不触发解析与入库，status 停在 pending；不整清问答缓存（驳回不改变可检索事实） |
+| 成功响应 | `200`，`data: {id, reviewStatus, rejectReason}` |
+| 错误分支 | `404/3003`（不存在，I13 统一）；`422/1003` 非 draft 来源 / 非 待审核 状态 / 驳回原因为空 |
 
 ### 2.10 POST /api/documents/metadata-suggest — 上传元数据自动建议（W4 后端追加，F-1008）
 
@@ -268,6 +342,48 @@ SSE 事件 DTO 字段表（**逐字引自 standards §3 第 6 条**）：
 | 隔离与存活闸 | 部门隔离 0 容忍（红线①）：`dept_id IN (用户部门, 全员部门)`，与检索 F-502 同口径；存活闸与检索面一致——chunk `is_active` / 问答对 `enabled`+`is_active` / 文档 `is_active`+`ready`（检索给出的引用必在面内，文档撤回后不得再经引用读出正文，W4 T4 评审裁定保留） |
 | 成功响应 | `200`，`data` 六键：`{refType, refId, content, title, page, titlePath}`。doc 分支 content=块原文、title=文档规范标题；qa 分支 content=answer、title=question，`page` / `titlePath` 恒 null（问答对无页码与标题路径概念） |
 | 错误分支 | `404/3003` 统一文案"引用不存在或无权访问"（隔离面外与不存在不区分，不给探测空间，同会话归属口径）；`422/1003` refType 枚举外 / refId 非正整数 |
+
+---
+
+## 3A. 记忆管理端点（agent-evolution F-210，2026-10-06 立项实施）
+
+本节四个端点均为 **ReadyUser 门**，资源严格按 `user_id` 归属隔离（个人资源，user_id 校验强于部门过滤）；删除为软删（`is_active=false`），不存在与无权一律 `404/3003` 同话术"记忆不存在或无权访问"（IDOR 防线，不给探测空间）；响应体统一 `{code, message, data}`。
+
+### 3.8a GET /api/memories — 本人记忆列表（F-210）
+
+| 项 | 说明 |
+|----|------|
+| 鉴权 | ReadyUser |
+| 查询参数 | `page`（≥1 默认 1）、`pageSize`（1-100 默认 20）、`keyword` 可选（内容模糊匹配） |
+| 成功响应 | `200`，`data` 为 `{items, total, page, pageSize}`；item 键 `{id, content, origin, sourceMessageId, createdAt}`，`origin` ∈ `auto`（后台抽取）/ `manual`（手动添加），`is_active=false` 行不出现 |
+| 说明 | 列表按 `created_at` 降序；用户记忆总容量 30 条（超限自动淘汰最旧，F-210 设计） |
+
+### 3.8b POST /api/memories — 手动添加记忆（F-210）
+
+| 项 | 说明 |
+|----|------|
+| 鉴权 | ReadyUser |
+| 请求体 | `{content: string}`，strip 后 1-200 字（非法 422/1003 字段级中文报错） |
+| 成功响应 | `201`，`data` 为新建记忆 `{id, content, origin: "manual", createdAt}` |
+| 错误分支 | 容量满时自动淘汰最旧一条后写入（用户无感，F-210 设计）；内容查重不拦截手动添加 |
+
+### 3.8c DELETE /api/memories/{memory_id} — 删除记忆（软删，F-210）
+
+| 项 | 说明 |
+|----|------|
+| 鉴权 | ReadyUser（归属校验：非本人记忆与不存在同判） |
+| 成功响应 | `200`，`data` 为 `{id, deleted: true}`；重复删除幂等 200 |
+| 错误分支 | `404/3003` "记忆不存在或无权访问" |
+| 副作用 | 审计留痕 `memory.delete`；删除后立即不参与回答注入 |
+
+### 3.8d PUT /api/memories/settings — 记忆功能开关（F-210）
+
+| 项 | 说明 |
+|----|------|
+| 鉴权 | ReadyUser |
+| 请求体 | `{enabled: boolean}` |
+| 成功响应 | `200`，`data` 为 `{memoryEnabled: boolean}`；`GET /api/auth/me` 的 `memoryEnabled` 字段同步 |
+| 副作用 | 关闭后立即停止后台记忆抽取与回答注入（有测试锁定）；审计留痕 `memory.settings` |
 
 ---
 
@@ -469,6 +585,18 @@ SSE 事件 DTO 字段表（**逐字引自 standards §3 第 6 条**）：
 | 副作用 | 无：只读、不写召回计数（不污染零召回榜）、不落审计 |
 | 错误分支 | `422/1003` 查询参数越界（days/page/pageSize field 级） |
 
+#### 4.5.4 GET /api/admin/services/health — 服务健康卡（2026-10-02 试点反馈新增）
+
+| 项 | 说明 |
+|----|------|
+| 权限 | 仅 admin（AdminUser）；member 一律 `403/2004`，未登录 `401/2003`（§1.1 全端点口径） |
+| 用途 | 运营概览"服务健康"卡：对问答链路各依赖做轻量探活只读展示（app 容器 healthy 但 TEI/LLM 挂掉时管理页此前不可见）。**只读不做启停**——服务生命周期归 compose/deploy/recover.sh（web 触达容器编排=攻击面质变，2026-10-02 评估结论） |
+| 探活方式 | pg=注入连接 SELECT 1；tei-embed/rerank=GET {base}/health；llm=GET {base}/models（Bearer key，5s 超时）；mineru=GET {base}/docs；gotenberg=GET {base}/health（convert_base_url 空为 not_configured）。各 2.5s 超时（llm 5s），HTTP 探活并发（总耗时=最慢者） |
+| TEST_MODE | embed/rerank/llm 走 Stub 无网络依赖 → 直接 up 且 detail 注明"TEST_MODE 桩，未探活"（CI 无 TEI/外网也全绿）；pg 与 mineru 照常真实探活 |
+| 成功响应 | `200`，`data: {overall, services: [{key, label, status, latencyMs, detail}]}`。key ∈ pg/embed/rerank/llm/mineru/gotenberg；status ∈ up/down/not_configured（mineru_base_url 空=pypdf 降级路径；convert_base_url 空=老格式拒收，均非故障）；overall 三态：down=问答链路（pg/embed/rerank/llm）任一不可用，degraded=仅 mineru/gotenberg 不可用（问答正常、解析或老格式转换降级），up=全绿 |
+| 副作用 | 无：只读、不写库、不落审计（探活请求发往依赖服务自身，不触用户数据） |
+| 错误分支 | `401/2003`、`403/2004`；探活异常不报 500——一律转为对应服务 status=down + detail 原因摘要 |
+
 ### 4.6 提问记录保留策略（非端点，后台任务）
 
 提问记录两段式清理（F-803 / §4.6，无管理端点，随进程调度执行）：
@@ -553,3 +681,32 @@ role='user' AND is_eval=false 的用户问题，LATERAL 配对其同会话中 id
 |----|------|
 | 查询参数 | 同 4.9.1 `weekOffset` |
 | 成功响应 | `200`，`text/csv` 流式响应（逐行推送，不整表载内存）：UTF-8 BOM 适配 Excel、中文列头（问题/出现次数）；聚合口径同 4.9.1 但不限前 50；问题列首字符为 = + - @ 等公式触发符时前置制表符强制按文本解释（CSV 公式注入防御）；`Content-Disposition: attachment; filename="knowledge-gap-yyyymmdd.csv"`（取注入时钟当日）；行数超 10 万截断并以 `X-Truncated: true` 响应头标注（内存放大保护，截断判定用同窗口计数） |
+
+---
+
+## 5. Agent 演进端点（2026-10-06 立项，specs/agent-evolution.md）
+
+### 5.1 POST /api/agent/runs — agent 任务流（SSE，AG-UI 协议，F-212 双轨新轨）
+
+DeepAgents 骨架的 agent 任务流式端点。SSE 线格式同 §1.3（`event:` + `data:` 两行），
+但事件名与载荷键名**说 AG-UI 标准协议**（ag-ui-protocol 官方事件类型，载荷键为协议
+本身的 snake_case，如 `thread_id`/`tool_call_id`——不套本仓 camelCase 惯例，改名即
+破坏互操作）。旧 `POST /api/chat/stream` 四事件契约冻结（§3.1），两轨互不污染；
+收缩条件见 specs/agent-evolution.md §6.3。
+
+| 项 | 说明 |
+|----|------|
+| 鉴权 | ReadyUser |
+| 请求体 | `taskType`（白名单：`kb_qa` 知识库问答 / `template_draft` 模板草稿生成（agent-evolution #06，2026-10-06），未知 422/1003）、`input`（任务输入，strip 后 1-2000 字，§21.5） |
+| 成功响应 | `200`，`text/event-stream`。事件序 **RUN_STARTED → (STEP_STARTED → TOOL_CALL_START → TOOL_CALL_ARGS → TOOL_CALL_END → STEP_FINISHED)×N → TEXT_MESSAGE_START → TEXT_MESSAGE_CONTENT → TEXT_MESSAGE_END → RUN_FINISHED**；失败以 RUN_ERROR 收尾 |
+| 开流前错误（普通 JSON） | `422/1003` taskType 不支持 / input 长度非法（字段级）；`429/3002` 今日额度用尽（与问答共享同一计数器，换端点不绕限） |
+| 流中错误 | SSE `RUN_ERROR` 事件（`message` 对外脱敏、`code` 为字符串型共享错误码：5001 上游故障 / 5000 兜底意外）；agent_runs 行同步置 failed，不留 running 幽灵行；客户端断连由服务端兜底置 failed |
+
+关键事件载荷（AG-UI 官方键名）：`RUN_STARTED`/`RUN_FINISHED` 带 `thread_id`、`run_id`（RUN_FINISHED 另带 `result.text` 成稿）；`STEP_*` 带 `step_name`（step-N，一次模型迭代一步）；`TOOL_CALL_*` 带 `tool_call_id`、`tool_call_name`（ARGS 的 `delta` 为参数 JSON）；`TEXT_MESSAGE_*` 带 `message_id`、`delta`。检索工具 `knowledge_base_search` 部门范围恒为 `[本人部门, 全员]`（F-502，调用者上下文强制继承，参数携带的部门字段一律无效）。
+
+任务说明（任务档案 `services/agent_tasks.TASK_PROFILES`，白名单校验与编排同源消费）：
+
+- `kb_qa`：知识库问答；工具集 `knowledge_base_search`。
+- `template_draft`（#06）：HR 制度/客服话术模板生成——系统提示要求先检索知识库内既有制度/话术做 few-shot 参照，再产出结构化 Markdown 模板；工具集 `knowledge_base_search` + `save_draft`（参数 `title`/`content`，包装 `services/draft_review.create_draft`：草稿按调用者身份落 `documents.source_type='draft'`/`review_status='待审核'`，无审核不落地——审核走 §2.10e/§2.10f，通过后既有管道收口 ready 方可被检索）。检索持续空手而归时任务以"知识库中未找到相关内容"收尾，不输出编造成稿。
+
+落库：每次开流写一行 `agent_runs`（归属 user_id/dept_id、run_type、status、input 快照），成功回填 `output={text}` 与耗时，失败回填脱敏 `error`；每次工具调用另落一行 `agent_steps`（迁移 0009：`seq` 与 TOOL_CALL 事件序一致，args/观察截断存储、工具失败原因落 `error`）——前端看到的事件序 = 库内轨迹（审核回放依据，specs §五"轨迹与草稿一体保存"）。

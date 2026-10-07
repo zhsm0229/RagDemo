@@ -68,10 +68,12 @@ def test_mode():
 def client(session, fake_clock):
     """httpx 同步客户端：依赖覆写 get_db → 测试事务 session，cookie 自动保持。"""
     from app.api.deps import get_db
+    from app.core.security import default_blacklist
     from app.main import app
     from app.services.auth import default_limiter
 
     default_limiter.reset()
+    default_blacklist.reset()  # 登出黑名单同为进程内状态，用例间隔离（jti 虽不撞，防积留）
     app.dependency_overrides[get_db] = lambda: session
     with TestClient(
         app
@@ -84,15 +86,19 @@ def client(session, fake_clock):
 def chat_client(session, fake_clock, test_mode, monkeypatch):
     """SSE 问答测试客户端：TEST_MODE 下 TestClient 启动即触发 lifespan 自建 Stub
     chat_deps 挂 app.state；get_db 覆写为测试事务 session，另把 services.chat_stream
-    的 SessionLocal（生成器短会话的会话工厂）指向同一连接——短会话与用例读回同处
-    测试事务（commit 只释放 savepoint，对本 session 可见），测试结束整体回滚不触真库。"""
+    的 SessionLocal（生成器短会话的会话工厂）与 services.memory_extract 的
+    SessionLocal（长期记忆抽取后台任务体，F-210 §3.2——TestClient 在响应发完后同步
+    跑 BackgroundTasks）指向同一连接——短会话与用例读回同处测试事务（commit 只释放
+    savepoint，对本 session 可见），测试结束整体回滚不触真库其他连接；抽取任务体里
+    build_llm 走 test_mode Stub（默认产出非 JSON，解析失败静默跳过，不落数据）。"""
     from app.api.deps import get_db
     from app.main import app
-    from app.services import chat_stream
+    from app.services import chat_stream, memory_extract
     from app.services.auth import default_limiter
 
     factory = sessionmaker(bind=session.connection(), expire_on_commit=False)
     monkeypatch.setattr(chat_stream, "SessionLocal", factory)
+    monkeypatch.setattr(memory_extract, "SessionLocal", factory)
     default_limiter.reset()
     app.dependency_overrides[get_db] = lambda: session
     # raise_server_exceptions=False：prepare 阶段上游故障的 500 兜底响应可被用例断言

@@ -390,6 +390,7 @@ def test_rag_citations_ordered_by_rerank_score_with_full_fields(session: Session
             "n": 1,
             "refType": "doc",
             "refId": c1.id,
+            "docId": doc.id,  # 文档主键：引用弹窗取原文件/图片按文档寻址（≠chunk id）
             "title": doc.title,
             "page": 3,
             "titlePath": "假勤管理/年假",
@@ -399,6 +400,7 @@ def test_rag_citations_ordered_by_rerank_score_with_full_fields(session: Session
             "n": 2,
             "refType": "doc",
             "refId": c2.id,
+            "docId": doc.id,
             "title": doc.title,
             "page": 7,
             "titlePath": "假勤管理/病假",
@@ -408,6 +410,7 @@ def test_rag_citations_ordered_by_rerank_score_with_full_fields(session: Session
             "n": 3,
             "refType": "doc",
             "refId": c3.id,
+            "docId": doc.id,
             "title": doc.title,
             "page": 9,
             "titlePath": "假勤管理/调休",

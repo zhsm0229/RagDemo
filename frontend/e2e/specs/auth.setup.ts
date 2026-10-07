@@ -41,37 +41,45 @@ setup('prepare login states', async ({ playwright }) => {
     }
   }
   if (!(await stackUp())) {
-    execSync(
-      'docker compose -f docker-compose.yml -f deploy/docker-compose.e2e.yml up -d pg app',
-      { cwd: repoRoot, stdio: 'inherit', env: process.env },
-    )
+    execSync('docker compose -f docker-compose.yml -f deploy/docker-compose.e2e.yml up -d pg app', {
+      cwd: repoRoot,
+      stdio: 'inherit',
+      env: process.env,
+    })
     for (let i = 0; i < 60; i++) {
       if (await stackUp()) break
       await new Promise((r) => setTimeout(r, 3_000))
     }
   }
-  execSync(
-    'docker compose exec -T -e E2E_PASSWORD -e E2E_WIPE=1 app python -m app.db.e2e_seed',
-    { cwd: repoRoot, stdio: 'inherit', env: process.env },
-  )
+  execSync('docker compose exec -T -e E2E_PASSWORD -e E2E_WIPE=1 app python -m app.db.e2e_seed', {
+    cwd: repoRoot,
+    stdio: 'inherit',
+    env: process.env,
+  })
   fs.mkdirSync('.auth', { recursive: true })
   const ctx = await playwright.request.newContext({ baseURL })
   try {
     await loginAndSave(ctx, 'e2e-admin', '.auth/admin.json')
 
     // ---- 数据预置（清库后自足，执行顺序无关化）----
-    // ① 两份文档入库（TEST_MODE 同步解析出块，供检索测试/问答引用）
+    // ① 三份文档入库（TEST_MODE 同步解析出块，供检索测试/问答引用）；
+    //   svc-only 归属客服部门（SEC-AGENT-01 串库边界断言的越界标记源），其余为全员。
     const dataDir = path.resolve(repoRoot, 'data/uploads/e2e')
-    for (const [name, title] of [
-      ['e2e-upload-latest.docx', 'e2e_差旅报销制度_预置'],
-      ['e2e-upload-docspec.docx', 'e2e_DOC01专用文档_预置'],
+    for (const [name, title, dept] of [
+      ['e2e-upload-latest.docx', 'e2e_差旅报销制度_预置', 'all'],
+      ['e2e-upload-docspec.docx', 'e2e_DOC01专用文档_预置', 'all'],
+      ['e2e-svc-only.docx', 'e2e_客服专属话术_预置', 'service'],
     ] as const) {
       const buffer = fs.readFileSync(path.join(dataDir, name))
       const up = await ctx.post('/api/documents', {
         multipart: {
-          file: { name, mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer },
+          file: {
+            name,
+            mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            buffer,
+          },
           title,
-          dept: 'all',
+          dept,
           owner: 'e2e-bot',
           effectiveDate: '2026-09-30',
           complianceConfirmed: 'true',
@@ -82,10 +90,16 @@ setup('prepare login states', async ({ playwright }) => {
       }
     }
     // ② 问答对导入（年假行供 QA-05 启停用例）
-    const qaXlsx = fs.readFileSync(path.resolve(repoRoot, 'frontend/e2e/fixtures/files/qa_合规.xlsx'))
+    const qaXlsx = fs.readFileSync(
+      path.resolve(repoRoot, 'frontend/e2e/fixtures/files/qa_合规.xlsx'),
+    )
     const qa = await ctx.post('/api/admin/qa-pairs/import', {
       multipart: {
-        file: { name: 'qa_合规.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', buffer: qaXlsx },
+        file: {
+          name: 'qa_合规.xlsx',
+          mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          buffer: qaXlsx,
+        },
         deptCode: 'all',
       },
     })
@@ -93,10 +107,16 @@ setup('prepare login states', async ({ playwright }) => {
       throw new Error(`预置问答对导入失败: ${qa.status()} ${await qa.text()}`)
     }
     // ③ 评测题库导入（EVAL 域用例数据）
-    const evalXlsx = fs.readFileSync(path.resolve(repoRoot, 'frontend/e2e/fixtures/files/eval_题库.xlsx'))
+    const evalXlsx = fs.readFileSync(
+      path.resolve(repoRoot, 'frontend/e2e/fixtures/files/eval_题库.xlsx'),
+    )
     const ev = await ctx.post('/api/admin/eval-questions/import', {
       multipart: {
-        file: { name: 'eval_题库.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', buffer: evalXlsx },
+        file: {
+          name: 'eval_题库.xlsx',
+          mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          buffer: evalXlsx,
+        },
       },
     })
     if (ev.status() !== 201 && ev.status() !== 200) {

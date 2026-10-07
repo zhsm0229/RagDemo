@@ -1,8 +1,8 @@
 """鉴权 API 测试（AUTH-01~09，brief 用例表 8 行全覆盖 + 参数化补充）。
 
 覆盖：正确登录 / 失败计数提示 / 5 次锁定+审计 / 成功清零 / 首登强制改密 /
-禁用即时生效 / 无 cookie / member 越权；另含密码 >72 字节 422、改密 <8 位 422、
-锁定纯函数 evaluate_login 与滑动窗口限流器的穷举单测。
+禁用即时生效 / 无 cookie / member 越权 / 登出黑名单（AUTH-08，§5.3）；另含密码
+>72 字节 422、改密 <8 位 422、锁定纯函数 evaluate_login 与滑动窗口限流器的穷举单测。
 fixtures：tests/api/conftest.py 的 client/fake_clock；用户直插测试事务（bcrypt 哈希）。
 """
 
@@ -12,6 +12,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.api.deps import COOKIE_NAME
 from app.core.security import hash_password, verify_password
 from app.db.models import AuditLog, Department, User
 from tests.conftest import login_as
@@ -273,6 +274,52 @@ def test_member_cannot_access_admin_route(client, session) -> None:
     ok = client.get("/api/auth/admin/ping")
     assert ok.status_code == 200
     assert ok.json()["data"]["pong"] is True
+
+
+# ---------- 用例表 AUTH-08：登出后旧令牌即时失效（进程内 jti 黑名单，§5.3） ----------
+
+
+def test_logout_revokes_old_token_immediately(client, session) -> None:
+    """登出：200 清 Cookie（后端同步下发过期 Cookie 头）；此后带旧令牌的请求
+    401/2003（AUTH-08，读回断言：登出前的旧令牌重新挂上必须被拒）；黑名单按
+    jti 生效——重新登录换发的新令牌不受牵连。"""
+    make_user(session, "kate", "right-one")
+    assert login_as(client, "kate", "right-one").status_code == 200
+    assert client.get("/api/auth/me").status_code == 200
+    old_token = client.cookies.get(COOKIE_NAME)  # 留存登出前令牌，供读回复验
+    assert old_token
+    resp = client.post("/api/auth/logout")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["code"] == 0
+    assert body["message"] == "ok"
+    assert body["data"] is None
+    set_cookie = resp.headers["set-cookie"].lower()
+    assert "jwt=" in set_cookie
+    assert "max-age=0" in set_cookie  # 过期 Cookie 头，前端随之清掉本地 Cookie
+    client.cookies.set(COOKIE_NAME, old_token)  # 读回：旧令牌必须已被黑名单拒绝
+    denied = client.get("/api/auth/me")
+    assert denied.status_code == 401
+    assert denied.json()["code"] == 2003
+    client.cookies.clear()
+    assert login_as(client, "kate", "right-one").status_code == 200  # 换发新令牌
+    assert client.get("/api/auth/me").json()["data"]["username"] == "kate"
+
+
+def test_logout_without_cookie_is_idempotent(client) -> None:
+    """无 Cookie 登出：幂等 200/code 0（登出语义=清 Cookie，不因无令牌报错）。"""
+    resp = client.post("/api/auth/logout")
+    assert resp.status_code == 200
+    assert resp.json()["code"] == 0
+
+
+def test_logout_with_invalid_token_still_clears_cookie(client) -> None:
+    """坏令牌登出：200 清 Cookie，不 401（登出不设登录门，避免借其探测令牌有效性）。"""
+    client.cookies.set(COOKIE_NAME, "not-a-valid-token")
+    resp = client.post("/api/auth/logout")
+    assert resp.status_code == 200
+    assert resp.json()["code"] == 0
+    assert "max-age=0" in resp.headers["set-cookie"].lower()
 
 
 # ---------- 参数化补充：登录密码 >72 字节（bcrypt 上限，API 边界校验） ----------

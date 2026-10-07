@@ -136,3 +136,10 @@ export function post<T>(
 ): Promise<T> {
   return request<T>(path, { ...options, method: 'POST', body })
 }
+
+export function del<T>(
+  path: string,
+  options: Omit<RequestOptions, 'method' | 'body'> = {},
+): Promise<T> {
+  return request<T>(path, { ...options, method: 'DELETE' })
+}

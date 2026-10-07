@@ -1,5 +1,6 @@
 r"""解析器：Parser 接口 + DocxParser（python-docx）+ PdfFallbackParser（pypdf 降级）+
-MinerUParser（HTTP 客户端）+ get_parser 调度器（standards §10.2 解析器选择树）。
+get_parser 调度器（standards §10.2 解析器选择树）；MinerUParser 独立在 parser_mineru.py
+（叶模块，本文件转出再导出保持既有导入路径），扩展格式在 parsers_extra.py。
 
 安全边界（standards §6.1/§6.3）：docx zip 条目白名单（其余跳过）；包总量声明
 ≤500MB、条目 ≤10 万；单条目 MAX_ENTRY_XML_BYTES 实读上限 + DOCTYPE/ENTITY 流式
@@ -14,7 +15,6 @@ import zipfile
 from pathlib import PureWindowsPath
 from typing import Protocol, runtime_checkable
 
-import httpx
 from docx import Document
 from docx.document import Document as DocumentObject
 from docx.table import Table
@@ -24,8 +24,16 @@ from pypdf.errors import PyPdfError
 
 from app.core.config import Settings
 from app.core.errors import ERR_PARSE_FAILED, ERR_UNSUPPORTED_FORMAT, ApiError
-from app.core.llm import UpstreamError
 from app.rag.chunker import Block, ParsedDoc
+from app.rag.image_extract import collect_docx_images
+from app.rag.parser_mineru import MinerUParser
+from app.rag.parsers_extra import (
+    HtmlParser,
+    MarkdownParser,
+    PptxParser,
+    TextParser,
+    XlsxParser,
+)
 from app.rag.xmlguard import scan_entry
 
 MAX_UNCOMPRESSED_BYTES: int = 500 * 1024 * 1024  # §6.3：包声明解压总量上限（防解压炸弹）
@@ -69,8 +77,13 @@ def _allowed_entry(name: str) -> bool:
 
 
 def _heading_level(paragraph: Paragraph) -> int | None:
-    """内置标题样式 Heading N → 层级 N；非标题（含自定义样式）返回 None。"""
-    name = paragraph.style.name
+    """内置标题样式 Heading N → 层级 N；非标题（含自定义样式）返回 None。
+
+    style 可为 None：正文引用了 styles.xml 未定义的样式（Xstudio/WPS 等生成器常见
+    悬空样式引用，python-docx 解析为 None）——按无标题普通段落处理，不因缺样式
+    判定整个文档非法（2026-10-06 实测：Xstudio 导出 docx 全文解析失败即此因）。"""
+    style = paragraph.style
+    name = style.name if style is not None else ""
     if not name.startswith("Heading "):
         return None
     try:
@@ -115,11 +128,13 @@ class DocxParser:
         max_entries: int = MAX_ENTRIES,
         max_entry_xml_bytes: int = MAX_ENTRY_XML_BYTES,
         max_output_chars: int = MAX_OUTPUT_CHARS,
+        with_images: bool = False,
     ) -> None:
         self.max_uncompressed_bytes: int = max_uncompressed_bytes
         self.max_entries: int = max_entries
         self.max_entry_xml_bytes: int = max_entry_xml_bytes
         self.max_output_chars: int = max_output_chars
+        self.with_images: bool = with_images  # F-1017：抽取内嵌图片（开关关闭=不收集）
 
     def parse(self, filename: str, content: bytes) -> ParsedDoc:
         """包体校验（§6.1/§6.3）→ python-docx 解析 → 标题节序列；标题取元数据，缺省用文件名。"""
@@ -134,7 +149,8 @@ class DocxParser:
         except _DOCX_PARSE_ERRORS as exc:  # 含加密条目/压缩方法不支持/lxml 语法错误
             raise ApiError(ERR_PARSE_FAILED, "docx 解析失败：包体结构非法或已加密", 422) from exc
         _check_output(sum(len(block.text) for block in blocks), self.max_output_chars)
-        return ParsedDoc(title=title, blocks=blocks)
+        images, skipped = (collect_docx_images(document).images, 0) if self.with_images else ([], 0)
+        return ParsedDoc(title=title, blocks=blocks, images=images, image_skipped=skipped)
 
     def _validate_package(self, content: bytes) -> None:
         """闸门按序短路：条目数 → 声明解压总量 → OPC 标记 → 逐白名单条目（声明上限 + 流式扫描）。"""
@@ -220,77 +236,31 @@ class PdfFallbackParser:
         return ParsedDoc(title=stem, blocks=_page_blocks(stem, text))
 
 
-class MinerUParser:
-    """MinerU 解析服务 HTTP 客户端（版面分析/表格/OCR）。
-
-    契约：POST {base_url}/file_parse（multipart 字段 file），JSON 响应
-    {"content": str, "pages": int?}（pages 可选，供 §6.3 页数闸）；网络/超时/非 2xx
-    重试 1 次后抛 UpstreamError。W2 对接真实部署时契约如有出入只改本类。"""
-
-    engine: str = "mineru"
-    degraded: bool = False
-
-    def __init__(
-        self,
-        base_url: str,
-        timeout_s: int = 300,
-        transport: httpx.BaseTransport | None = None,
-        max_pages: int = MAX_PAGES,
-        max_output_chars: int = MAX_OUTPUT_CHARS,
-    ) -> None:
-        self.base_url: str = base_url.rstrip("/")
-        self.timeout_s: int = timeout_s
-        self.max_pages: int = max_pages
-        self.max_output_chars: int = max_output_chars
-        self._transport: httpx.BaseTransport | None = transport  # 测试注入 httpx.MockTransport
-
-    def parse(self, filename: str, content: bytes) -> ParsedDoc:
-        """上传字节取回文本为单块 ParsedDoc；响应须为 {"content": str, "pages": int?}。
-
-        content 无 \\f 分页 → 单块 Block.page=None 不崩；真实部署的页码契约为 W1 移交项。"""
-        with httpx.Client(timeout=self.timeout_s, transport=self._transport) as client:
-            response = self._post_with_retry(client, filename, content)
-            try:
-                payload = response.json()
-            except ValueError as exc:  # 含 JSONDecodeError
-                raise UpstreamError("mineru 响应不是合法 JSON") from exc
-        text = payload.get("content") if isinstance(payload, dict) else None
-        if not isinstance(text, str):  # 缺字段/非 str/非 dict 一律上游故障，不给半成品
-            raise UpstreamError("mineru 响应缺少 content 字段")
-        pages = payload.get("pages") if isinstance(payload, dict) else None
-        if isinstance(pages, int) and pages > self.max_pages:  # §6.3 页数闸，响应未携带则跳过
-            raise ApiError(ERR_PARSE_FAILED, "pdf 页数超过上限", 422)
-        _check_output(len(text), self.max_output_chars)
-        stem = _stem(filename)
-        return ParsedDoc(title=stem, blocks=[Block(level=1, heading_path=[stem], text=text)])
-
-    def _post_with_retry(
-        self, client: httpx.Client, filename: str, content: bytes
-    ) -> httpx.Response:
-        """首次 + 重试 1 次（standards：外部调用失败重试 1 次）；网络/超时/非 2xx 皆算失败。"""
-        last_error: Exception | None = None
-        for _ in range(2):
-            try:
-                response = client.post(
-                    f"{self.base_url}/file_parse", files={"file": (filename, content)}
-                )
-                response.raise_for_status()
-                return response
-            except httpx.HTTPError as exc:  # 含 ConnectError/TimeoutException/HTTPStatusError
-                last_error = exc
-        raise UpstreamError("mineru 解析服务调用失败（已重试 1 次）") from last_error
-
-
 def get_parser(filename: str, settings: Settings) -> Parser:
-    """解析器选择树（§10.2）：docx→python-docx；pdf→配置了 mineru 用 MinerU，否则 pypdf 降级；
-    `.doc` 按 §10.1 拒收并提示另存。此处为格式路由，非内容白名单（闸门在同步预检）。"""
+    """解析器选择树（§10.2）：docx→python-docx；pdf→场景路由（文字版 pypdf/扫描件 MinerU）；
+    md/txt/csv/xlsx/pptx/html→parsers_extra 扩展解析器；老格式 doc/ppt/xls 由转换服务
+    （core/convert.py）前置转 PDF 后按新扩展名再次进入本函数（2026-10-05 容器实测
+    裁定 Gotenberg 只输出 PDF，事故记录见 core/convert.py 模块注释）——直抵此处属异常路径
+    （转换失败已在异步段给出中文原因）。此处为格式路由，非内容白名单（闸门在同步预检）。"""
     ext = PureWindowsPath(filename).suffix.lower()
     if ext == ".docx":
-        return DocxParser()
+        return DocxParser(with_images=settings.image_ocr_enabled)
     if ext == ".pdf":
         if settings.mineru_base_url:
             return MinerUParser(settings.mineru_base_url, timeout_s=settings.mineru_timeout_s)
         return PdfFallbackParser()
-    if ext == ".doc":
-        raise ApiError(ERR_UNSUPPORTED_FORMAT, "请另存为 docx", 422)
-    raise ApiError(ERR_UNSUPPORTED_FORMAT, "仅支持 pdf/docx 格式", 422)
+    if ext == ".md":
+        return MarkdownParser()
+    if ext in (".txt", ".csv"):
+        return TextParser()
+    if ext == ".xlsx":
+        return XlsxParser(with_images=settings.image_ocr_enabled)
+    if ext == ".pptx":
+        return PptxParser(with_images=settings.image_ocr_enabled)
+    if ext == ".html":
+        return HtmlParser()
+    raise ApiError(
+        ERR_UNSUPPORTED_FORMAT,
+        "仅支持 pdf/docx/md/txt/csv/xlsx/pptx/html（doc/ppt/xls 自动转换）",
+        422,
+    )

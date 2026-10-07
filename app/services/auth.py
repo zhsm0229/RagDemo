@@ -24,7 +24,14 @@ from app.core.errors import (
     ERR_UNAUTHENTICATED,
     ApiError,
 )
-from app.core.security import create_token, hash_password, verify_password
+from app.core.security import (
+    JtiBlacklist,
+    create_token,
+    decode_token,
+    default_blacklist,
+    hash_password,
+    verify_password,
+)
 from app.db.models import User
 from app.services.audit import record_audit
 
@@ -149,6 +156,20 @@ def login(
     )
     session.commit()
     return user, token
+
+
+def logout(token: str | None, blacklist: JtiBlacklist | None = None) -> None:
+    """登出：校验 Cookie 令牌并把其 jti 记入进程内黑名单（§5.3，重启清空）。
+
+    令牌缺失或已失效为幂等 no-op：登出语义=清 Cookie（api 层恒 200 并下发过期
+    Cookie 头），不在登出端点区分令牌有效性（防探测）；黑名单条目 TTL=令牌剩余
+    有效期，容量随 exp 自然回收。A 阶段换 Redis 时整体替换 JtiBlacklist 实现。
+    """
+    if not token:
+        return
+    payload = decode_token(token, get_settings().jwt_secret, blacklist)
+    if payload is not None:
+        (blacklist if blacklist is not None else default_blacklist).revoke(payload.jti, payload.exp)
 
 
 def change_password(

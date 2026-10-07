@@ -37,16 +37,22 @@ export interface UserInfo {
   username: string
   role: UserRole
   mustChangePassword: boolean
+  /** 用户级记忆开关（F-210）：MemoryView 开关初值来源（app/api/memories.py PUT settings 可改） */
+  memoryEnabled: boolean
 }
 
 // ---- 问答流 SSE 事件（standards §3 第 6 条，docs/api.md §3.1） ----
 export type RefType = 'doc' | 'qa'
 
-/** 引用项：refId 语义随 refType——qa → 问答对 id；doc → chunk id（非文档 id） */
+/**
+ * 引用项：refId 语义随 refType——qa → 问答对 id；doc → chunk id（仅取切片正文用）。
+ * docId 仅 doc 引用有值：文档主键，取原文件/图片/在线预览按文档寻址（≠refId）。
+ */
 export interface CitationItem {
   n: number
   refType: RefType
   refId: number
+  docId?: number
   title: string
   page: number | null
   titlePath: string | null

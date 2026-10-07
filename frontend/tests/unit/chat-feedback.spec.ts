@@ -136,6 +136,30 @@ describe('引用联动与原文核对弹窗（F-202，kotaemon 式溯源）', ()
     expect(contentCalls()[0]).toContain('refType=doc&refId=11')
     // 点卡片同时高亮气泡对应角标（task-9 brief：点卡片高亮对应角标）
     expect(wrapper.find('.bubble.assistant .cite.hl').exists()).toBe(true)
+
+    // 在线预览入口（docId=55 寻址，非 refId=11）：点开预览弹窗拉 /documents/55/preview
+    const previewBtn = Array.from(dialogEl(wrapper).querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('在线预览'),
+    )
+    expect(previewBtn, 'doc 引用提供在线预览入口').toBeDefined()
+    // jsdom 无 createObjectURL：spyOn 精确替换（勿用 stubGlobal+unstubAllGlobals——
+    // 会连 beforeEach stub 的 fetch 一起摘掉，同用例后半段 mountChat 打真网络）
+    const coSpy = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:mock-preview')
+    const roSpy = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+    try {
+      await previewBtn!.click()
+      await flushPromises()
+      expect(fetchMock.mock.calls.some(([u]) => String(u) === '/api/documents/55/preview')).toBe(
+        true,
+      )
+      await waitFor(
+        () => document.body.querySelector('.preview-frame') !== null,
+        '预览 iframe 渲染（append-to-body）',
+      )
+    } finally {
+      coSpy.mockRestore()
+      roSpy.mockRestore()
+    }
     wrapper.unmount()
 
     // qa 卡：refType=qa 查问答对，正文为答案文本

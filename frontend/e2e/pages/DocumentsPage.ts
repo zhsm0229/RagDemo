@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 
-import { expect, type Page } from '@playwright/test'
+import { expect, type Locator, type Page } from '@playwright/test'
 
 /** 知识库·文档管理 PO（DocumentsView + UploadDialog 两步上传：文件 → 元数据提交入库）。 */
 export class DocumentsPage {
@@ -44,7 +44,9 @@ export class DocumentsPage {
   }
 
   async gotoStep2(): Promise<void> {
-    await this.dialog().getByRole('button', { name: /下一步/ }).click()
+    await this.dialog()
+      .getByRole('button', { name: /下一步/ })
+      .click()
   }
 
   async fillMeta(title: string, owner: string): Promise<void> {
@@ -73,7 +75,10 @@ export class DocumentsPage {
   }
 
   /** 一次性两步上传（允许失败版）：终态断言交由调用方按行状态做。 */
-  async uploadAllowFailure(filePath: string, meta: { title: string; owner: string }): Promise<void> {
+  async uploadAllowFailure(
+    filePath: string,
+    meta: { title: string; owner: string },
+  ): Promise<void> {
     await this.openUploadDialog()
     await this.selectFile(this.abs(filePath))
     await this.gotoStep2()
@@ -89,15 +94,19 @@ export class DocumentsPage {
 
   // ---- 断言 ----
 
-  async expectRowReady(title: string): Promise<void> {
+  async expectRowReady(title: string, timeout = 15_000): Promise<void> {
     await expect(
-      this.page.locator('.el-table__row', { hasText: title }).locator('.el-tag', { hasText: '就绪' }),
-    ).toBeVisible()
+      this.page
+        .locator('.el-table__row', { hasText: title })
+        .locator('.el-tag', { hasText: '就绪' }),
+    ).toBeVisible({ timeout })
   }
 
   async expectRowFailed(title: string): Promise<void> {
     await expect(
-      this.page.locator('.el-table__row', { hasText: title }).locator('.el-tag', { hasText: '失败' }),
+      this.page
+        .locator('.el-table__row', { hasText: title })
+        .locator('.el-tag', { hasText: '失败' }),
     ).toBeVisible()
   }
 
@@ -110,6 +119,16 @@ export class DocumentsPage {
     const row = this.page.locator('.el-table__row', { hasText: title }).first()
     await row.getByRole('button', { name: '重试' }).click()
     await expect(this.page.locator('.el-message').last()).toBeVisible()
+  }
+
+  /** 在线预览（2026-10-05）：点行内"预览"，返回预览弹窗（append-to-body 挂 body 末尾）。
+   * office 类首转可能数秒，iframe 可见性由调用方给足超时。 */
+  async openPreview(title: string): Promise<Locator> {
+    const row = this.page.locator('.el-table__row', { hasText: title }).first()
+    await row.getByRole('button', { name: '预览' }).click()
+    const dialog = this.page.locator('.el-dialog', { hasText: title }).last()
+    await expect(dialog).toBeVisible()
+    return dialog
   }
 
   /** 拒收类上传（扩展名/魔数/查重）：错误提示出现且上传弹窗可关（无行入库断言由调用方做）。 */
@@ -144,5 +163,49 @@ export class DocumentsPage {
     await expect(
       dialog.locator('.el-form-item', { hasText: '生效日期' }).locator('input'),
     ).toHaveValue(new RegExp(expected.date))
+  }
+
+  // ---- zip 批量导入（F-1007）----
+
+  private zipDialog(): ReturnType<Page['locator']> {
+    return this.page.locator('.el-dialog', { hasText: 'zip 批量导入' })
+  }
+
+  async openZipDialog(): Promise<void> {
+    await this.page.getByRole('button', { name: 'zip 批量导入' }).click()
+    await expect(this.zipDialog()).toBeVisible()
+  }
+
+  zipSummary(): ReturnType<Page['locator']> {
+    return this.zipDialog().locator('.summary-row')
+  }
+
+  async closeZipDialog(): Promise<void> {
+    // exact：el-dialog 自带 X 按钮 aria-label="关闭此对话框"，模糊匹配会撞 strict mode
+    await this.zipDialog().getByRole('button', { name: '关闭', exact: true }).click()
+    await expect(this.zipDialog()).toBeHidden()
+  }
+
+  /** 一次性 zip 导入：选包 → 开始导入 → 等汇总区出现（202 同步返回）。 */
+  async zipImport(absPath: string): Promise<void> {
+    await this.openZipDialog()
+    await this.zipDialog().locator('input[type="file"]').setInputFiles(absPath)
+    // 选包成功的标志：上传列表出现条目（若被弹窗重置竞态清掉，此处失败定位）
+    await expect(this.zipDialog().locator('.el-upload-list__item')).toBeVisible({ timeout: 5_000 })
+    await this.zipDialog().getByRole('button', { name: '开始导入' }).click()
+    await expect(this.zipDialog().locator('.summary-row')).toBeVisible({ timeout: 15_000 })
+  }
+
+  /** 结果表某条目的状态 tag 文本（已入库/重复跳过/已拒绝/元数据待补）。 */
+  zipEntryTag(filename: string): ReturnType<Page['locator']> {
+    return this.zipDialog().locator('.el-table__row', { hasText: filename }).locator('.el-tag')
+  }
+
+  /** 非 zip 前端即时拒收：内联提示出现且不发起请求。 */
+  async zipImportExpectReject(absPath: string, messagePattern: RegExp): Promise<void> {
+    await this.openZipDialog()
+    await this.zipDialog().locator('input[type="file"]').setInputFiles(absPath)
+    await expect(this.zipDialog().locator('[role="alert"]')).toContainText(messagePattern)
+    await this.closeZipDialog()
   }
 }

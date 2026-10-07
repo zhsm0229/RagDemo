@@ -118,7 +118,7 @@ def test_重建索引_非就绪状态422_不存在404_member403(admin_client, se
 
     missing = admin_client.post("/api/documents/999999/rebuild-index")
     assert missing.status_code == 404
-    assert missing.json()["code"] == ERR_PARAM_INVALID
+    assert missing.json()["code"] == ERR_NOT_FOUND  # I13：documents 域 404 统一 3003
 
     make_user(session, "rebuildmember", "right-one", role="member")
     assert login_as(admin_client, "rebuildmember", "right-one").status_code == 200

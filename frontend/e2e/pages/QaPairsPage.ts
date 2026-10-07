@@ -9,13 +9,20 @@ export class QaPairsPage {
   }
 
   async importExcel(filePath: string): Promise<void> {
-    await this.page.getByRole('button', { name: 'Excel 批量导入' }).locator('visible=true').first().click()
+    await this.page
+      .getByRole('button', { name: 'Excel 批量导入' })
+      .locator('visible=true')
+      .first()
+      .click()
     const dialog = this.page.locator('.el-dialog', { hasText: '导入' })
     const abs = path.isAbsolute(filePath)
       ? filePath
       : fileURLToPath(new URL(`../${filePath}`, import.meta.url))
     await dialog.locator('input[type="file"]').setInputFiles(abs)
-    await dialog.getByRole('button', { name: /导入|确定/ }).last().click()
+    await dialog
+      .getByRole('button', { name: /导入|确定/ })
+      .last()
+      .click()
   }
 
   async expectRow(question: string): Promise<void> {

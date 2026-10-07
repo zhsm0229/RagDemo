@@ -143,6 +143,18 @@ class TestToken:
 
 class TestCreateTokenClaims:
     def test_claims_match_inputs(self) -> None:
+        """断言 create_token 把入参逐字段落为 claims（sub/role/dept/iat/exp/jti）。
+
+        根因记录（findings I28，"Signature has expired" 时效型 flake）：
+        签发侧 now 取 FakeClock 固定起点 2026-10-01T08:00:00+00:00（见 FakeClock.__init__），
+        exp 被固定为 2026-10-01T08:30Z；而校验侧曾只关 verify_iat，verify_exp 仍走
+        PyJWT 默认的真实墙钟。真实时间越过 2026-10-01T08:30Z 之前必然通过、越过之后
+        必然过期报错——两轮评审恰好跨过该时刻，才呈现"间歇失败"。属测试侧校验时钟
+        与签发时钟不一致，decode_token 生产路径（经可注入时钟）无此问题。
+        修复：本用例只验证 claim 内容等于签发入参，exp 正确性由下方数值断言覆盖，
+        时效行为已由 TestToken.test_expired_token_decodes_to_none 经注入时钟覆盖，
+        故 verify_exp 一并关闭，校验侧不再触碰真实墙钟（签名校验仍生效）。
+        """
         clock = FakeClock()
         now: datetime = clock.now()
         token = create_token(
@@ -152,7 +164,8 @@ class TestCreateTokenClaims:
             token,
             SECRET,
             algorithms=["HS256"],
-            options={"verify_iat": False},  # FakeClock 起点晚于真实系统时间，iat 未来校验不适用
+            # iat/exp 时效校验依赖真实墙钟，与 FakeClock 固定起点必然错位，见 docstring 根因记录
+            options={"verify_exp": False, "verify_iat": False},
         )
         assert claims["sub"] == str(USER_ID)
         assert claims["role"] == ROLE

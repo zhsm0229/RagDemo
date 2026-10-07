@@ -3,10 +3,12 @@
  * 单条消息气泡（对照原型 bubble user/assistant + msg-meta）。
  * markdown 不渲染（纯文本+换行，white-space: pre-wrap）；引用角标 [n] 用正则分段
  * 转可点 sup（仅当 n 在本条 citations 中存在），禁 v-html。
+ * 等待阶段提示（2026-10-06）：流式占位期且尚无内容时展示阶段文案+已等待秒数+
+ * 脉冲点——发送后到首 token 之间（CPU rerank 可达分钟级）气泡不再全白。
  * meta 行按状态展示：失败（生成失败+原因+重试）/ 已停止（可重试）/
  * 完成（已拒答、来自缓存、token·耗时、👍👎 反馈与已点踩标注）。
  */
-import { computed } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import type { ChatMessage } from '@/composables/useChatStream'
 
 const props = defineProps<{
@@ -53,11 +55,63 @@ const segments = computed<Segment[]>(() => {
 const canFeedback = computed(
   () => props.message.id !== null && props.message.status === 'done' && !props.message.refused,
 )
+
+// ---- 等待阶段提示 ----
+
+/** 内容未开始（空气泡）且处于等待阶段才提示；token 到达后由内容与光标接管 */
+const waiting = computed(
+  () =>
+    props.message.status === 'streaming' &&
+    props.message.stage !== null &&
+    props.message.content === '',
+)
+
+const STAGE_TEXT: Record<string, string> = {
+  search: '正在检索知识库',
+  generate: '正在生成回答',
+}
+
+const stageText = computed(() =>
+  props.message.stage === null ? '' : (STAGE_TEXT[props.message.stage] ?? ''),
+)
+
+/** 已等待秒数：1s 心跳只在等待期存在；≥3s 才显示（快路径不闪计数） */
+const now = ref(Date.now())
+const elapsed = computed(() =>
+  props.message.startedAt === null ? 0 : Math.floor((now.value - props.message.startedAt) / 1000),
+)
+let ticker: number | null = null
+watch(
+  waiting,
+  (on) => {
+    if (on) {
+      now.value = Date.now()
+      ticker = window.setInterval(() => {
+        now.value = Date.now()
+      }, 1000)
+    } else if (ticker !== null) {
+      clearInterval(ticker)
+      ticker = null
+    }
+  },
+  { immediate: true },
+)
+onUnmounted(() => {
+  if (ticker !== null) clearInterval(ticker)
+})
 </script>
 
 <template>
   <div v-if="message.role === 'user'" class="bubble user">{{ message.content }}</div>
   <div v-else class="bubble assistant">
+    <div v-if="waiting" class="stage-hint">
+      <span class="pulse-dot" />
+      <span>{{ stageText }}</span>
+      <span class="dots">…</span>
+      <span v-if="elapsed >= 3" class="elapsed"
+        >已等待 {{ elapsed }} 秒（检索含 CPU 重排，较慢属正常）</span
+      >
+    </div>
     <template v-for="(seg, i) in segments" :key="i">
       <span v-if="seg.type === 'text'">{{ seg.text }}</span>
       <sup
@@ -68,7 +122,7 @@ const canFeedback = computed(
         >{{ seg.n }}</sup
       >
     </template>
-    <span v-if="message.status === 'streaming'" class="cursor">▍</span>
+    <span v-if="message.status === 'streaming' && message.content !== ''" class="cursor">▍</span>
     <div v-if="message.status === 'failed'" class="msg-meta">
       <el-tag v-if="message.stopped" size="small" type="info">已停止</el-tag>
       <template v-else>
@@ -156,6 +210,40 @@ const canFeedback = computed(
   50% {
     opacity: 0;
   }
+}
+/* 等待阶段提示：脉冲点 + 阶段文案 + 已等待秒数（发送后到首 token 的活性反馈） */
+.stage-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+}
+.pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--el-color-primary);
+  animation: pulse 1.2s ease-in-out infinite;
+  flex-shrink: 0;
+}
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.75);
+  }
+}
+.dots {
+  letter-spacing: 2px;
+}
+.elapsed {
+  font-size: 12px;
+  opacity: 0.85;
 }
 .msg-meta {
   font-size: 12px;

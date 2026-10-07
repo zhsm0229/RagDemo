@@ -89,6 +89,20 @@ services:
       timeout: 5s
       retries: 60
       start_period: 15m
+  gotenberg:
+    image: gotenberg/gotenberg:8
+    container_name: ragdemo-gotenberg
+    # 老格式（doc/ppt/xls）LibreOffice 自动转换（F-1015）；仅内网，不对外发布端口
+    command: ["gotenberg", "--api-timeout=120s"]
+    restart: unless-stopped
+    healthcheck:
+      # Gotenberg 8 实际监听 3000（与 CONVERT_BASE_URL 同源）；探 3000 端口（与 CONVERT_BASE_URL 同源）
+      test: ["CMD", "curl", "-sf", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
 
   # 应用（§12.2 容器清单核心）：uvicorn + 前端 dist 单容器，启动即迁移（entrypoint）。
   # 连接串覆盖为 compose 内网主机名；其余配置继承 .env（密钥不落 compose，§12.7）。
@@ -110,10 +124,16 @@ services:
       EMBED_BASE_URL: http://tei-embed:80
       RERANK_BASE_URL: http://tei-rerank:80
       MINERU_BASE_URL: http://mineru:8000
+      CONVERT_BASE_URL: http://gotenberg:3000
+      IMAGE_OCR_ENABLED: ${IMAGE_OCR_ENABLED:-false}
     env_file:
       - .env
     volumes:
-      - ./data/uploads:/srv/ragdemo/data # dev bind：E2E 种子生成的唯一夹具宿主可直接上传
+      # dev bind：E2E 种子生成的唯一夹具宿主可直接上传。嵌套说明：STORAGE_DIR 缺省 ./data/uploads
+      # 相对容器 WORKDIR(/srv/ragdemo) 解析为 /srv/ragdemo/data/uploads，实际宿主路径 = ./data/uploads/uploads
+      # （挂载点是其父目录）。改挂载目标为 .../data/uploads 会使存量 dev 数据与 E2E 夹具整体错位，
+      # 故保留嵌套、仅作说明；backup.sh 按 ./data/uploads 整目录打包，嵌套内容含在内（runbook §3）。
+      - ./data/uploads:/srv/ragdemo/data
     depends_on:
       pg:
         condition: service_healthy

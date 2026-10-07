@@ -8,25 +8,43 @@ prepare_turn 时序（brief ①-⑧）：多轮先改写（仅携带最近 3 轮
 （score=rerank sigmoid 分）。分数口径（强制交接①，standards §4.4）：拒答判定与
 citation score 只取 rerank_and_fold 产物——其之前的 DocHit.similarity 是召回余弦
 （仅供检索内部排序），两套分数绝不互比。
+长期记忆注入（F-210 §3.3，agent-evolution）：user_id 非 None 时先召回本人启用且
+活跃的画像，非空则 rag 分支把 <user_memory> 块（不可信声明内建）拼进 chat_system，
+qa/拒答/缓存分支不注入；注入非空时缓存键追加 user 维度后缀（§3.4，收敛在
+ExactCache.make_key 一处），为空保持旧键。
 缓存 put 不发生在 prepare：生成完成 finalize 后由 Task 9 以 plan.cache_key 执行
 （refuse 不可缓存、cache 计划已在缓存中，两者 cache_key 恒为 None）；缓存条目契约
 （Task 9 写、prepare 读）：{"answer": str, "citations": list[dict], "answer_type":
 str, "model": str}。本模块只 flush 不 commit、只 HitCounter.add 不 flush，事务边界
 归调用方（对齐 services 层惯例，record_audit 先例）。
+会话/消息存取与归属解析拆至 conversations_store.py（行数红线 §1.4，本模块转出再导出）。
 """
 
 from dataclasses import dataclass
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.core.assembly import PromptPack
 from app.core.config import Settings
-from app.core.errors import ERR_NOT_FOUND, ApiError
 from app.core.llm import Embedder, LLMProvider, Reranker
-from app.db.models import Conversation, Message, User
-from app.rag.prompt import ContextSource, build_chat_messages, build_context_block
+from app.db.models import Message
+from app.rag.prompt import (
+    ContextSource,
+    build_chat_messages,
+    build_context_block,
+    build_user_memory_block,
+)
 from app.services.chat_cache import DailyCounter, ExactCache, HitCounter
+from app.services.conversations_store import (
+    MSG_CONVERSATION_NOT_FOUND,
+    MSG_MESSAGE_NOT_FOUND,
+    list_conversation_messages,
+    list_user_conversations,
+    resolve_own_answer,
+    resolve_owned_conversation,
+)
+from app.services.memory import recall_recent
 from app.services.retrieval import (
     DocHit,
     QaHit,
@@ -36,9 +54,25 @@ from app.services.retrieval import (
 from app.services.rewrite import rewrite_question
 from app.services.vector_store import VectorStore
 
+# 会话/消息存取与归属解析自本文件拆出（行数红线 §1.4）：实现在 conversations_store.py，
+# 此处转出再导出保持既有导入路径（from app.services.chat import resolve_owned_conversation
+# 等，api/chat、api/conversations、api/feedback 三端点消费）。
+__all__ = [
+    "MSG_CONVERSATION_NOT_FOUND",
+    "MSG_MESSAGE_NOT_FOUND",
+    "ChatDeps",
+    "TurnPlan",
+    "finalize_turn",
+    "list_conversation_messages",
+    "list_user_conversations",
+    "load_recent_history",
+    "mark_interrupted",
+    "prepare_turn",
+    "resolve_own_answer",
+    "resolve_owned_conversation",
+]
+
 _REWRITE_ROUNDS: int = 3  # 改写历史取最近 3 轮（prompt 层不截条数，截断归调用方约定）
-MSG_CONVERSATION_NOT_FOUND: str = "会话不存在或无权访问"  # 404/3003 对外文案（归属/软删共用）
-MSG_MESSAGE_NOT_FOUND: str = "消息不存在或无权访问"  # 反馈归属失败对外文案（F-208）
 
 
 @dataclass
@@ -83,12 +117,19 @@ def prepare_turn(
     all_dept_id: int,
     question_raw: str,
     history: list[tuple[str, str]],
+    *,
+    user_id: int | None = None,
 ) -> TurnPlan:
     """按 brief 时序产出一轮计划：改写 → 归一化 → 缓存 → QA → 检索折叠 → 计划。
 
     dept_ids 恒为 [user_dept_id, all_dept_id]（F-502 部门隔离，全员部门参与过滤
     语义）；refuse 计划 citations 恒空、llm_messages 恒 None；缓存 put 不发生在
     prepare（Task 9 finalize 后执行）。
+
+    user_id 非 None 时启用长期记忆注入（F-210 §3.3，agent-evolution）：仅 rag 分支
+    把 <user_memory> 块拼进 system（qa 整条返回/拒答无生成必要，均不注入）；注入
+    非空时缓存键追加 user 维度（§3.4，带不同画像的两人不互串）。user_id=None（评测
+    引擎等直调方）或缺省时跳过召回查询，行为与上线前逐字节一致。
     """
     rewritten = question_raw
     if history:
@@ -98,7 +139,16 @@ def prepare_turn(
             question_raw,
             system=deps.prompts.rewrite_system,
         )
-    cache_key = deps.cache.make_key(user_dept_id, normalize_question(rewritten))
+    memory_block = ""
+    if user_id is not None:
+        memories = recall_recent(db, user_id)
+        if memories:
+            memory_block = build_user_memory_block(memories)
+    cache_key = deps.cache.make_key(
+        user_dept_id,
+        normalize_question(rewritten),
+        user_suffix=f"u{user_id}" if memory_block else None,
+    )
     cached = deps.cache.get(cache_key)
     if cached is not None:
         return TurnPlan("cache", cached.get("citations", []), rewritten, None, cached, None)
@@ -111,7 +161,10 @@ def prepare_turn(
     if not folded or folded[0].similarity < deps.settings.refuse_threshold:
         return TurnPlan("refuse", [], rewritten, None, None, None)  # 拒答不写缓存
     deps.hit_counter.add([hit.chunk_id for hit in folded])  # 仅 rag 路径计数（F-1011）
-    return _rag_plan(folded, rewritten, cache_key, deps.prompts.chat_system)
+    chat_system = deps.prompts.chat_system
+    if memory_block:
+        chat_system = chat_system.rstrip() + "\n" + memory_block  # 仅 rag 分支注入（§3.3）
+    return _rag_plan(folded, rewritten, cache_key, chat_system)
 
 
 def _retrieve_folded(
@@ -163,6 +216,10 @@ def _rag_plan(folded: list[DocHit], rewritten: str, cache_key: str, chat_system:
             "n": n,
             "refType": "doc",
             "refId": hit.chunk_id,
+            # docId：文档主键——前端引用弹窗取原文件/图片/预览按文档寻址；refId 是
+            # chunk id，仅供 /api/citations/content 取切片正文，两者不可混用
+            # （2026-10-05 缺陷修复：此前弹窗误用 refId 拼 /documents/{id}/file|images）。
+            "docId": hit.document_id,
             "title": hit.title,
             "page": hit.page_no,
             "titlePath": hit.title_path,
@@ -240,68 +297,3 @@ def load_recent_history(
     if len(rows) % 2 == 1:
         rows = rows[1:]
     return [(role, content) for role, content in reversed(rows)]
-
-
-def list_user_conversations(
-    db: Session, user_id: int, page: int, page_size: int
-) -> tuple[list[Conversation], int]:
-    """本人活跃会话分页列表（F-207，自 api/conversations.py 下沉）：updated_at DESC
-    （同刻 id 降序兜底），返回 (当前页行, 总数)；user_id 归属过滤即隔离（个人资源）。"""
-    stmt = select(Conversation).where(
-        Conversation.user_id == user_id, Conversation.is_active.is_(True)
-    )
-    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = (
-        db.execute(
-            stmt.order_by(Conversation.updated_at.desc(), Conversation.id.desc())
-            .offset((page - 1) * page_size)
-            .limit(page_size)
-        )
-        .scalars()
-        .all()
-    )
-    return list(rows), total
-
-
-def list_conversation_messages(db: Session, conversation_id: int) -> list[Message]:
-    """会话历史消息 ASC（F-207，自 api/conversations.py 下沉）：中断占位行
-    （CHAT-12 遗留形态 is_active=false）不进列表，user 消息全返回。"""
-    return list(
-        db.execute(
-            select(Message)
-            .where(
-                Message.conversation_id == conversation_id,
-                or_(Message.role == "user", Message.is_active.is_(True)),
-            )
-            .order_by(Message.created_at.asc(), Message.id.asc())
-        )
-        .scalars()
-        .all()
-    )
-
-
-def resolve_own_answer(db: Session, user_id: int, message_id: int) -> Message:
-    """反馈归属解析（W2 自 api/feedback.py 下沉）：本人 + assistant + is_active。
-
-    任一不满足与不存在同判 404/3003（不给探测空间，IDOR §21.8；user 消息与中断
-    占位行不可反馈）。按 id 过滤而非 db.get——messages 是 (id, created_at) 复合主键，
-    单值 db.get 无法构形。"""
-    message = db.scalar(select(Message).where(Message.id == message_id))
-    if message is None or message.user_id != user_id or message.role != "assistant":
-        raise ApiError(ERR_NOT_FOUND, MSG_MESSAGE_NOT_FOUND, 404)
-    if not message.is_active:
-        raise ApiError(ERR_NOT_FOUND, MSG_MESSAGE_NOT_FOUND, 404)
-    return message
-
-
-def resolve_owned_conversation(db: Session, user: User, conversation_id: int) -> Conversation:
-    """按 id 解析本人且 is_active 的会话，否则 404/3003（问答端点与会话管理端点共享）。
-
-    不区分"不存在"与"无权"，不给探测空间（IDOR 防线 §21.8）；部门过滤豁免说明：
-    个人会话仅属一人，user_id 归属校验严格强于 dept 过滤（api/chat.py 同注先例）。
-    Task 10 自 api/chat.py._resolve_conversation 提取共享，两处行为必须一致。
-    """
-    conversation = db.get(Conversation, conversation_id)
-    if conversation is None or conversation.user_id != user.id or not conversation.is_active:
-        raise ApiError(ERR_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND, 404)
-    return conversation

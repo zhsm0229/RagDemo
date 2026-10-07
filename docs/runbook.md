@@ -17,7 +17,8 @@ docker inspect -f '{{.Name}} {{.State.Health.Status}}' ragdemo-pg
 docker compose down
 ```
 
-- 主栈容器清单随里程碑并入：当前为 `pg` / `pg-test`（W3 阶段）；`app` / `mineru` / `tei-embed` / `tei-rerank` 后续并入，并入后 app 健康检查增加 `curl -f http://127.0.0.1/healthz`（发布端口仅 80，§12.2）。
+- 主栈容器清单随里程碑并入：当前为 `pg` / `pg-test`（W3 阶段）；`app` / `mineru` / `tei-embed` / `tei-rerank` / `gotenberg`（2026-10-06 并入：老格式 doc/ppt/xls 自动转换，F-1015）后续并入，并入后 app 健康检查增加 `curl -f http://127.0.0.1/healthz`（发布端口仅 80，§12.2）。
+- **gotenberg 处置**：健康卡"老格式转换 (Gotenberg)"行异常时 `bash deploy/recover.sh gotenberg`；停机仅影响 doc/ppt/xls 上传（failed+可重试），问答不受影响；探活端点 `http://gotenberg:3000/health`（容器内网，host 侧经 `docker exec ragdemo-gotenberg curl -sf http://localhost:3000/health`）。
 - **禁止**对主栈使用 `down -v`（会删除 `pgdata` 业务数据）；数据清理只允许在明确授权的重建流程中执行。
 
 ## 2. RAGFlow 基线环境
@@ -117,8 +118,8 @@ compose 中 `${RAGFLOW_IMAGE:-infiniflow/ragflow:v0.19.1}` 的 tag 默认值保�
 
 - 规范指针：standards §18——PostgreSQL 每日 `pg_dump` 全量保留 7 天（备份目录权限 0700）、上传目录每日备份、恢复目标 **RPO ≤ 24h / RTO ≤ 2h**（§18.3）、`.env` 凭据副本托管密码管理器。
 - **安全须知（§18.1）：备份含全部问答与文档内容，访问权限同生产库**——备份只落独立目录（本方案 `./backups`，脚本已 `chmod 700`），禁止放入 Web 可访问路径或全员可见共享位置；`.env`（含密钥）不在备份内，副本托管密码管理器。
-- 备份范围 = 主库 `rag`（容器 `ragdemo-pg`）+ 上传目录 `./data/uploads`（`STORAGE_DIR` 默认值）。`ragdemo-pg-test`（`rag_test`，5434 端口）是独立测试实例，**不在备份范围**；RAGFlow 基线环境不做备份（一次性对照数据，销毁重建，见 2.5）。
-- 备份统一走 `deploy/backup.sh`（顶部参数化区可按环境覆盖容器名/库名/目录/保留期），每步带 `[backup]` 时间戳日志，任一步失败非零退出。
+- 备份范围 = 主库 `rag`（容器 `ragdemo-pg`）+ 上传目录：dev=宿主 `./data/uploads`（`STORAGE_DIR` 默认值）；**prod=uploads named volume（`deploy_uploads`），走 §3.6 卷口径——卷内容不在宿主文件系统上，宿主路径备份在 prod 形态下双向落空（备份拿不到数据、恢复落不进卷）**。`ragdemo-pg-test`（`rag_test`，5434 端口）是独立测试实例，**不在备份范围**；RAGFlow 基线环境不做备份（一次性对照数据，销毁重建，见 2.5）。
+- 备份统一走 `deploy/backup.sh`（顶部参数化区可按环境覆盖容器名/库名/目录/保留期/卷名 `UPLOADS_VOLUME`），每步带 `[backup]` 时间戳日志，任一步失败非零退出。
 
 ### 3.1 每日自动备份（调度示例）
 
@@ -134,7 +135,7 @@ Linux（部署机；`crontab -e` 追加一行，仓库路径按实际调整）�
 30 2 * * * cd /opt/ragdemo && mkdir -p backups && ./deploy/backup.sh >> backups/backup-cron.log 2>&1
 ```
 
-- 两版均为每日 02:30 执行，日志追加到 `backups/backup-cron.log`（backup.sh 的保留期清理只删 `*.gz`，该日志需手工定期清理）。
+- 两版均为每日 02:30 执行，日志追加到 `backups/backup-cron.log`（backup.sh 的保留期清理只删 `*.gz / *.gz.sha256 / *.part`，该日志需手工定期清理）。prod 部署机的调度命令须带卷名环境变量：`UPLOADS_VOLUME=deploy_uploads`（见 §3.6）。
 - 前置：`ragdemo-pg` 在运行且 healthy（`docker inspect -f '{{.State.Health.Status}}' ragdemo-pg`）；失败先查上述日志，再手工按 3.2 复现。
 - 登记核查：Windows `schtasks /Query /TN "ragdemo-daily-backup"`；Linux `crontab -l`。
 
@@ -161,12 +162,15 @@ Linux（`crontab -e` 追加）：
 ### 3.2 手动备份
 
 ```bash
-bash deploy/backup.sh
+bash deploy/backup.sh                                  # dev：宿主目录模式（缺省）
+UPLOADS_VOLUME=deploy_uploads bash deploy/backup.sh    # prod：uploads 卷模式（§3.6）
+DRY_RUN=1 bash deploy/backup.sh                        # 干跑：只打印动作与产物路径（不碰 docker、不落盘），改参数后先干跑核对
 ```
 
-- 产物：`backups/rag-YYYYMMDD-HHMMSS.sql.gz`（主库全量 dump，gzip 在宿主侧管道完成）+ `backups/uploads-YYYYMMDD-HHMMSS.tar.gz`（上传目录归档；目录不存在时警告跳过）；结束自动清理超过 7 天的 `backups/*.gz`。
+- 产物：`backups/rag-YYYYMMDD-HHMMSS.sql.gz`（主库全量 dump，gzip 在宿主侧管道完成）+ `backups/uploads-YYYYMMDD-HHMMSS.tar.gz`（上传目录/卷归档；dev 目录不存在时警告跳过）。
+- **产物防残片（I24）**：两件产物先写 `*.part` 临时名 → 非空 + 完整性校验（`gzip -t` / `tar -tzf`）→ 同目录原子改名（rename）→ 落 `*.sha256` 边车。中断/磁盘满只可能残留 `*.part`，**截断残片永远不会顶着正式备份名冒充可用备份**；`*.part` 由保留期清理一并回收，不是备份、禁止用于恢复。
+- 速检真伪：`cd backups && sha256sum -c rag-*.sql.gz.sha256 uploads-*.tar.gz.sha256` 逐份核对；`ls -lh backups/` 当日 `.sql.gz` 必须非 0 字节。**没做过恢复读回验证的备份不算可用备份**——至少在每次演练时按 3.3(a) 验证一轮。
 - 备份目录 `backups/` 已加入 `.gitignore`（备份含全部问答与文档内容，禁止入库，§18.1），勿移出该忽略项。
-- 备份后速检：`ls -lh backups/`——当日 `.sql.gz` 必须非 0 字节；**没做过恢复读回验证的备份不算可用备份**——至少在每次演练时按 3.3(a) 验证一轮。
 
 ### 3.3 恢复步骤（两种口径，动手前先确认口径）
 
@@ -223,7 +227,8 @@ docker exec ragdemo-pg psql -U rag -d postgres -c "CREATE DATABASE rag"
 # 3. 恢复主库（ON_ERROR_STOP=1：任一 SQL 失败即非零退出——灾难恢复的"成功"信号必须可靠，不得静默半成功）
 gunzip -c "$BK" | docker exec -i ragdemo-pg psql -v ON_ERROR_STOP=1 -U rag -d rag
 
-# 4. 恢复上传目录（归档内含 uploads/ 一级目录，解到其父目录 ./data）
+# 4. 恢复上传目录（dev 宿主目录口径：归档内含 uploads/ 一级目录，解到其父目录 ./data；
+#    prod 卷口径归档结构与命令不同，见 §3.6）
 mkdir -p ./data
 tar -xzf "$BU" -C ./data
 
@@ -253,6 +258,42 @@ docker exec ragdemo-pg psql -U rag -d rag -c "SELECT count(*) FROM qa_pairs"
 - **RPO ≤ 24 小时**：由每日 02:30 全量备份决定，最大数据丢失窗口 ≈ 24 小时（上次成功备份到故障点之间新增的数据）。
 - **RTO ≤ 2 小时**：定位备份 → 3.3 恢复 → 起服务 → 冒烟核对的端到端时长上限。
 - 实测值（W5 T9，2026-09-30，验证库口径）：**RTO ≈ 4 分钟**（其中恢复段 36 秒、读回断言与冒烟约 3 分钟），远低于 2 小时目标；RPO 演示窗口 ≈ 0（灾前即时备份），声明口径 ≤24h 由每日调度保证。正式记录见 3.4。
+
+### 3.6 prod 形态备份 / 恢复（uploads named volume，I26）
+
+**背景**：prod compose（`deploy/docker-compose.prod.yml`）把 uploads 挂在 named volume（`uploads:/srv/ragdemo/data`）。backup.sh 的宿主目录模式按 `./data/uploads` 打包、恢复按 `tar -C ./data` 解包——**卷内容不在宿主该路径上，备份静默拿不到数据、恢复落不进卷，双向失效（I26）**。
+
+**方案取舍（选"临时容器挂卷"而非"prod 改 bind mount"）**：named volume 由 Docker 统一管理（创建/迁移/权限与宿主目录解耦，整机迁移友好）；改 bind mount 需新增宿主目录规划与权限约定、对已建卷做一次性数据迁移、变更 prod compose 挂载点并重建 app 容器——改动面与风险均大于在备份脚本里加一段挂卷打包逻辑，故 prod compose 零改动，备份/恢复经临时容器挂卷完成（backup.sh 已内置）。
+
+**备份**（每日调度命令见 §3.1，prod 版须带卷名）：
+
+```bash
+# 卷名 = <compose 项目名>_uploads；deploy.sh 在 deploy/ 目录下执行 compose，项目名固定 deploy。
+# 若项目名被 -p / COMPOSE_PROJECT_NAME 改过，先发现实际卷名：
+docker volume ls | grep uploads          # 形如 deploy_uploads
+UPLOADS_VOLUME=deploy_uploads ./deploy/backup.sh
+```
+
+- 产物与防残片校验同 §3.2（`.part` 原子改名 + `.sha256`）。实现：临时容器只读挂卷（`-v <卷>:/src:ro`）整体打包到宿主备份目录，`--user` 对齐宿主属主（app 以 uid 10001 写文件、0644 可读，非 root 可打包）；打包镜像用部署机现成的 `pgvector/pgvector:pg15`（`TAR_IMAGE` 参数可覆盖），免额外拉 alpine。
+- app 不停机可打包（与 dev 宿主目录打包同一风险口径：正在写入中的个别文件可能不完整，正式把关靠 §3.3(a) 恢复读回；要严格一致快照则临时 `docker compose stop app` 再备）。
+- 卷模式归档内容为**卷根目录整体**（无 dev 归档的 `uploads/` 一级前缀），恢复命令见下，**与 §3.3(b) 第 4 步不可混用**。
+
+**恢复**（先停 app 防恢复期间被写入；pg 主库恢复与 §3.3(b) 同口径，容器名同为 `ragdemo-pg`）：
+
+```bash
+# 0. 定位备份（同 §3.3 前置，BU=uploads-*.tar.gz）；停 app（pg/TEI 不动）
+docker compose -f deploy/docker-compose.prod.yml stop app
+
+# 1. 解包进卷（覆盖式；如需精确镜像可先清空卷：sh -c 'rm -rf /dst/* /dst/.[!.]*' 谨慎执行）
+docker run --rm -v deploy_uploads:/dst -v "$(pwd)/backups":/src:ro \
+  pgvector/pgvector:pg15 tar -xzf /src/uploads-YYYYMMDD-HHMMSS.tar.gz -C /dst
+
+# 2. 起 app + 读回核对（管理后台文档列表可见、抽一个历史文档下载/预览成功 = 恢复到位）
+docker compose -f deploy/docker-compose.prod.yml up -d app
+```
+
+- 恢复后核对落卷：`docker exec ragdemo-app ls /srv/ragdemo/data | head` 有文件即解包成功；无文件先核对卷名与归档结构（`tar -tzf "$BU" | head`）。
+- **双演练要求**：prod 口径的"备份→恢复→读回"须在部署机完成一次双向演练并回填 §3.4 记录表（部署机待办，与备份调度实测同批）。
 
 ## 4. 端口暴露核查清单（§12.2，每次发布 / 基线启停后执行）
 
@@ -370,3 +411,66 @@ HF_HUB_DISABLE_XET=1）。升级操作：改 download_models.py 钉的 revision 
 步骤：①合规书面结论回填 docs/compliance-checklist-2026-09-30.md 第五节 → ②内网轨需
 GPU（≥1×24G）+ vLLM 就绪 → ③改 `.env` 三键重启 app → ④跑评测集对比（§17.3，无对比不
 上线）→ ⑤runbook 本表与模型版本表同步。RAGFlow 基线环境同受出网白名单约束（§7.6）。
+
+## 9. 生产发布与 `.env.prod` 逐字段表（I23）
+
+生产发布命令：`bash deploy/bootstrap.sh --mode prod --check-only`（体检）→ `./deploy.sh <镜像 digest>`（分档错峰起栈+冒烟，deploy-requirements §4.3）。密钥文件为 `deploy/.env.prod`（git 已忽略），字段全集 = `app/core/config.py` Settings + compose 注入两处来源，下表逐字段给出含义 / 必填性 / 生产取值示例。
+
+### 9.1 最高频事故点：容器内互联必须填 compose 服务名 DNS
+
+app 容器内的 `localhost` 指 app 容器自身——TEI/MinerU/Gotenberg 都是**独立容器**，prod compose 的 environment 只覆盖了 `CONVERT_BASE_URL`（dev compose 覆盖了四项，prod 没有），因此 **`EMBED_BASE_URL` / `RERANK_BASE_URL` / `MINERU_BASE_URL` 三键必须自己在 `.env.prod` 填 compose 服务名**：照抄 `.env.example` 的 `localhost:80xx` 值上线 = 容器内指向自身，问答链路全断（app 健康检查不含 TEI 探活，要到运营概览健康卡才暴露）。
+
+| 服务 | 容器内监听 | 必须填的 compose DNS 名 |
+|------|-----------|------------------------|
+| TEI embedding（tei-embed） | 80 | `http://tei-embed:80` |
+| TEI rerank（tei-rerank） | 80 | `http://tei-rerank:80` |
+| MinerU（mineru） | 8000 | `http://mineru:8000` |
+| Gotenberg（gotenberg） | 3000 | `http://gotenberg:3000`（compose 已覆盖，无需填） |
+
+### 9.2 逐字段表
+
+**compose 接管字段（值被 prod compose environment 覆盖或硬校验，填法如下）**
+
+| 字段 | 含义 | 必填性 | 生产取值示例 |
+|------|------|--------|-------------|
+| DATABASE_URL | PostgreSQL 连接串（psycopg3） | 必填（bootstrap 体检核非空）；**运行值由 compose 覆盖**为 `postgresql+psycopg://rag:${POSTGRES_PASSWORD}@pg:5432/rag` | `postgresql+psycopg://rag:<强口令>@pg:5432/rag` |
+| POSTGRES_PASSWORD | pg 初始化口令 | **必填**：compose `${POSTGRES_PASSWORD:?}` 缺失/空拒绝起栈；bootstrap 禁缺省 `rag`；已初始化卷不随值变化（改口令须删 pgdata 卷重建） | `openssl rand -base64 24` 产物 |
+| CONVERT_BASE_URL | 老格式转换服务地址 | 无需填：compose 覆盖为 `http://gotenberg:3000` | 留空 |
+| STATIC_DIR | 前端静态目录 | 无需填：Dockerfile/compose 固定 `/srv/ragdemo/static` | 不填 |
+
+**应用必填字段（bootstrap prod 体检 + 装配 fail-fast 口径）**
+
+| 字段 | 含义 | 必填性 | 生产取值示例 |
+|------|------|--------|-------------|
+| JWT_SECRET | JWT 签名密钥 | 必填：≥32 字、非 example 占位（bootstrap 硬校验） | `openssl rand -base64 48` 产物 |
+| LLM_BASE_URL | OpenAI 兼容生成端点 | 必填（非 TEST_MODE；留空装配期 fail-fast 拒启） | `https://api.deepseek.com/v1`；内网轨 `http://<vLLM 主机>:8000/v1`（§8） |
+| LLM_API_KEY | 端点鉴权密钥 | 云端点必填；内网无鉴权留空。密钥只存 `.env.prod` 与密码管理器，禁进仓库/日志/响应 | DeepSeek 控制台 key |
+| LLM_MODEL | 对话模型名 | 必填（非 TEST_MODE），须与服务端一致 | `deepseek-flash`；内网 `Qwen2.5-32B-Instruct AWQ` |
+| TEST_MODE | 测试桩模式（true=stub LLM 演示回答） | **必须 false**（bootstrap prod 硬校验；演示桩对外=事故） | `false` |
+| EMBED_BASE_URL | TEI 向量化地址 | **必填**（prod compose 不覆盖！见 9.1） | `http://tei-embed:80` |
+| RERANK_BASE_URL | TEI 重排地址 | **必填**（同上） | `http://tei-rerank:80` |
+| STORAGE_DIR | 上传文件落盘目录 | **必核**：必须位于 uploads 卷挂载点 `/srv/ragdemo/data` 之下（推荐就填挂载点本身）；落到别处=写进容器可写层，容器重建数据即丢 | `/srv/ragdemo/data` |
+
+**部署可选字段（缺省值见 `app/core/config.py`，与 `.env.example` 注释一一对应）**
+
+| 字段 | 含义 | 必填性 | 生产取值示例 |
+|------|------|--------|-------------|
+| MINERU_BASE_URL | MinerU 解析地址（见 9.1 DNS 口径） | 可选。**填了=全部 pdf 走 MinerU，服务未拉起时 pdf 解析失败（可重试）**；留空=全部 pdf 走 pypdf 降级（扫描件解析不出，"疑似扫描件"拒收） | 常驻/按需形态均推荐填 `http://mineru:8000`（可用性由 mineru 容器启停控制，健康卡如实暴露）；试点接受全量降级则留空 |
+| MINERU_TIMEOUT_S | MinerU 解析超时（秒） | 可选 | `300` |
+| IMAGE_OCR_ENABLED | 内嵌图片 OCR（F-1017） | 可选，开启前提=MINERU_BASE_URL 已配且 mineru 在跑 | `false` |
+| EMBED_TIMEOUT_S | embedding 超时（秒） | 可选；部署机实测放宽口径见 §5.5 | `10`（部署机实测 `60`） |
+| RERANK_TIMEOUT_S | rerank 超时（秒） | 可选；真实跑分对 rerank 吞吐敏感（§5.5） | `10`（部署机实测 `120`） |
+| LLM_EFFORT | 推理力度（DeepSeek 专属） | 可选：`high` 会把 max_tokens 烧在推理上致正文空（2026-10-01 事故） | `low` |
+| LLM_TIMEOUT_S | LLM 超时（秒） | 可选 | `60` |
+| CHAT_MAX_TOKENS | 回答 max_tokens 服务端上限 | 可选 | `4096` |
+| ACCESS_TOKEN_EXPIRE_MINUTES | 访问令牌有效期（分钟） | 可选 | `480` |
+| PROMPT_VERSION | 提示词包版本 | 必核：与 `prompts/` 头注释一致 | `v1` |
+| QA_THRESHOLD / REFUSE_THRESHOLD | 问答对直答阈值 / 拒答阈值 | 可选，调整须附评测对比（§17.3）；部署机真实阈值复测结论见 §5.5 | `0.85` / `0.55` |
+| CACHE_TTL_S / RETRIEVER_TOP_K / RERANK_TOP_N / CHUNK_DEDUP_SIM / HNSW_EF_SEARCH | 检索链路调优 | 可选（缺省 300 / 20 / 5 / 0.98 / 40） | 保持缺省 |
+| DAILY_QUESTION_LIMIT | 单用户每日提问上限 | 可选 | `200` |
+| MESSAGE_RETENTION_DAYS / MESSAGE_CLEANUP_COOLDOWN_DAYS | 提问记录两段式清理 | 可选 | `90` / `30` |
+
+### 9.3 生效方式与项目名纪律
+
+- 改 `.env.prod` 后需**重建** app 生效（env_file 不随 restart 重读）：`docker compose -f deploy/docker-compose.prod.yml up -d --force-recreate app`。
+- **compose 项目名与卷名口径**：项目名 = compose 文件所在目录名（v5 实测：`-f` 指定时取文件目录、与执行 cwd 无关；`-p`/`COMPOSE_PROJECT_NAME` 可覆盖）。deploy.sh 用 `deploy/docker-compose.prod.yml` → 项目名固定 `deploy`，卷名 `deploy_uploads` / `deploy_pgdata` / `deploy_mineru-models`。**漂移条件**：复制/改名 compose 文件所在目录、或显式 `-p` 与 deploy.sh 口径不一致——会生成第二套卷与容器（数据"消失"实为新卷为空），§3.6 的备份/恢复卷名随之漂移；任何迁移/备份前先 `docker volume ls | grep uploads` 核对实际卷名。

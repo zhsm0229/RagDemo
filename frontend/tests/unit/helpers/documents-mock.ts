@@ -22,6 +22,11 @@ export const backend = {
   uploadCalls: [] as FormData[],
   retryCalls: [] as number[],
   confirmCalls: [] as number[],
+  deleteCalls: [] as number[],
+  draftApproveCalls: [] as number[],
+  draftRejectCalls: [] as { id: number; reason: string }[],
+  /** GET /api/documents/{id}/preview 已被调用（预览弹窗加载） */
+  previewCalls: [] as number[],
   nextDocId: 100,
 }
 
@@ -32,6 +37,10 @@ export function resetBackend(): void {
   backend.uploadCalls = []
   backend.retryCalls = []
   backend.confirmCalls = []
+  backend.deleteCalls = []
+  backend.draftApproveCalls = []
+  backend.draftRejectCalls = []
+  backend.previewCalls = []
   backend.nextDocId = 100
 }
 
@@ -52,6 +61,12 @@ export function docItem(overrides: Partial<DocumentItem> = {}): DocumentItem {
     status: 'ready',
     parseEngine: 'mineru',
     parseError: null,
+    parseErrorDetail: null,
+    parseStage: null,
+    parseProgress: null,
+    sourceType: 'upload',
+    reviewStatus: null,
+    rejectReason: null,
     isActive: true,
     uploadedBy: 1,
     createdAt: T0,
@@ -65,10 +80,14 @@ function listResponse(url: string): Response {
   const dept = q.get('dept')
   const status = q.get('status')
   const keyword = q.get('keyword')
+  const sourceType = q.get('sourceType')
+  const reviewStatus = q.get('reviewStatus')
   const filtered = backend.docs.filter(
     (doc) =>
       (!dept || doc.deptCode === dept) &&
       (!status || doc.status === (status as DocumentStatus)) &&
+      (!sourceType || doc.sourceType === sourceType) &&
+      (!reviewStatus || doc.reviewStatus === reviewStatus) &&
       (!keyword || doc.title.includes(keyword) || doc.originalFilename.includes(keyword)),
   )
   const page = Number(q.get('page') ?? 1)
@@ -111,6 +130,50 @@ export async function routeFetch(url: string, init: RequestInit = {}): Promise<R
     if (doc) doc.isActive = true
     return okEnvelope({ id, isActive: true })
   }
+  const remove = /^\/api\/documents\/(\d+)$/.exec(url)
+  if (remove !== null && method === 'DELETE') {
+    const id = Number(remove[1])
+    backend.deleteCalls.push(id)
+    backend.docs = backend.docs.filter((d) => d.id !== id)
+    return okEnvelope({ id, deleted: true })
+  }
+  // 草稿审核（agent-evolution #05）：approve/reject 记录调用并同步翻转行内审核状态
+  const draftApprove = /^\/api\/documents\/(\d+)\/draft\/approve$/.exec(url)
+  if (draftApprove !== null && method === 'POST') {
+    const id = Number(draftApprove[1])
+    backend.draftApproveCalls.push(id)
+    const doc = backend.docs.find((d) => d.id === id)
+    if (doc) {
+      doc.reviewStatus = '已通过'
+      doc.status = 'parsing'
+    }
+    return okEnvelope({ id, reviewStatus: '已通过', status: 'parsing' })
+  }
+  const draftReject = /^\/api\/documents\/(\d+)\/draft\/reject$/.exec(url)
+  if (draftReject !== null && method === 'POST') {
+    const id = Number(draftReject[1])
+    // client.ts 对 JSON body 走 JSON.stringify：此处读回需 parse（非 FormData）
+    const rawBody = init.body as unknown
+    const parsed = typeof rawBody === 'string' ? (JSON.parse(rawBody) as { reason?: unknown }) : {}
+    const reason = String(parsed.reason ?? '')
+    backend.draftRejectCalls.push({ id, reason })
+    const doc = backend.docs.find((d) => d.id === id)
+    if (doc) {
+      doc.reviewStatus = '已驳回'
+      doc.rejectReason = reason
+    }
+    return okEnvelope({ id, reviewStatus: '已驳回', rejectReason: reason })
+  }
+  // 预览/原文件字节流：Blob 变体（DocPreviewDialog 走 fetch→res.blob()）
+  const preview = /^\/api\/documents\/(\d+)\/(preview|file)$/.exec(url)
+  if (preview !== null && method === 'GET') {
+    const id = Number(preview[1])
+    if (!backend.docs.some((d) => d.id === id)) {
+      return makeResponse(404, 'application/json', { code: 1003, message: '文档不存在' })
+    }
+    if (preview[2] === 'preview') backend.previewCalls.push(id)
+    return blobResponse('%PDF-1.4\n%mock-preview')
+  }
   if (url === '/api/documents/metadata-suggest' && method === 'POST') {
     return okEnvelope(backend.suggestion)
   }
@@ -146,6 +209,23 @@ export function makeResponse(status: number, contentType: string, json?: unknown
 
 export function okEnvelope(data: unknown): Response {
   return makeResponse(200, 'application/json', { code: 0, message: 'ok', data })
+}
+
+/** 字节流响应（blob() 可用；jsdom 无真实流，Blob 直接承载文本字节） */
+export function blobResponse(content: string, contentType = 'application/pdf'): Response {
+  const blob = new Blob([content], { type: contentType })
+  return {
+    ok: true,
+    status: 200,
+    headers: {
+      get: (name: string) => (name.toLowerCase() === 'content-type' ? contentType : null),
+    },
+    body: null,
+    blob: async () => blob,
+    json: async () => {
+      throw new Error('no json body')
+    },
+  } as unknown as Response
 }
 
 // ---- 断言/操作辅助 ----

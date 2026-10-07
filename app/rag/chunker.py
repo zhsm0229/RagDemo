@@ -10,7 +10,7 @@ r"""分块纯函数：标题层级分块 + 长度约束 + title_path 前缀，�
 无页码来源（docx/MinerU）为 None；页码只作引用定位，不参与聚合与切分判定。
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 _SENTENCE_ENDERS = "。！？!?"
 
@@ -30,10 +30,15 @@ class Block:
 
 @dataclass
 class ParsedDoc:
-    """解析产物：文档标题与保序的标题节序列（title 供上游元数据使用，不参与分块）。"""
+    """解析产物：文档标题与保序的标题节序列（title 供上游元数据使用，不参与分块）。
+
+    images/image_skipped（F-1017）：解析器抽取的内嵌图片与抽取期跳过数——由
+    ingest_pipeline 在开关开启时做 OCR 编排；缺省空/0，既有构造点向后兼容。"""
 
     title: str
     blocks: list[Block]
+    images: list = field(default_factory=list)  # list[ExtractedImage]  # app/rag/image_extract
+    image_skipped: int = 0
 
 
 @dataclass

@@ -1,9 +1,10 @@
-r"""评测题库业务：Excel 整批导入（F-601）、模板数据与跑分任务创建（F-602 请求期分区）。
+r"""评测题库业务：Excel 整批导入（F-601）、跑分任务创建（F-602 请求期分区）与人工评判。
 
 分区（Task 7）：人工评判（submit_judgments 录分重算）在本模块追加；分组报告是
 纯读聚合，独立在 services/eval_report.py（消费本模块的 final_judgment 合并口径，
 单文件 ≤300 行约束）；跑分**执行**引擎独立在 services/eval_engine.py（Task 5 评审
-裁决：后台任务体不进本文件，预算留给评判）。
+裁决：后台任务体不进本文件，预算留给评判）；xlsx 模板独立在 services/eval_template.py
+（行数红线 §1.4 拆出，本模块转出再导出）。
 
 整批语义与问答对导入（services/qa_pairs.py）同构：xlsx_io.read_rows 结构级校验后，
 行级业务校验在本模块聚合（部门枚举、问题 1-2000、期望答案非空 ≤10000、题型枚举，
@@ -31,32 +32,24 @@ from app.core.clock import Clock, get_clock
 from app.core.errors import ERR_EVAL_STATE, ERR_NOT_FOUND, ERR_PARAM_INVALID, ApiError
 from app.db.models import Department, EvalQuestion, EvalRun
 from app.services.audit import record_audit
-from app.services.xlsx_io import XlsxBatchError, read_rows, write_template
+from app.services.eval_template import (  # 模板自本文件拆出（行数红线 §1.4），转出再导出
+    REJECT_MARK,
+    TEMPLATE_HEADERS,
+    build_template,
+)
+from app.services.xlsx_io import XlsxBatchError, read_rows
 
-TEMPLATE_HEADERS: list[str] = ["部门", "问题", "期望答案", "来源", "题型"]
-REJECT_MARK: str = "[拒答]"  # 串库拒答题期望答案的约定格式（判定协议第 3 条）
-TEMPLATE_SAMPLES: list[list[str]] = [
-    [
-        "客服",
-        "员工如何重置门户登录密码？",
-        "登录页点击「忘记密码」，通过绑定手机号验证后重置。",
-        "客服手册 3.2 节",
-        "factual",
-    ],
-    [
-        "人力",
-        "年假可以跨年结转吗？未休完的年假如何处理？",
-        "当年度假额度次年 1 月 1 日清零，不跨年结转。",
-        "员工手册 5.1 节",
-        "multi_hop",
-    ],
-    [
-        "客服",
-        "人力部门的薪酬体系是怎样的？",
-        REJECT_MARK,
-        "",  # 串库拒答题期望行为是拒答，无期望出处
-        "cross_reject",
-    ],
+__all__ = [
+    "JUDGMENT_SCORES",
+    "REJECT_MARK",
+    "RUN_NOT_FOUND_MSG",
+    "TEMPLATE_HEADERS",
+    "build_template",
+    "create_eval_run",
+    "final_judgment",
+    "import_eval_questions",
+    "list_eval_runs",
+    "submit_judgments",
 ]
 
 # xlsx 部门中文枚举名 → departments.code（种子：客服/人力/全员 ↔ service/hr/all）
@@ -65,11 +58,6 @@ _QTYPES: frozenset[str] = frozenset({"factual", "multi_hop", "cross_reject"})
 _MAX_IMPORT_ROWS: int = 5000  # 单批行数上限（与问答对导入 QA-03 同口径）
 _QUESTION_MAX: int = 2000
 _ANSWER_MAX: int = 10000
-
-
-def build_template() -> bytes:
-    """F-601 模板字节流：表头 + 3 行示例（事实型/多跳/串库拒答，部门列用中文名）。"""
-    return write_template(headers=TEMPLATE_HEADERS, sample_rows=TEMPLATE_SAMPLES)
 
 
 def import_eval_questions(

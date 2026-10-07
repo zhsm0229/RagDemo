@@ -229,6 +229,54 @@ describe('SSE 流式渲染（mock fetch 流）', () => {
   })
 })
 
+describe('等待阶段提示（2026-10-06 体验缺陷修复：发送后气泡不再全白）', () => {
+  it('发送即示"正在检索知识库"；citations 到达切"正在生成回答"；token 到达提示退场', async () => {
+    const gateCite = new Gate() // 扣 citations：模拟改写/召回/重排窗口（CPU rerank 分钟级）
+    const gateToken = new Gate() // 扣 token：观察"生成中"提示的独立窗口
+    backend.streamQueue = [
+      [
+        { text: citationsFrame([CITE[0]]), gate: gateCite },
+        { text: tokenFrame('根据知识库检索结果'), gate: gateToken },
+        { text: doneFrame() },
+      ],
+    ]
+    const wrapper = await mountChat()
+    await wrapper.find('textarea').setValue('什么是Agent')
+    await sendButton(wrapper).trigger('click')
+    await flushPromises() // 流已开但 gate 未放行 → 占位气泡停在 search 阶段
+    let hint = wrapper.find('.stage-hint')
+    expect(hint.exists()).toBe(true)
+    expect(hint.text()).toContain('正在检索知识库')
+
+    gateCite.open()
+    await flushPromises() // citations 已应用、token 仍被扣 → 提示切"生成中"
+    hint = wrapper.find('.stage-hint')
+    expect(hint.exists()).toBe(true)
+    expect(hint.text()).toContain('正在生成回答')
+
+    gateToken.open()
+    await flushPromises() // token 应用 → 内容流式呈现，提示退场
+    expect(wrapper.find('.stage-hint').exists()).toBe(false)
+    expect(wrapper.find('.bubble.assistant').text()).toContain('根据知识库检索结果')
+  })
+
+  it('等待期点停止：提示消失、气泡标"已停止"可重试（失败/停止态无等待提示）', async () => {
+    const gate = new Gate()
+    backend.streamQueue = [[{ text: doneFrame(), gate }]]
+    const wrapper = await mountChat()
+    await wrapper.find('textarea').setValue('报销标准')
+    await sendButton(wrapper).trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.stage-hint').text()).toContain('正在检索知识库')
+
+    const stop = wrapper.findAll('button').find((b) => b.text() === '停止')
+    expect(stop).toBeDefined()
+    await stop!.trigger('click')
+    await waitFor(() => wrapper.text().includes('已停止'), '气泡标已停止')
+    expect(wrapper.find('.stage-hint').exists()).toBe(false)
+  })
+})
+
 describe('输入校验与键盘行为', () => {
   it('空输入与超 2000 字禁发送：超长计数红色提示且不发起请求', async () => {
     const wrapper = await mountChat()

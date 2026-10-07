@@ -32,13 +32,25 @@ def list_documents(
     keyword: str | None,
     page: int,
     page_size: int,
+    source_type: str | None = None,
+    review_status: str | None = None,
 ) -> tuple[list[tuple[Document, str]], int]:
-    """管理端文档列表：过滤可选，返回 ((文档行, 部门 code) 当前页, 总数)。"""
+    """管理端文档列表：过滤可选，返回 ((文档行, 部门 code) 当前页, 总数)。
+
+    source_type/review_status（agent-evolution #05）：草稿审核入口按"来源=草稿 +
+    审核状态"取待审核清单；upload 语料两列恒为默认值/NULL，不传即不过滤、列表
+    对两类来源都可见（治理视图不藏草稿，审核入口只是快捷筛选）。"""
     filters = []
     if dept_id is not None:
         filters.append(Document.dept_id == dept_id)
     if status is not None:
         filters.append(Document.status == status)
+    if source_type is not None:
+        filters.append(Document.source_type == source_type)
+    if review_status is not None:
+        filters.append(Document.review_status == review_status)
+    # 软删文档不进管理列表（F-305）：deleted_at 非空即已删除，与到期下线（is_active）是两个维度
+    filters.append(Document.deleted_at.is_(None))
     if keyword:
         like = f"%{_escape_like(keyword)}%"
         filters.append(

@@ -95,6 +95,22 @@ export async function routeFetch(url: string, init: RequestInit = {}): Promise<R
     }
     return okEnvelope(found)
   }
+  // 在线预览字节流（DocPreviewDialog fetch→blob；jsdom Blob 直接承载）
+  if (/^\/api\/documents\/\d+\/preview$/.exec(url) !== null && method === 'GET') {
+    const blob = new Blob(['%PDF-1.4\n%mock-chat-preview'], { type: 'application/pdf' })
+    return {
+      ok: true,
+      status: 200,
+      headers: {
+        get: (name: string) => (name.toLowerCase() === 'content-type' ? 'application/pdf' : null),
+      },
+      body: null,
+      blob: async () => blob,
+      json: async () => {
+        throw new Error('no json body')
+      },
+    } as unknown as Response
+  }
   const feedback = /^\/api\/messages\/(\d+)\/feedback$/.exec(url)
   if (feedback !== null && method === 'POST') {
     const id = Number(feedback[1])
@@ -224,6 +240,7 @@ export const CITE: CitationItem[] = [
     n: 1,
     refType: 'doc',
     refId: 11,
+    docId: 55, // 文档主键（≠chunk id 11）：原文件/图片/预览按文档寻址
     title: '客服手册',
     page: 3,
     titlePath: '第3章>3.2',

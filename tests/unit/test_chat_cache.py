@@ -97,6 +97,23 @@ class TestExactCacheKey:
         assert cache.make_key(2, "q") == "chat:2:q"
         assert cache.make_key(1, "q") != cache.make_key(2, "q")
 
+    def test_make_key_user_suffix_inserted_between_dept_and_question(self) -> None:
+        """user_suffix 非空（§3.4 注入非空）：键插在部门与问题之间 chat:{dept}:u{id}:{q}。"""
+        cache = ExactCache(_clock(), ttl_s=300)
+        assert cache.make_key(3, "年假有几天", user_suffix="u7") == "chat:3:u7:年假有几天"
+
+    def test_make_key_suffix_none_keeps_legacy_byte_identical(self) -> None:
+        """user_suffix 缺省 None：键与历史形态逐字节相同（无记忆用户共享部门级缓存）。"""
+        cache = ExactCache(_clock(), ttl_s=300)
+        assert cache.make_key(3, "年假有几天") == cache.make_key(3, "年假有几天", user_suffix=None)
+        assert cache.make_key(3, "年假有几天", user_suffix=None) == "chat:3:年假有几天"
+
+    def test_make_key_user_suffix_separates_same_dept_users(self) -> None:
+        """同部门两用户后缀不同：键必不同（带不同画像的两人对同题不互串答案）。"""
+        cache = ExactCache(_clock(), ttl_s=300)
+        assert cache.make_key(1, "q", user_suffix="u5") != cache.make_key(1, "q", user_suffix="u6")
+        assert cache.make_key(1, "q", user_suffix="u5") != cache.make_key(1, "q")
+
 
 class TestExactCacheRoundTrip:
     def test_put_then_get_returns_entry_fields(self) -> None:

@@ -1,6 +1,7 @@
 # 生产栈 compose（standards §12.2/§12.5 口径）：仅 app 对外发布 80，其余纯内网互联。
-# 用法（部署机）：APP_IMAGE=<ghcr 引用@digest> docker compose -f docker-compose.prod.yml up -d
-# 密钥经同目录 .env.prod（git 忽略，runbook §发布 有字段清单），本文件零明文密钥（§12.7）。
+# 用法（部署机）：统一经 ./deploy.sh <digest>（按内存分档错峰起栈，≥22G 才含 mineru 常驻）；
+# 手工兜底按 deploy-requirements §4.4 逐服务 up + 等健康，严禁一次性全量 up。
+# 密钥经同目录 .env.prod（git 忽略，逐字段清单见 runbook §9），本文件零明文密钥（§12.7）。
 # 镜像一律 digest 引用（§13.2 同 digest 双 tag），digest 清单见 deploy/releases.md。
 services:
   app:
@@ -11,9 +12,14 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://rag:${POSTGRES_PASSWORD:?}@pg:5432/rag
       STATIC_DIR: /srv/ragdemo/static
+      # 老格式转换服务（F-1015）：内网互联走服务名，覆盖 .env.prod 的宿主端口值
+      # （与 TEI/MinerU 容器内互联同模式）
+      CONVERT_BASE_URL: http://gotenberg:3000
     env_file:
       - .env.prod
     volumes:
+      # uploads named volume：.env.prod 的 STORAGE_DIR 必须落在挂载点 /srv/ragdemo/data 之下（runbook §9.2）；
+      # 备份/恢复走卷口径（runbook §3.6，宿主路径备份对卷无效）
       - uploads:/srv/ragdemo/data
     depends_on:
       pg:
@@ -66,8 +72,8 @@ services:
     volumes:
       - ${TEI_MODELS_DIR:-/opt/ragdemo/tei-models}:/data:ro
     # 偏差登记：§12.5 按 GPU 口径给 1C3G；现 CPU candle 后端加载+预热峰值需 4.5g
-    #（reranker 仓库无 onnx 导出）。GPU TEI 到位后调回并复测（runbook 模型版本表跟踪）。
-    mem_limit: 4g
+    #（reranker 仓库无 onnx 导出，dev compose 同为 4.5g）。GPU TEI 到位后调回并复测（runbook 模型版本表跟踪）。
+    mem_limit: 4.5g
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost/health || exit 1"]
@@ -78,6 +84,8 @@ services:
 
   mineru:
     image: ${MINERU_IMAGE:-mineru-cpu:2.5.4} # 部署机自建（docker/mineru-cpu.Dockerfile），digest 入 runbook 模型版本表
+    # 随栈与否由 deploy.sh 按内存分档决定（≥22G 常驻；<22G 发布不含本服务，解析前按需 up -d mineru，
+    # 用后 docker stop 释放内存——restart=unless-stopped 手动停后不自启，runbook §9 / deploy-requirements §4.3）
     container_name: ragdemo-mineru
     environment:
       MINERU_MODEL_SOURCE: modelscope
@@ -91,6 +99,20 @@ services:
       timeout: 5s
       retries: 60
       start_period: 15m
+
+  gotenberg:
+    image: gotenberg/gotenberg:8 # 老格式（doc/ppt/xls）LibreOffice 自动转换（F-1015），仅内网
+    container_name: ragdemo-gotenberg
+    command: ["gotenberg", "--api-timeout=120s"]
+    mem_limit: 1g # 转换并发=1，LibreOffice 单实例峰值 ~500MB
+    restart: unless-stopped
+    healthcheck:
+      # Gotenberg 8 实际监听 3000（与 CONVERT_BASE_URL 同源）；探 3000 端口（与 CONVERT_BASE_URL 同源）
+      test: ["CMD", "curl", "-sf", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
 volumes:
   pgdata:

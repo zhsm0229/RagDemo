@@ -6,42 +6,45 @@ r"""入库状态机（F1 编排核心）：同步段 create_document、异步段
 analysis（解析/红线/清洗/乱码/敏感/simhash/分块/embed，见 ingest_pipeline.py）→
 单事务写 chunks（先删本 doc 旧块，重试幂等）+ 同标题旧版归档 → ready；敏感/近似
 命中 → is_active=False 待确认。confirm 激活；expire 到期下线（F-1004）。
+拆分（行数红线 §1.4）：老格式转换编排见 ingest_convert.py，ready/failed 收口段
+（含 document 审计薄封装）见 ingest_commit.py——本文件只留编排与状态迁移。
 """
 
+import logging
 from pathlib import PureWindowsPath
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.clock import Clock
+from app.core.config import get_settings
+from app.core.convert import _LEGACY_EXTS
 from app.core.errors import (
     ERR_DUPLICATE_DOC,
+    ERR_NOT_FOUND,
     ERR_PARAM_INVALID,
     ERR_UNSUPPORTED_FORMAT,
     ApiError,
 )
-from app.core.llm import UpstreamError
 from app.core.storage import FileStorage
 from app.db.models import Chunk, Document, User
 from app.rag.precheck import check_sync as check_sync_gate
-from app.services.audit import record_audit
-from app.services.ingest_pipeline import (
-    IngestDeps,
-    PipelineOutcome,
-    analyze_document,
-    to_signed64,
-)
+from app.services.document_preview import cleanup_previews
+from app.services.ingest_commit import audit_document, commit_failed, commit_ready
+from app.services.ingest_convert import convert_legacy_document
+from app.services.ingest_pipeline import IngestDeps, analyze_document
 
 _MSG_NOT_FOUND = "文档不存在"
-_MSG_EMBED_FAIL = "向量化服务调用失败，请稍后重试"
-_MSG_GENERIC_FAIL = "文档处理失败，请稍后重试"
+logger = logging.getLogger(__name__)
 _META_REQUIRED: tuple[str, ...] = ("dept_id", "title", "owner_name", "effective_date")
 _SYNC_REJECTS: dict[str, str] = {
-    "ext_not_allowed": "仅支持 pdf/docx 格式",
+    "ext_not_allowed": "仅支持 pdf/docx/md/txt/csv/xlsx/pptx/html 格式（doc/ppt/xls 自动转换）",
     "mime_not_allowed": "文件 MIME 类型不在白名单内",
     "too_large": "文件大小超过 50MB 上限",
     "magic_mismatch": "文件内容与扩展名不符，请勿伪造格式",
+    "macro_not_allowed": "含宏格式不支持，请另存为无宏版本后上传",
+    "convert_unavailable": "老格式转换服务未配置，请另存为 docx/pptx/xlsx 后上传",
 }
 
 
@@ -56,7 +59,7 @@ def create_document(
 ) -> Document:
     """同步段：元数据必填 → 白名单 → 查重 → 落盘 → 登记 parsing → 审计并提交。
 
-    查重双保险：_reject_duplicate 挡同步可见的重复；提交段（_commit_upload）
+    查重双保险：reject_duplicate 挡同步可见的重复；提交段（_commit_upload）
     IntegrityError 捕 uq_doc_content_hash 的并发抢注（DOC-06），同样映射 409。
     """
     missing = [key for key in _META_REQUIRED if not meta.get(key)]
@@ -64,8 +67,8 @@ def create_document(
         raise ApiError(ERR_PARAM_INVALID, f"元数据缺失：{'、'.join(missing)}", 422)
     gate = check_sync_gate(filename, mime, content)
     if not gate.ok:
-        raise _sync_rejected(gate.reason)
-    _reject_duplicate(session, gate.sha256)
+        raise sync_rejected(gate.reason)
+    reject_duplicate(session, gate.sha256)
     stored = storage.save(content, PureWindowsPath(filename).suffix.lower())
     doc = Document(
         title=meta["title"],
@@ -75,7 +78,7 @@ def create_document(
         mime=mime,
         size_bytes=stored.size,
         content_hash=gate.sha256,
-        version=_next_version(session, meta["dept_id"], meta["title"]),
+        version=next_version(session, meta["dept_id"], meta["title"]),
         effective_date=meta["effective_date"],
         expiry_date=meta.get("expiry_date"),
         owner_name=meta["owner_name"],
@@ -86,24 +89,83 @@ def create_document(
     session.add(doc)
     session.flush()  # 先取 id 供审计外键
     detail = {"after": {"title": doc.title, "filename": filename, "sha256": gate.sha256}}
-    _audit(session, uploader.id, "document.upload", doc.id, detail)
+    audit_document(session, uploader.id, "document.upload", doc.id, detail)
     _commit_upload(session)
     return doc
 
 
 def process_document(session: Session, deps: IngestDeps, doc_id: int) -> None:
-    """异步段编排：先回 parsing（DOC-11 重试语义），失败转 failed+中文原因，成功收口 ready。"""
+    """异步段编排：先回 parsing（DOC-11 重试语义），失败转 failed+中文原因，成功收口 ready。
+
+    进度：注入 progress 回调给分析管线，阶段推进即时落库（UI 30s 轮询可见真实进度）；
+    收口（ready/failed）清 stage/progress——终态下进度无意义。"""
     doc = session.get(Document, doc_id)
     if doc is None:
-        raise ApiError(ERR_PARAM_INVALID, _MSG_NOT_FOUND, 404)
+        raise ApiError(ERR_NOT_FOUND, _MSG_NOT_FOUND, 404)
     doc.status = "parsing"
-    session.flush()
+    doc.parse_stage = "排队中"
+    doc.parse_progress = 0
+    session.commit()  # 立即可见：轮询先看到"排队中"，进度随阶段推进
+    started = deps.clock.now()
+
+    def report(stage: str, percent: int) -> None:
+        doc.parse_stage = stage
+        doc.parse_progress = percent
+        session.commit()
+
+    parse_filename = doc.original_filename
     try:
-        outcome = analyze_document(session, deps, doc)
-    except Exception as exc:  # noqa: BLE001 — 状态机兜底：任何一步失败都必须落到 failed 态
-        _commit_failed(session, deps.clock, doc, exc)
+        if PureWindowsPath(parse_filename).suffix.lower() in _LEGACY_EXTS:
+            # 老格式前置转换（F-1015）：产物落盘替换解析输入，失败走同一兜底区
+            # （编排细节与事故裁定见 ingest_convert.py 模块注释）。
+            parse_filename = convert_legacy_document(deps, doc, parse_filename, report)
+            session.commit()
+        outcome = analyze_document(
+            session, deps, doc, progress=report, parse_filename=parse_filename
+        )
+    except Exception as exc:
+        logger.exception("解析失败 doc_id=%s title=%s", doc_id, doc.title)
+        commit_failed(session, deps.clock, doc, exc)
         return
-    _commit_ready(session, deps, doc, outcome)
+    commit_ready(session, deps, doc, outcome)
+    logger.info(
+        "解析收口 doc_id=%s status=ready 引擎=%s 耗时=%.1fs",
+        doc_id,
+        outcome.engine,
+        (deps.clock.now() - started).total_seconds(),
+    )
+
+
+def delete_document(session: Session, clock: Clock, doc_id: int, actor_user_id: int) -> None:
+    """文档软删（F-305，2026-10-06 立项实施）：deleted_at+is_active=false + 级联停用其
+    chunks（chunk.is_active=false——检索走 is_active 部分索引，软删即退出检索；向量与
+    文本行保留便于追溯）。parsing 态 422：防与后台解析任务竞态（任务收口会覆写状态）。
+    document_images 行保留（回显走文档存活闸，软删后 404）。审计留痕。"""
+    doc = session.get(Document, doc_id)
+    if doc is None:
+        raise ApiError(ERR_NOT_FOUND, _MSG_NOT_FOUND, 404)
+    if doc.status == "parsing":
+        raise ApiError(ERR_PARAM_INVALID, "解析中的文档不可删除，请等待解析终态后再删除", 422)
+    doc.is_active = False
+    doc.deleted_at = clock.now()
+    doc.updated_at = clock.now()
+    # 单语句批量停用（findings I3）：不整实体加载 chunk（含 1024 维 embedding 大列）——
+    # 几百块文档从"几百条 UPDATE + 数 MB 白载内存"降为一条 UPDATE。
+    session.execute(update(Chunk).where(Chunk.document_id == doc.id).values(is_active=False))
+    cleanup_previews(get_settings().storage_dir, doc.id)  # 预览缓存随档清理（best-effort）
+    audit_document(
+        session,
+        actor_user_id,
+        "document.delete",
+        doc.id,
+        {
+            "before": {"title": doc.title, "isActive": True},
+            "after": {"isActive": False, "deleted": True},
+        },
+        clock=clock,
+    )
+    session.commit()
+    return doc
 
 
 def confirm_document(session: Session, doc_id: int, actor_user_id: int) -> Document:
@@ -114,9 +176,9 @@ def confirm_document(session: Session, doc_id: int, actor_user_id: int) -> Docum
     """
     doc = session.get(Document, doc_id)
     if doc is None:
-        raise ApiError(ERR_PARAM_INVALID, _MSG_NOT_FOUND, 404)
+        raise ApiError(ERR_NOT_FOUND, _MSG_NOT_FOUND, 404)
     doc.is_active = True
-    _audit(
+    audit_document(
         session,
         actor_user_id,
         "document.confirm",
@@ -143,7 +205,7 @@ def expire_due_documents(session: Session, clock: Clock) -> int:
     for doc in dues:
         doc.is_active = False
         doc.updated_at = clock.now()
-        _audit(
+        audit_document(
             session,
             doc.uploaded_by,
             "document.expire",
@@ -155,46 +217,37 @@ def expire_due_documents(session: Session, clock: Clock) -> int:
     return len(dues)
 
 
-def _audit(
-    session: Session,
-    actor: int,
-    action: str,
-    doc_id: int,
-    detail: dict,
-    clock: Clock | None = None,
-) -> None:
-    """document 对象审计留痕薄封装（object_type 恒为 document，commit 归调用方）。"""
-    record_audit(session, actor, action, "document", doc_id, detail, clock=clock)
-
-
 def sync_reject_reason(reason: str | None) -> str:
     """check_sync 失败码 → 面向用户的中文原因：upload 的 422 消息与 zip 批量导入的
     条目级 rejected 原因共用本映射（单一事实来源，禁止两处各写一份文案）。"""
     return _SYNC_REJECTS.get(reason or "", "文件未通过同步预检")
 
 
-def _sync_rejected(reason: str | None) -> ApiError:
-    """check_sync 失败码 → ApiError：超限走 1003，其余格式类走 1001，一律 422。"""
+def sync_rejected(reason: str | None) -> ApiError:
+    """check_sync 失败码 → ApiError：超限走 1003，其余格式类走 1001，一律 422。
+    公有化（原 _sync_rejected）：草稿创建（draft_review）与上传共用同一映射。"""
     code = ERR_PARAM_INVALID if reason == "too_large" else ERR_UNSUPPORTED_FORMAT
     return ApiError(code, sync_reject_reason(reason), 422)
 
 
-def _reject_duplicate(session: Session, sha256: str) -> None:
-    """F-1001 精确查重：命中未软删的同 hash 文档即 409，消息指向已有 id（并发由唯一索引兜底）。"""
+def reject_duplicate(session: Session, sha256: str, *, hint: str = "如需更新请上传新版本") -> None:
+    """F-1001 精确查重：命中未软删的同 hash 文档即 409，消息指向已有 id（并发由唯一索引兜底）。
+    hint 随场景措辞（upload/draft_review），判定口径单一来源。"""
     existing = session.scalars(
         select(Document).where(Document.content_hash == sha256, Document.deleted_at.is_(None))
     ).first()
     if existing is not None:
         raise ApiError(
             ERR_DUPLICATE_DOC,
-            f"文件与已有文档完全重复（已有文档 ID {existing.id}），如需更新请上传新版本",
+            f"文件与已有文档完全重复（已有文档 ID {existing.id}），{hint}",
             409,
         )
 
 
-def _next_version(session: Session, dept_id: int, title: str) -> int:
+def next_version(session: Session, dept_id: int, title: str) -> int:
     """同部门同标题最大版本号 +1：不过滤软删——uq_doc_title_dept_ver 对全部行生效，
-    软删行仍占其版本号，新行必须越过它（部分索引只豁免 content_hash 查重）。"""
+    软删行仍占其版本号，新行必须越过它（部分索引只豁免 content_hash 查重）。
+    公有化（原 _next_version）：草稿登记与上传共用同部门同标题的版本序。"""
     current = session.scalar(
         select(func.max(Document.version)).where(
             Document.dept_id == dept_id, Document.title == title
@@ -206,7 +259,7 @@ def _next_version(session: Session, dept_id: int, title: str) -> int:
 def _commit_upload(session: Session) -> None:
     """上传事务提交段：IntegrityError = 并发抢注同 content_hash（DOC-06），回滚并转 409。
 
-    同步查重（_reject_duplicate）只挡提交前可见的重复；查重通过后、提交前对手抢注
+    同步查重（reject_duplicate）只挡提交前可见的重复；查重通过后、提交前对手抢注
     同 content_hash 的并发半边，由提交段撞 uq_doc_content_hash 唯一索引在此兜底。
     只捕 IntegrityError 一族：其余异常（UpstreamError 等）绝不吞。"""
     try:
@@ -214,87 +267,3 @@ def _commit_upload(session: Session) -> None:
     except IntegrityError as exc:
         session.rollback()  # 丢弃半程写入（文档行+审计）：冲突即失败，不留痕迹
         raise ApiError(ERR_DUPLICATE_DOC, "文件与已有文档重复，请勿重复上传", 409) from exc
-
-
-def _commit_ready(
-    session: Session, deps: IngestDeps, doc: Document, outcome: PipelineOutcome
-) -> None:
-    """单事务收口：删本 doc 旧块（重试幂等）→ 写新块 → 旧版归档 → ready/待确认 → 审计 → 提交。"""
-    session.execute(delete(Chunk).where(Chunk.document_id == doc.id))
-    for chunk, vector in zip(outcome.chunks, outcome.embeddings, strict=True):
-        session.add(
-            Chunk(
-                document_id=doc.id,
-                dept_id=doc.dept_id,
-                title_path=chunk.title_path,
-                content=chunk.content,
-                content_chars=len(chunk.content),
-                position=chunk.position,
-                page_no=chunk.page,  # 引用定位（task-6b）：pdf 块所在页，无页码来源 NULL
-                embedding=vector,
-            )
-        )
-    _archive_old_versions(session, deps, doc)
-    doc.status = "ready"
-    doc.parse_engine = outcome.engine
-    doc.parse_error = outcome.degrade_note
-    doc.simhash = to_signed64(outcome.simhash)
-    doc.updated_at = deps.clock.now()
-    doc.is_active = not (outcome.sensitive_hits or outcome.near_dup)  # 命中→待确认
-    detail = {
-        "after": {
-            "status": "ready",
-            "parseEngine": outcome.engine,
-            "degraded": outcome.degrade_note is not None,
-            "sensitiveHits": outcome.sensitive_hits,
-            "nearDup": outcome.near_dup,
-            "isActive": doc.is_active,
-        }
-    }
-    _audit(session, doc.uploaded_by, "document.ready", doc.id, detail, clock=deps.clock)
-    session.commit()
-
-
-def _archive_old_versions(session: Session, deps: IngestDeps, doc: Document) -> None:
-    """同部门同标题旧生效版本归档：is_active=False 且 deleted_at 保持为空（归档≠软删）。"""
-    olds = list(
-        session.scalars(
-            select(Document).where(
-                Document.dept_id == doc.dept_id,
-                Document.title == doc.title,
-                Document.id != doc.id,
-                Document.is_active.is_(True),
-            )
-        )
-    )
-    for old in olds:
-        old.is_active = False
-        old.updated_at = deps.clock.now()
-
-
-def _commit_failed(session: Session, clock: Clock, doc: Document, exc: Exception) -> None:
-    """失败收口：failed+中文原因（覆写 parsing 中间态）→ 审计 → 提交；绝不触碰 chunks
-    （DOC-26 旧块集保留，重试成功后整体替换）。不做 rollback：分析段为只读（不变量），
-    失败时未提交写只有 parsing 状态、直接被 failed 覆写；且 rollback 会拆掉会话与
-    外部事务（测试夹具 join-external）的关联，导致后续读不到本事务的行。"""
-    doc.status = "failed"
-    doc.parse_error = _failure_reason(exc)
-    doc.updated_at = clock.now()
-    _audit(
-        session,
-        doc.uploaded_by,
-        "document.failed",
-        doc.id,
-        {"after": {"status": "failed", "reason": doc.parse_error}},
-        clock=clock,
-    )
-    session.commit()
-
-
-def _failure_reason(exc: Exception) -> str:
-    """异常 → 中文失败原因：业务错误透传，上游故障与未知异常给通用文案（脱敏 §16.4）。"""
-    if isinstance(exc, ApiError):
-        return exc.message
-    if isinstance(exc, UpstreamError):
-        return _MSG_EMBED_FAIL
-    return _MSG_GENERIC_FAIL

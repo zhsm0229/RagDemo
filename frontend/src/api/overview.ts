@@ -56,3 +56,23 @@ export interface HealthData {
 export function getHealth(): Promise<HealthData> {
   return get<HealthData>('/admin/health')
 }
+
+/** 服务健康卡（api.md §4.5.4）：依赖探活；key 六键、status up/down/not_configured 三态 */
+export interface ServiceHealthItem {
+  /** key/status 全集以 api.md §4.5.4 为准；gotenberg=老格式转换探活（convert_base_url 空=not_configured） */
+  key: 'pg' | 'embed' | 'rerank' | 'llm' | 'mineru' | 'gotenberg'
+  label: string
+  status: 'up' | 'down' | 'not_configured'
+  latencyMs: number
+  detail: string
+}
+
+export interface ServicesHealthData {
+  /** up=问答链路全绿；degraded=仅 mineru 不可用；down=问答链路任一不可用 */
+  overall: 'up' | 'degraded' | 'down'
+  services: ServiceHealthItem[]
+}
+
+export function getServicesHealth(): Promise<ServicesHealthData> {
+  return get<ServicesHealthData>('/admin/services/health')
+}

@@ -1,11 +1,14 @@
-r"""装配工厂：按 Settings 装配 Embedder/Reranker/LLMProvider 三件套与提示词包。
+r"""装配工厂：按 Settings 装配六接口实现与提示词包（六接口中 FileStorage/转换客户端
+两项的原生实现也只允许在此模块实例化，findings I5）。
 
 装配关切与 tei.py/openai_compat.py 同层：test_mode 返回确定性 Stub（app/core/llm.py，
 同输入必同输出、可注故障），否则返回 TEI / OpenAI 兼容真实现实例（激活在 Task 3/4，
 本模块只负责装配与参数传递）。非 test_mode 且 llm_base_url 为空时 build_llm
-fail-fast（standards §6.4）。load_prompt_pack 读仓库根 prompts/ 三文件（缺文件
+fail-fast（standards §6.4）。load_prompt_pack 读仓库根 prompts/ 四文件（缺文件
 RuntimeError），version 以 chat_system.txt 头注释 `# version:` 行为唯一锚点并与
-manifest.json 交叉校验——代码内不另设版本常量（standards §17.4 模板与生成参数同版本化）。
+manifest.json 交叉校验——代码内不另设版本常量（standards §17.4 模板与生成参数同版本化）；
+memory_extract.txt 同样强制 `# version:` 头注释（§17.1，评测改动可比对 §17.3），
+但 manifest 只有一个全局 version，不与其交叉校验（头注释存在性即校验）。
 """
 
 import json
@@ -13,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.config import Settings
+from app.core.convert import DocumentConverter
 from app.core.llm import (
     Embedder,
     LLMProvider,
@@ -22,19 +26,60 @@ from app.core.llm import (
     StubReranker,
 )
 from app.core.openai_compat import OpenAICompatLLMProvider
+from app.core.storage import FileStorage, LocalFileStorage
 from app.core.tei import TeiEmbedder, TeiReranker
 
 # 仓库根 = app 包上一级：以本文件位置为锚解析 prompts/，测试与运行路径一致
 PROMPTS_DIR: Path = Path(__file__).resolve().parents[2] / "prompts"
 _VERSION_HEADER = "# version:"
 
+# 单例缓存键取 Settings 派生的原始值而非 Settings 对象（pydantic 定义了 __eq__ 未随附
+# __hash__，不可作字典键）。get/set 在 GIL 下各自原子，最坏情形并发首调各建一份再互相
+# 覆盖——被装配实现均无状态，重复建无害，不加锁。
+_STORAGE_CACHE: dict[str, LocalFileStorage] = {}
+_CONVERTER_CACHE: dict[tuple[str, int], DocumentConverter] = {}
+
+
+def build_storage(settings: Settings) -> FileStorage:
+    """按 storage_dir 装配 FileStorage（当前唯一实现 LocalFileStorage），进程内单例。
+
+    为什么收敛到这里：六接口中最后一个在 api/服务层散点实例化的实现（findings I5，
+    上传/zip/预览各自 new）——A 阶段切共享存储时无处只改一处，此后实现类只在装配层
+    出现。为什么单例：现实现无状态（每次 save 独立 open("xb")）复用安全；共享存储
+    实现通常带连接池等有状态资源，按请求重建会泄漏——单例语义先行固化，换实现只改
+    本函数。"""
+    storage = _STORAGE_CACHE.get(settings.storage_dir)
+    if storage is None:
+        storage = LocalFileStorage(settings.storage_dir)
+        _STORAGE_CACHE[settings.storage_dir] = storage
+    return storage
+
+
+def build_converter(settings: Settings) -> DocumentConverter | None:
+    """按 convert_base_url 装配老格式转换客户端；未配置返回 None（调用方给中文原因）。
+
+    同 build_storage 口径（findings I5）：入库/预览两路都不得自行 new，一律经本工厂。
+    单例按 (base_url, 超时) 键缓存——converter 无状态（每次调用新建 httpx.Client），
+    复用安全；改配置换键自然取新实例。"""
+    if not settings.convert_base_url:
+        return None
+    key = (settings.convert_base_url, settings.convert_timeout_s)
+    converter = _CONVERTER_CACHE.get(key)
+    if converter is None:
+        converter = DocumentConverter(
+            settings.convert_base_url, timeout_s=settings.convert_timeout_s
+        )
+        _CONVERTER_CACHE[key] = converter
+    return converter
+
 
 @dataclass
 class PromptPack:
-    """提示词包：问答/改写系统提示、版本（取自头注释）与生成温度（取自 manifest）。"""
+    """提示词包：问答/改写/记忆抽取系统提示、版本（取自头注释）与生成温度（取自 manifest）。"""
 
     chat_system: str
     rewrite_system: str
+    memory_extract: str
     version: str
     temperature: float
 
@@ -86,20 +131,27 @@ def _parse_version(chat_system: str) -> str:
 
 
 def load_prompt_pack(prompts_dir: Path | str | None = None) -> PromptPack:
-    """读 prompts/ 三文件装配 PromptPack；缺文件/版本不一致 → RuntimeError（fail-fast）。
+    """读 prompts/ 四文件装配 PromptPack；缺文件/版本不一致 → RuntimeError（fail-fast）。
 
     prompts_dir 缺省为仓库根 prompts/（PROMPTS_DIR），测试可注入 tmp_path 目录。
     """
     root = Path(prompts_dir) if prompts_dir is not None else PROMPTS_DIR
     chat_path = root / "chat_system.txt"
     rewrite_path = root / "rewrite_system.txt"
+    memory_path = root / "memory_extract.txt"
     manifest_path = root / "manifest.json"
-    missing = [path.name for path in (chat_path, rewrite_path, manifest_path) if not path.is_file()]
+    missing = [
+        path.name
+        for path in (chat_path, rewrite_path, memory_path, manifest_path)
+        if not path.is_file()
+    ]
     if missing:
         raise RuntimeError(f"提示词包文件缺失：{'、'.join(missing)}（目录：{root}）")
     chat_system = chat_path.read_text(encoding="utf-8")
     rewrite_system = rewrite_path.read_text(encoding="utf-8")
+    memory_extract = memory_path.read_text(encoding="utf-8")
     version = _parse_version(chat_system)
+    _parse_version(memory_extract)  # 版本头存在性校验（§17.1 单一真相源）；版本号不并入全局 version
     try:
         manifest: dict = json.loads(manifest_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -114,6 +166,7 @@ def load_prompt_pack(prompts_dir: Path | str | None = None) -> PromptPack:
     return PromptPack(
         chat_system=chat_system,
         rewrite_system=rewrite_system,
+        memory_extract=memory_extract,
         version=version,
         temperature=float(manifest["temperature"]),
     )

@@ -24,9 +24,10 @@ export class BadcasePage {
   /** ADM-03：忽略不填理由 → 前端内联拦截，弹窗不关。返回内联错误文本。 */
   async ignoreWithoutReason(): Promise<string> {
     const dialog = this.page.locator('.el-dialog').last()
-    await dialog.getByRole('radio', { name: /忽略/ }).check().catch(() =>
-      dialog.getByText('忽略', { exact: false }).first().click(),
-    )
+    await dialog
+      .getByRole('radio', { name: /忽略/ })
+      .check()
+      .catch(() => dialog.getByText('忽略', { exact: false }).first().click())
     await dialog.getByRole('button', { name: /确定|提交/ }).click()
     const err = dialog.locator('.el-form-item__error').last()
     await expect(err).toBeVisible()

@@ -130,6 +130,7 @@ def _make_deps(
     embedder: StubEmbedder | None = None,
     clock: Clock | None = None,
     mineru_base_url: str = "",
+    converter: object | None = None,
 ) -> IngestDeps:
     """构造可替身依赖包：parser_settings 的 storage_dir 与 LocalFileStorage 根对齐。"""
     return IngestDeps(
@@ -141,6 +142,7 @@ def _make_deps(
         embedder=embedder if embedder is not None else StubEmbedder(),
         clock=clock if clock is not None else FakeClock(),
         storage=storage,
+        converter=converter,
     )
 
 
@@ -379,7 +381,8 @@ def test_concurrent_duplicate_commit_maps_to_409(pg, tmp_path, monkeypatch) -> N
 
 
 def test_sync_gate_rejects_unsupported_extension(session: Session, tmp_path) -> None:
-    """同步白名单闸门（编排职责）：非白名单扩展名在 create_document 即拒收，不入库。"""
+    """同步白名单闸门（编排职责）：非白名单扩展名在 create_document 即拒收，不入库。
+    2026-10-05 格式扩展后 txt/md 等已进白名单，改用 .exe 验证拒收闸门仍在。"""
     storage = LocalFileStorage(tmp_path)
     with pytest.raises(ApiError) as ei:
         create_document(
@@ -387,9 +390,9 @@ def test_sync_gate_rejects_unsupported_extension(session: Session, tmp_path) -> 
             storage,
             session.scalars(select(User)).first(),
             _meta(_dept_id(session), "客服_非法格式_20260901"),
-            b"plain text",
-            "note.txt",
-            "text/plain",
+            b"MZ binary",
+            "note.exe",
+            "application/octet-stream",
         )
     assert ei.value.http_status == 422
     assert session.scalar(select(func.count()).select_from(Document)) == 0
@@ -493,8 +496,11 @@ def test_pdf_without_mineru_uses_pypdf_engine(session: Session, tmp_path) -> Non
         assert row.content.startswith("policy_2026｜")
 
 
-def test_mineru_outage_degrades_to_pypdf_annotated(session: Session, tmp_path) -> None:
+def test_mineru_outage_degrades_to_pypdf_annotated(session: Session, tmp_path, monkeypatch) -> None:
     """降级（故障路径）：MinerU 不可用自动降级 pypdf，标注"降级解析"且内容可检索。"""
+    storage = LocalFileStorage(tmp_path)
+    # 扫描件场景模拟：屏蔽文字版预判（测试 pdf 为文字版，真实扫描件无文字层）
+    monkeypatch.setattr("app.services.ingest_pipeline._is_text_based_pdf", lambda content: False)
     storage = LocalFileStorage(tmp_path)
     text = "Section one policy overview with enough content for red line. " * 10
     doc = _upload(

@@ -54,3 +54,9 @@ class User(Base):
     last_login_at: Mapped[datetime | None] = mapped_column(_ts())
     created_at: Mapped[datetime] = mapped_column(_ts(), server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(_ts(), server_default=text("now()"))
+    # 列 comment 与 0006 迁移逐字一致（autogenerate 零差异守卫依赖）
+    memory_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        server_default=text("true"),
+        comment="用户级记忆开关（true=参与自动提炼与问答注入；false=冻结：不注入不提炼，已有记忆保留不删除）；全局开关为部署配置项不进库",
+    )

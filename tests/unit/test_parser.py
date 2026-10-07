@@ -253,14 +253,11 @@ def test_resource_caps_pinned_and_rejected() -> None:
 
 
 def test_doc_extension_and_dispatch() -> None:
-    """`.doc` 三字段逐字拒收；调度树：docx→DocxParser；pdf 无 mineru 配置→pypdf 降级；配置→MinerU。"""
+    """`.doc` 异常路径防御（正常路径经转换层前置为 docx）；调度树：docx→DocxParser；pdf 无 mineru 配置→pypdf 降级；配置→MinerU。"""
     with pytest.raises(ApiError) as exc_info:
         get_parser("旧文档.doc", FRESH_SETTINGS)
-    assert (exc_info.value.code, exc_info.value.message, exc_info.value.http_status) == (
-        1001,
-        "请另存为 docx",
-        422,
-    )
+    assert (exc_info.value.code, exc_info.value.http_status) == (1001, 422)
+    assert "自动转换" in exc_info.value.message
     fallback = get_parser("a.pdf", FRESH_SETTINGS)
     assert isinstance(fallback, PdfFallbackParser) and isinstance(fallback, Parser)
     assert fallback.degraded is True

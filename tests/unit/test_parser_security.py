@@ -145,7 +145,7 @@ def test_doctype_xml_rejected() -> None:
                 b"<foo>&xxe;</foo>",
             ),
         )
-    _assert_rejected(exc_info, "docx 内含 DOCTYPE/ENTITY 声明，已拒绝解析")
+    _assert_rejected(exc_info, "OOXML 包内含 DOCTYPE/ENTITY 声明，已拒绝解析")
 
 
 def test_zip_bomb_declared_size_rejected() -> None:
@@ -167,7 +167,7 @@ def test_entry_declared_oversize_attack_rejected() -> None:
     attacked = _forge(buffer.getvalue(), {"word/document.xml": 499 * 1024 * 1024})
     with pytest.raises(ApiError) as exc_info:
         DocxParser().parse("员工手册.docx", attacked)
-    _assert_rejected(exc_info, "docx 单个条目解压后超过 64MB 上限")
+    _assert_rejected(exc_info, "OOXML 单个条目解压后超过 64MB 上限")
 
 
 @pytest.mark.parametrize(
