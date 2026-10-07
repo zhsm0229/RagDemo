@@ -88,7 +88,8 @@ onMounted(load)
         </el-table-column>
         <el-table-column label="延迟" width="90">
           <template #default="{ row }">
-            <span>{{ row.latencyMs ? `${row.latencyMs}ms` : '-' }}</span>
+            <!-- != null 判空（M35）：0ms 是有效探测结果，不得显示 '-' -->
+            <span>{{ row.latencyMs != null ? `${row.latencyMs}ms` : '-' }}</span>
           </template>
         </el-table-column>
         <el-table-column label="说明 / 修复指引" min-width="260">

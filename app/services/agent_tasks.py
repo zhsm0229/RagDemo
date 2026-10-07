@@ -10,6 +10,7 @@ r"""agent 任务档案（工单 #06）：taskType → 系统提示 + 工具集�
 """
 
 from dataclasses import dataclass
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -54,3 +55,11 @@ TASK_PROFILES: dict[str, TaskProfile] = {
 def get_profile(task_type: str) -> TaskProfile:
     """按 taskType 取档案：未知类型 KeyError fail-fast（api 白名单已挡，此处只兜装配缺陷）。"""
     return TASK_PROFILES[task_type]
+
+
+# B5：api 层请求校验的白名单 Literal 从本表动态派生（单一真相源）——新增任务 = 本表加
+# 一行，api 校验与 OpenAPI enum 自动跟随，杜绝"两处各写一份白名单"的漂移。动态构造
+# Literal[tuple(keys)] 在 import 期求值一次即冻结，Pydantic/OpenAPI 按静态枚举处理；
+# 选动态派生而非"显式同步 + 契约测试"的理由：契约测试只能事后报警，派生从机制上
+# 不可漂移（测试仍保留作为回归防撤销，见 tests/api/test_agent_runs.py）。
+TaskType = Literal[tuple(TASK_PROFILES)]

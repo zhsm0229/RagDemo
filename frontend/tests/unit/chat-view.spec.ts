@@ -93,6 +93,10 @@ describe('会话列表与历史渲染', () => {
     expect(wrapper.findAll('.conv-item')).toHaveLength(1)
     expect(wrapper.find('.conv-item.active').text()).toContain('新会话')
     expect(wrapper.text()).toContain('问点什么吧')
+    // 空态同步部门可见性口径（B12）
+    expect(wrapper.find('[data-test="chat-empty-dept-hint"]').text()).toBe(
+      '问答仅检索你所在部门与通用知识库',
+    )
   })
 
   it('会话删除需二次确认：取消不调 DELETE，确认后软删并从列表消失、自动切换下一会话', async () => {
@@ -186,6 +190,8 @@ describe('SSE 流式渲染（mock fetch 流）', () => {
     expect(wrapper.text()).toContain('已拒答')
     expect(wrapper.text()).not.toContain('来自缓存')
     expect(wrapper.text()).toContain('无引用')
+    // 拒答 meta 补部门可见性口径说明（B12）
+    expect(wrapper.find('.bubble.assistant').text()).toContain('问答仅检索你所在部门与通用知识库')
   })
 
   it('error 事件 retryable：气泡标生成失败+重试按钮；重试以相同问题新发一条（CHAT-12）', async () => {

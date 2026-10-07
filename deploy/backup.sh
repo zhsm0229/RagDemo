@@ -117,6 +117,18 @@ fi
 # 步骤 3/3：清理超过保留期的备份（*.gz 正式产物 + *.gz.sha256 边车 + 失败残留 *.part，
 # 不触碰 backup-cron.log 等其他文件）
 log "3/3 清理 ${RETAIN_DAYS} 天前的旧备份（*.gz / *.gz.sha256 / *.part）"
+# 防误删断言（M 系）：清理是 find -delete 批量删除——BACKUP_DIR 配错（指到根/空/无关目录）
+# 会误伤他物。先断言目录合法且目录内确有本脚本命名产物（rag-*.sql.gz），任一不满足即拒绝清理。
+case "${BACKUP_DIR}" in
+    "" | "/" | "." | "..")
+        log "错误：BACKUP_DIR 配置为空/根/当前目录（${BACKUP_DIR}），拒绝执行清理"
+        exit 1
+        ;;
+esac
+if [ "$DRY_RUN" != "1" ] && ! ls "${BACKUP_DIR}"/rag-*.sql.gz >/dev/null 2>&1; then
+    log "错误：${BACKUP_DIR} 内未发现 rag-*.sql.gz 产物，疑似目录配置错误，拒绝执行清理"
+    exit 1
+fi
 if [ "$DRY_RUN" = "1" ]; then
     log "干跑：find ${BACKUP_DIR} ( -name '*.gz' -o -name '*.gz.sha256' -o -name '*.part' ) -mtime +${RETAIN_DAYS} -delete"
 else

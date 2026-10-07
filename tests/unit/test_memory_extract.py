@@ -8,6 +8,7 @@ r"""长期记忆自动抽取单测（F-210 §3.2，agent-evolution 工单 03）�
 同款）。召回 recall_recent 的注入窗口与开关退化也在此覆盖（注入消费方见 chat 流）。
 """
 
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -19,6 +20,7 @@ from app.core.assembly import load_prompt_pack
 from app.core.llm import StubLLMProvider
 from app.core.security import hash_password
 from app.db.models import AuditLog, Conversation, Department, Message, User, UserMemory
+from app.rag.prompt import REFUSAL_TEXT
 from app.services.memory import recall_recent
 from app.services.memory_extract import (
     EXTRACT_MAX_TOKENS,
@@ -86,6 +88,36 @@ def make_assistant_message(
 def _extract_deps(text: str) -> ExtractionDeps:
     """抽取替身依赖：Stub LLM（产出注入文本）+ 仓库提示词包（单一真相源）。"""
     return ExtractionDeps(llm=StubLLMProvider(chunks=(text,)), prompts=load_prompt_pack())
+
+
+class _ScriptedLLM:
+    """按脚本逐次产出的抽取通道替身（A1 重试语义需要每次尝试不同产出）：
+    outputs 逐次弹出（str=整段正文，Exception=调用即抛）；stream_calls 与
+    StubLLMProvider 同口径计数，供"重试恰好 1 次"的断言使用。"""
+
+    def __init__(self, outputs: list[str | Exception]) -> None:
+        self.outputs: list[str | Exception] = list(outputs)
+        self.stream_calls: int = 0
+
+    def chat_stream(self, messages: list[Mapping[str, str]], max_tokens: int) -> Iterator[str]:
+        # 签名对齐 LLMProvider 流接口；替身不消费 messages/max_tokens（max_tokens 显式收下防误用）
+        self.stream_calls += 1
+        out = self.outputs.pop(0)
+        if isinstance(out, Exception):
+            raise out
+        return iter((out,))
+
+
+class _RecordingStubLLM(StubLLMProvider):
+    """记录每次 chat_stream 完整 messages 的 Stub（A7 断言抽取提示里喂了什么）。"""
+
+    def __init__(self, chunks: tuple[str, ...]) -> None:
+        super().__init__(chunks=chunks)
+        self.calls: list[list[dict[str, str]]] = []
+
+    def chat_stream(self, messages, max_tokens):  # type: ignore[no-untyped-def]
+        self.calls.append([dict(message) for message in messages])
+        return super().chat_stream(messages, max_tokens)
 
 
 def _active_contents(session: Session, user_id: int) -> list[str]:
@@ -164,13 +196,100 @@ def test_extract_and_store_upstream_failure_degrades_silently(session) -> None:
 
 
 def test_extract_and_store_unparseable_output_degrades_silently(session) -> None:
-    """LLM 产出不是合法 JSON 数组（Stub 缺省正文）：零入库不抛异常。"""
+    """LLM 产出不是合法 JSON 数组（Stub 缺省正文）：零入库不抛异常，且两次尝试后放弃。"""
     user = make_user(session, "extract-garbage")
-    deps = ExtractionDeps(llm=StubLLMProvider(), prompts=load_prompt_pack())  # 缺省非 JSON
+    llm = _ScriptedLLM(["不是 JSON", "还不是 JSON"])
+    deps = ExtractionDeps(llm=llm, prompts=load_prompt_pack())
 
     extract_and_store(session, deps, user.id, _QUESTION, _ANSWER)
 
     assert _active_contents(session, user.id) == []
+    assert llm.stream_calls == 2  # A1：空/非法产出重试 1 次（共 2 次尝试）后降级
+
+
+# ---------- A1 空产物重试（agent-evolution 修复批：失败重试 1 次，_MAX_ATTEMPTS=2 纪律） ----------
+
+
+def test_extract_retries_empty_then_persists_second_attempt(session) -> None:
+    """A1：LLM 第一次产出空串 → 重试 1 次，第二次合法 JSON → 落库读回（恰 2 次调用）。"""
+    user = make_user(session, "extract-retry-empty")
+    llm = _ScriptedLLM(["", '["重试后产出的画像"]'])
+    deps = ExtractionDeps(llm=llm, prompts=load_prompt_pack())
+
+    extract_and_store(session, deps, user.id, _QUESTION, _ANSWER)
+
+    assert _active_contents(session, user.id) == ["重试后产出的画像"]
+    assert llm.stream_calls == 2
+    row = session.scalars(select(UserMemory).where(UserMemory.user_id == user.id)).one()
+    assert row.is_active is True
+
+
+def test_extract_retries_unparseable_then_persists_second_attempt(session) -> None:
+    """A1：第一次产出非法 JSON（_parse_items → None）→ 重试 1 次，第二次合法 → 落库。"""
+    user = make_user(session, "extract-retry-garbage")
+    llm = _ScriptedLLM(["抱歉，我无法输出 JSON", '["二次尝试画像"]'])
+    deps = ExtractionDeps(llm=llm, prompts=load_prompt_pack())
+
+    extract_and_store(session, deps, user.id, _QUESTION, _ANSWER)  # 不抛即通过
+
+    assert _active_contents(session, user.id) == ["二次尝试画像"]
+    assert llm.stream_calls == 2
+
+
+def test_extract_two_empty_outputs_degrade_after_exactly_two_attempts(session) -> None:
+    """A1：两次尝试均为空串 → 静默降级零入库不抛异常（调用计数恰为 2，不无限重试）。"""
+    user = make_user(session, "extract-two-empty")
+    llm = _ScriptedLLM(["", "   "])
+    deps = ExtractionDeps(llm=llm, prompts=load_prompt_pack())
+
+    extract_and_store(session, deps, user.id, _QUESTION, _ANSWER)  # 不抛即通过
+
+    assert _active_contents(session, user.id) == []
+    assert llm.stream_calls == 2
+
+
+def test_extract_explicit_empty_array_is_valid_no_retry_no_insert(session) -> None:
+    """A1 边界：模型明确输出合法 []（本轮无值得记的信息）是有效产出——不重试、零入库。"""
+    user = make_user(session, "extract-empty-array")
+    llm = _ScriptedLLM(["[]"])
+    deps = ExtractionDeps(llm=llm, prompts=load_prompt_pack())
+
+    extract_and_store(session, deps, user.id, _QUESTION, _ANSWER)
+
+    assert _active_contents(session, user.id) == []
+    assert llm.stream_calls == 1  # 合法空数组不算失败：不重试
+
+
+# ---------- A7 拒答轮抽取（agent-evolution 修复批：refuse 轮也挂抽取任务） ----------
+
+
+def test_extract_refused_round_substitutes_declaration_answer(session) -> None:
+    """A7：拒答轮（refused=True）answer 段以声明文字替换——拒答话术 REFUSAL_TEXT 不进
+    抽取提示（否则诱导模型从拒答话术里"提炼"），用户问题照常参与；画像照常落库。"""
+    user = make_user(session, "extract-refused")
+    llm = _RecordingStubLLM(chunks=('["倾向简洁回答"]',))
+    deps = ExtractionDeps(llm=llm, prompts=load_prompt_pack())
+
+    extract_and_store(session, deps, user.id, "记住我喜欢简洁回答", REFUSAL_TEXT, refused=True)
+
+    assert _active_contents(session, user.id) == ["倾向简洁回答"]
+    user_text = llm.calls[0][1]["content"]
+    assert "本轮助手未给出知识回答" in user_text  # 声明文字进入回答段
+    assert REFUSAL_TEXT not in user_text  # 拒答话术不进提示
+    assert "记住我喜欢简洁回答" in user_text  # 用户问题段不受影响
+
+
+def test_extract_non_refused_round_keeps_real_answer(session) -> None:
+    """A7 对照：正常轮（refused 缺省 False）answer 段仍是真实回答正文（行为不变）。"""
+    user = make_user(session, "extract-normal")
+    llm = _RecordingStubLLM(chunks=('["画像"]',))
+    deps = ExtractionDeps(llm=llm, prompts=load_prompt_pack())
+
+    extract_and_store(session, deps, user.id, _QUESTION, _ANSWER)
+
+    user_text = llm.calls[0][1]["content"]
+    assert _ANSWER in user_text
+    assert "本轮助手未给出知识回答" not in user_text
 
 
 def test_extract_and_store_dedups_against_existing_and_within_batch(session) -> None:
@@ -215,6 +334,29 @@ def test_extract_and_store_capacity_evicts_oldest(session, monkeypatch) -> None:
     assert sorted(_active_contents(session, user.id)) == ["新画像一", "新画像二"]
 
 
+def test_capacity_eviction_writes_evict_audit(session, monkeypatch) -> None:
+    """B6 淘汰审计：容量淘汰最旧时留 memory.evict 审计行——detail 含被淘汰条目 id
+    与内容摘要，actor 为记忆归属用户（审计与淘汰同事务）。"""
+    user = make_user(session, "extract-evict-audit")
+    monkeypatch.setattr(
+        "app.services.memory.get_settings",
+        lambda: SimpleNamespace(memory_max_per_user=2, memory_inject_limit=10),
+    )
+    old = make_memory(session, user.id, "旧画像", updated_at=_T0)
+    make_memory(session, user.id, "较新画像", updated_at=_T0 + timedelta(minutes=1))
+    deps = _extract_deps('["新画像"]')
+
+    extract_and_store(session, deps, user.id, _QUESTION, _ANSWER)
+
+    audits = session.scalars(select(AuditLog).where(AuditLog.action == "memory.evict")).all()
+    assert len(audits) == 1  # 2 条既有 + 1 条新写入 = 超限 1 条，恰淘汰 1 次
+    assert audits[0].object_id == old.id
+    assert audits[0].detail["id"] == old.id
+    assert audits[0].detail["content"] == "旧画像"
+    assert audits[0].actor_user_id == user.id
+    assert audits[0].object_type == "user_memory"
+
+
 def test_extract_and_store_skips_when_user_memory_disabled(session) -> None:
     """用户级开关关闭=冻结（§3.5）：不调 LLM 不落库，既有记忆保留不删除。"""
     user = make_user(session, "extract-off")
@@ -227,6 +369,28 @@ def test_extract_and_store_skips_when_user_memory_disabled(session) -> None:
 
     assert deps.llm.stream_calls == 0  # 冻结：连 LLM 都不调
     assert _active_contents(session, user.id) == ["既有画像"]
+
+
+def test_extract_rechecks_enabled_before_insert(session) -> None:
+    """B4 落库前复查：LLM 调用期间开关被关闭（抽取进行中用户关闭记忆的并发形态）
+    → 静默放弃零入库（开头的冻结检查已过，INSERT 前必须再查一次）。"""
+    user = make_user(session, "extract-recheck-off")
+    make_memory(session, user.id, "既有画像")
+
+    class _DisableDuringCall:
+        """LLM 调用时把开关关掉（同一事务 UPDATE，B4 复查须读到关闭态）。"""
+
+        def chat_stream(self, messages, max_tokens):
+            # 签名对齐流接口；替身不消费 messages/max_tokens（B4 翻转开关才是职责）
+            session.query(User).filter(User.id == user.id).update({"memory_enabled": False})
+            session.flush()
+            return iter(('["迟到的画像"]',))
+
+    deps = ExtractionDeps(llm=_DisableDuringCall(), prompts=load_prompt_pack())
+
+    extract_and_store(session, deps, user.id, _QUESTION, _ANSWER)  # 不抛即通过
+
+    assert _active_contents(session, user.id) == ["既有画像"]  # 关闭后不再新增
 
 
 # ---------- extract_memory_task：任务体读回答案 / 跳过中断轮 ----------

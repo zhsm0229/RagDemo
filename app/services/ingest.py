@@ -169,23 +169,35 @@ def delete_document(session: Session, clock: Clock, doc_id: int, actor_user_id: 
 
 
 def confirm_document(session: Session, doc_id: int, actor_user_id: int) -> Document:
-    """待确认激活：管理员确认敏感/近似文档 → is_active=True，审计并提交。
+    """待确认激活：管理员确认敏感/近似文档 → is_active=True，审计并提交（条件 UPDATE
+    判 rowcount：仅 is_active=False 可激活，B3 TOCTOU 防线——双管理员并发确认恰一次
+    生效、审计恰一条；重复确认 422/1003 不再静默成功）。
 
     actor_user_id 必填（不回退 uploaded_by）：审计操作者必须是真实点击确认的管理员
     （T13 W2 移交项）——上传者与确认者常为两人，默认 uploaded_by 会伪造留痕。
     """
-    doc = session.get(Document, doc_id)
-    if doc is None:
-        raise ApiError(ERR_NOT_FOUND, _MSG_NOT_FOUND, 404)
-    doc.is_active = True
+    updated = session.execute(
+        update(Document)
+        .where(Document.id == doc_id, Document.is_active.is_(False))
+        .values(is_active=True)
+    )
+    if updated.rowcount == 0:  # 0 行定性：不存在 404；已生效（对手已确认）422
+        doc = session.get(Document, doc_id)
+        if doc is None:
+            raise ApiError(ERR_NOT_FOUND, _MSG_NOT_FOUND, 404)
+        raise ApiError(ERR_PARAM_INVALID, "文档已是生效状态，无需重复确认", 422)
     audit_document(
         session,
         actor_user_id,
         "document.confirm",
-        doc.id,
+        doc_id,
         {"before": {"isActive": False}, "after": {"isActive": True}},
     )
     session.commit()
+    doc = session.get(Document, doc_id)
+    if doc is None:  # 理论不可达（迁移刚成功）；防御读优于 assert（-O 不裁语义）
+        raise ApiError(ERR_NOT_FOUND, _MSG_NOT_FOUND, 404)
+    session.refresh(doc)  # 语句级写入的会话镜像不保证同步：回读库内真相再回传
     return doc
 
 

@@ -6,25 +6,30 @@ r"""用户长期记忆管理服务（F-210 管理面）：手动添加 / 列表 
 （§3.2 每用户 30 条）在写入路径统一维护：超限淘汰最旧——自动抽取（memory_extract.py，
 行数红线 §1.4 自本模块拆出）与手动添加共用 _insert_memory 本入口，约束不会旁路。
 变更类动作写 audit_logs（§3.5 同 F-801 口径）：memory.add / memory.delete /
-memory.settings，审计与业务写入同事务 commit（record_audit 只 flush，commit 归
-调用方，同 qa_pairs 约定）。
+memory.settings / memory.evict（容量淘汰留痕，B6），审计与业务写入同事务 commit
+（record_audit 只 flush，commit 归调用方，同 qa_pairs 约定）。
+
+写入互斥（A5）：查重/容量裁决/插入的读改写序列包在 per-user 事务级 advisory lock
+（_acquire_user_lock，commit/rollback 自动释放）——手动添加与自动抽取两条写入路径
+共用，并发同内容添加不双写、容量上限不被并发击穿。
 
 归属裁决（IDOR §21.8）：软删按 id 取行后比对 user_id，不符与不存在一律 404 同
 话术"记忆不存在或无权访问"，不区分两种情形、不给探测空间。
 """
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.orm import Session
 
 from app.core.clock import Clock
 from app.core.config import get_settings
-from app.core.errors import ERR_NOT_FOUND, ERR_PARAM_INVALID, ApiError
+from app.core.errors import ERR_DUPLICATE_DOC, ERR_NOT_FOUND, ERR_PARAM_INVALID, ApiError
 from app.db.models import User, UserMemory
 from app.services.audit import record_audit
 
 _CONTENT_MIN: int = 1
 _CONTENT_MAX: int = 200  # 与 user_memories_content_check 同源（自动抽取单条 ≤40 字在抽取侧约束）
 _MSG_MEMORY_NOT_FOUND = "记忆不存在或无权访问"
+_MSG_DUPLICATE = "已存在相同内容的记忆"  # A6 手动添加查重（409/3001 重复类，F-1001 同族）
 _ESCAPES = (("\\", "\\\\"), ("%", "\\%"), ("_", "\\_"))  # §22：ILIKE 通配符按字面匹配
 _SUMMARY_MAX: int = 50  # 审计 detail 摘要截断宽度（内容上限 200 字，防审计行膨胀）
 
@@ -32,12 +37,18 @@ _SUMMARY_MAX: int = 50  # 审计 detail 摘要截断宽度（内容上限 200 �
 def add_manual(
     db: Session, user_id: int, content: str, *, clock: Clock | None = None
 ) -> UserMemory:
-    """手动添加一条记忆：strip 后 1-200 字（422/1003）→ 容量淘汰 → 落库 + 审计。
+    """手动添加一条记忆：strip 后 1-200 字（422/1003）→ 查重（A6：与本人活跃记忆
+    strip 后精确重复 409/3001，软删行不参与）→ 容量淘汰 → 落库 + 审计。
 
+    查重/容量/插入整体包在 per-user advisory lock 临界区内（A5：并发同内容添加不
+    双写，容量裁决不被并发击穿）；commit 归本函数（审计同事务，锁随 commit 释放）。
     source_message_id 留空（NULL=手动添加）；自动抽取路径（memory_extract.py）带
-    来源消息 id 复用 _insert_memory 落库。commit 归本函数（审计同事务）。
+    来源消息 id 复用 _insert_memory 落库。
     """
     text_value = _validated_content(content)
+    _acquire_user_lock(db, user_id)
+    if _duplicate_exists(db, user_id, text_value):
+        raise ApiError(ERR_DUPLICATE_DOC, _MSG_DUPLICATE, 409)
     memory = _insert_memory(
         db,
         user_id,
@@ -133,12 +144,42 @@ def set_enabled(db: Session, user: User, enabled: bool, *, clock: Clock | None =
     return user
 
 
+def _acquire_user_lock(db: Session, user_id: int) -> None:
+    """A5 per-user 写入互斥：事务级 advisory lock，commit/rollback 自动释放。
+
+    hashtext 把 "memory:{user_id}" 折叠为 bigint 键（无需键空间管理）；pg 语义下
+    同事务重复获取按计数叠加（无害），事务结束全部释放。查重/容量裁决/插入的
+    读改写序列在锁内串行化——并发写入方在取锁处阻塞，拿锁后读到的是前一方已提交
+    的最新状态（READ COMMITTED 语句级新快照），check-then-act 不再双写。参数绑定
+    （SQL 红线 §硬性2），锁键与业务键一一对应、不挪作他用。"""
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"), {"lock_key": f"memory:{user_id}"}
+    )
+
+
 def _validated_content(content: str) -> str:
     """内容校验（手动添加与自动抽取共用口径）：strip 后 1-200 字，越界 422/1003。"""
     text_value = (content or "").strip()
     if not _CONTENT_MIN <= len(text_value) <= _CONTENT_MAX:
         raise ApiError(ERR_PARAM_INVALID, f"记忆内容须在 {_CONTENT_MIN}-{_CONTENT_MAX} 字之间", 422)
     return text_value
+
+
+def _duplicate_exists(db: Session, user_id: int, text_value: str) -> bool:
+    """A6 查重：strip 后内容与该用户**活跃**记忆精确比对（Postgres `=` 大小写敏感）。
+
+    只查 is_active 行——软删行不参与查重（用户删掉后应可重新添加同一内容）；按
+    user_id 过滤（用户隔离：他人已有同内容不构成本人的重复）。"""
+    found = db.scalar(
+        select(UserMemory.id).where(
+            and_(
+                UserMemory.user_id == user_id,
+                UserMemory.is_active.is_(True),
+                UserMemory.content == text_value,
+            )
+        )
+    )
+    return found is not None
 
 
 def _insert_memory(
@@ -150,9 +191,12 @@ def _insert_memory(
     audit_detail: dict,
     clock: Clock | None = None,
 ) -> UserMemory:
-    """唯一写入入口（容量约束不旁路）：容量淘汰 → INSERT → 审计；只 flush 不 commit，
-    事务边界归调用方（手动添加逐条 commit，自动抽取整批一次 commit）。"""
-    _enforce_capacity(db, user_id)
+    """唯一写入入口（容量约束不旁路）：advisory lock（A5，同事务重复获取无害）→
+    容量淘汰 → INSERT → 审计；只 flush 不 commit，事务边界归调用方（手动添加逐条
+    commit，自动抽取整批一次 commit）。调用方若已在锁内（add_manual / extract 写入
+    段）本次获取即叠加计数，不改变持有时长。"""
+    _acquire_user_lock(db, user_id)
+    _enforce_capacity(db, user_id, clock=clock)
     memory = UserMemory(user_id=user_id, content=text_value, source_message_id=source_message_id)
     db.add(memory)
     db.flush()  # 取 id 供审计 object_id
@@ -160,10 +204,12 @@ def _insert_memory(
     return memory
 
 
-def _enforce_capacity(db: Session, user_id: int) -> None:
+def _enforce_capacity(db: Session, user_id: int, *, clock: Clock | None = None) -> None:
     """写入前容量裁决（§3.2）：有效记忆数将超 memory_max_per_user 时软删最旧腾位。
 
     最旧按 updated_at 升序（同刻 id 升序兜底）；只置 is_active=false，不物理删。
+    每淘汰一条留 memory.evict 审计（B6：detail 含被淘汰条目 id 与内容摘要）——容量
+    淘汰不是静默丢失，用户画像"无故消失"必须可追溯（审计与淘汰同事务提交）。
     """
     max_per_user = get_settings().memory_max_per_user
     active_cond = and_(UserMemory.user_id == user_id, UserMemory.is_active.is_(True))
@@ -179,6 +225,15 @@ def _enforce_capacity(db: Session, user_id: int) -> None:
     ).all()
     for memory in oldest:
         memory.is_active = False
+        record_audit(
+            db,
+            user_id,
+            "memory.evict",
+            "user_memory",
+            memory.id,
+            {"id": memory.id, "content": _summary(memory.content)},
+            clock=clock,
+        )
     db.flush()
 
 

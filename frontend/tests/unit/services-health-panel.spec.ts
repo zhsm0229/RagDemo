@@ -138,6 +138,17 @@ describe('服务健康卡', () => {
     expect(wrapper.find('[data-test="svc-load-err"]').exists()).toBe(true)
     expect(wrapper.text()).toContain('健康探活失败')
   })
+
+  it('0ms 延迟显示"0ms"而非"-"（M35：!= null 判空，0 是有效探测结果）', async () => {
+    mockedGet.mockResolvedValue({
+      overall: 'up',
+      services: [{ key: 'pg', label: 'PostgreSQL', status: 'up', latencyMs: 0, detail: '' }],
+    } as ServicesHealthData)
+    const wrapper = mountPanel()
+    await flushPromises()
+    expect(wrapper.find('[data-test="svc-table"]').text()).toContain('0ms')
+    expect(wrapper.find('[data-test="svc-table"]').text()).not.toContain('-ms')
+  })
 })
 
 /** ApiClientError 形状替身（组件只判断 instanceof 决定文案，语义等价即可） */

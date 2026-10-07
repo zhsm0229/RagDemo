@@ -7,7 +7,8 @@
  * services-health-panel.spec.ts 惯例 mock api 模块）。
  */
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
-import ElementPlus, { ElMessageBox } from 'element-plus'
+import ElementPlus, { ElMessage, ElMessageBox } from 'element-plus'
+import type { MessageBoxData } from 'element-plus'
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -269,5 +270,108 @@ describe('我的记忆', () => {
     const wrapper = await mountView(false)
     expect(wrapper.find('[data-test="memory-empty-blank"]').exists()).toBe(true)
     expect(wrapper.find('[data-test="memory-empty-blank"] button').exists()).toBe(false)
+  })
+
+  it('超限（>200 字）回车提交给出明确警示而非静默吞掉（B7）', async () => {
+    const warningSpy = vi.spyOn(ElMessage, 'warning')
+    const wrapper = await mountView(true)
+    const input = wrapper.find('input[data-test="memory-draft"]')
+    await input.setValue('字'.repeat(201))
+    await input.trigger('keydown.enter')
+    await flushPromises()
+    expect(warningSpy).toHaveBeenCalledWith('记忆内容不能超过 200 字')
+    expect(mocked.add).not.toHaveBeenCalled()
+    // 回到限内后回车正常提交（警示只针对超限路径）
+    warningSpy.mockRestore()
+    await input.setValue('限内内容')
+    await input.trigger('keydown.enter')
+    await flushPromises()
+    expect(mocked.add).toHaveBeenCalledTimes(1)
+  })
+
+  it('开关切换在飞锁定：请求挂起期间开关禁用且重复触发不叠加请求（B7）', async () => {
+    let resolveSettings: (value: { memoryEnabled: boolean }) => void = () => undefined
+    mocked.settings.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSettings = resolve
+        }),
+    )
+    const wrapper = await mountView(true)
+    const switchEl = () => wrapper.find('[data-test="memory-switch"]')
+    const firstClick = switchEl().trigger('click')
+    await flushPromises()
+    expect(switchEl().classes()).toContain('is-disabled') // 在飞禁用（防并发保存）
+    await switchEl().trigger('click') // 在飞重复触发被吞
+    resolveSettings({ memoryEnabled: false })
+    await firstClick
+    await flushPromises()
+    expect(mocked.settings).toHaveBeenCalledTimes(1)
+    expect(switchEl().classes()).not.toContain('is-disabled')
+    expect(switchEl().classes()).not.toContain('is-checked') // 以后端落库值校准
+    expect(wrapper.find('[data-test="memory-frozen-alert"]').exists()).toBe(true)
+  })
+
+  it('手动添加在飞锁定：按钮 loading 且重复提交不叠加请求（B7）', async () => {
+    let resolveAdd: (value: MemoryItem) => void = () => undefined
+    mocked.add.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveAdd = resolve
+        }),
+    )
+    const wrapper = await mountView(true)
+    const input = wrapper.find('input[data-test="memory-draft"]')
+    await input.setValue('新画像')
+    const addBtn = () => wrapper.find('[data-test="memory-add"]')
+    const firstClick = addBtn().trigger('click')
+    await flushPromises()
+    expect(addBtn().classes()).toContain('is-loading')
+    await addBtn().trigger('click') // 在飞重复提交被吞
+    resolveAdd(memoryItem({ id: 3, content: '新画像' }))
+    await firstClick
+    await flushPromises()
+    expect(mocked.add).toHaveBeenCalledTimes(1)
+    expect((input.element as HTMLInputElement).value).toBe('') // 成功清空不受在飞锁影响
+  })
+
+  it('删除请求在飞防连点：确认框挂起期间再次点击不重复弹确认（B8）', async () => {
+    let resolveConfirm: (value: MessageBoxData) => void = () => undefined
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveConfirm = resolve
+        }),
+    )
+    mocked.list.mockResolvedValue({ items: [memoryItem()], total: 1, page: 1, pageSize: 20 })
+    const wrapper = await mountView(true)
+    mocked.del.mockResolvedValue({ id: 1, isActive: false })
+    const delBtn = () => wrapper.find('[data-test="memory-delete"]')
+    const firstClick = delBtn().trigger('click')
+    await flushPromises()
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(delBtn().attributes('disabled')).toBeDefined() // 在飞禁用（B8 行级防重）
+    await delBtn().trigger('click')
+    await flushPromises()
+    expect(confirmSpy).toHaveBeenCalledTimes(1) // 第二次点击被吞，不重复弹确认
+    resolveConfirm({ action: 'confirm', value: '' } as unknown as MessageBoxData)
+    await firstClick
+    await flushPromises()
+    expect(mocked.del).toHaveBeenCalledTimes(1)
+    expect(delBtn().attributes('disabled')).toBeUndefined() // 收口后解锁
+  })
+
+  it('加载失败空态显示"加载失败，点击重试"而非"还没有"，重试成功恢复列表（B11）', async () => {
+    mocked.list.mockRejectedValueOnce(new Error('network down'))
+    const wrapper = await mountView(true)
+    expect(wrapper.find('[data-test="memory-load-error"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('加载失败，点击重试')
+    expect(wrapper.text()).not.toContain('还没有记忆') // 失败 ≠ 没有数据
+    expect(wrapper.text()).not.toContain('没有匹配筛选条件的记忆')
+    mocked.list.mockResolvedValue({ items: [memoryItem()], total: 1, page: 1, pageSize: 20 })
+    await wrapper.find('[data-test="memory-load-error"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="memory-load-error"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('我负责华东区客服，回复时请用中文')
   })
 })

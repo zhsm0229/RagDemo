@@ -29,7 +29,9 @@ export function parseSseFrames(buffer: string): { frames: SseFrame[]; rest: stri
         event = line.slice('event:'.length).trim()
         hasPayload = true
       } else if (line.startsWith('data:')) {
-        data += line.slice('data:'.length).trim()
+        // 多 data: 行按 SSE 规范以 \n 拼接（M26）：JSON 序列化产物本为单行，但手写/
+        // 代理注入的多行负载此前会被无分隔符粘连导致 JSON.parse 失败
+        data += (data !== '' ? '\n' : '') + line.slice('data:'.length).trim()
         hasPayload = true
       }
     }

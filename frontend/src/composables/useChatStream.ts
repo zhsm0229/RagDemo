@@ -9,6 +9,9 @@
  *   未知事件名忽略。
  * - 停止（T8 评审清单③）：streamChat 传 AbortController.signal，stop() 中止后
  *   气泡标"已停止"且可重问。
+ * - 看门狗（A8，移植 useAgentRun 三件套）：收到任意事件喂狗；45s（3×15s 心跳周期）
+ *   无事件判"连接停滞"，300s 总时长兜底判"超时"，两者 abort 进可重试失败态
+ *   （文案区分于用户停止）。计时器与 AbortController 同生命周期，终态即拆。
  * - 重试语义（CHAT-12）：以相同问题新发一条（新 user 气泡 + 新流），
  *   失败消息保留标失败态，后端不重复落库。
  */
@@ -16,6 +19,11 @@ import { reactive, ref } from 'vue'
 import { ABORTED_CODE, ApiClientError } from '@/api/client'
 import { NON_RETRYABLE_PRESTREAM_CODES, streamChat, type MessageItem } from '@/api/chat'
 import type { ChatStreamEvent, CitationItem, FeedbackKind } from '@/api/types'
+
+/** 连接停滞阈值：3 个心跳周期（服务端心跳间隔 15s）无任何事件即判停（同 useAgentRun） */
+export const STALL_TIMEOUT_MS = 45_000
+/** 单次回答总时长兜底（对齐解析超时 300s 口径），到点强判失败 */
+export const TOTAL_TIMEOUT_MS = 300_000
 
 export type MessageStatus = 'streaming' | 'done' | 'failed'
 
@@ -253,6 +261,26 @@ export function useChatStream(hooks: ChatStreamHooks = {}) {
 
   /** 当前流的取消器（一机一流，全局串行） */
   let controller: AbortController | null = null
+  let stallTimer: number | null = null
+  let totalTimer: number | null = null
+  /** 看门狗判停原因（非 null 时 abort 的收口文案取它，区别于用户主动停止） */
+  let stallReason: string | null = null
+
+  function clearTimers(): void {
+    if (stallTimer !== null) window.clearTimeout(stallTimer)
+    if (totalTimer !== null) window.clearTimeout(totalTimer)
+    stallTimer = null
+    totalTimer = null
+  }
+
+  /** 喂狗：任意事件（含 citations/心跳类）重置停滞计时 */
+  function feedDog(): void {
+    if (stallTimer !== null) window.clearTimeout(stallTimer)
+    stallTimer = window.setTimeout(() => {
+      stallReason = '回答长时间无响应，已停止等待'
+      controller?.abort()
+    }, STALL_TIMEOUT_MS)
+  }
 
   /** 用户停止当前生成：气泡标"已停止"并可重问（T8 评审清单③；非流式态空操作） */
   function stop(): void {
@@ -263,24 +291,42 @@ export function useChatStream(hooks: ChatStreamHooks = {}) {
   async function send(question: string, conversationId: number | null): Promise<void> {
     if (streaming.value) return
     streaming.value = true
+    stallReason = null
     controller = new AbortController()
     const list = bucket(conversationId)
     list.push(userMessage(question, keyOf), assistantPlaceholder(keyOf))
     // 事件须作用在 reactive 代理上：直接改原始对象不触发依赖更新（模板经代理读取）
     const placeholder = list[list.length - 1]
+    feedDog()
+    totalTimer = window.setTimeout(() => {
+      stallReason = '回答超时（超过 5 分钟），可重试'
+      controller?.abort()
+    }, TOTAL_TIMEOUT_MS)
     try {
       await streamChat(
         { conversationId, question },
         (event) => {
+          feedDog()
           applyEvent(placeholder, event)
           hooks.onUpdate?.()
         },
         controller.signal,
       )
+      // 流正常结束却没收到 done（服务端漏发/代理截断）：按失败收口，不留假流式态
+      if (placeholder.status === 'streaming') {
+        placeholder.status = 'failed'
+        placeholder.stage = null
+        placeholder.failure = '连接中断，请重试'
+        placeholder.retryable = true
+      }
     } catch (error) {
       placeholder.status = 'failed'
       placeholder.stage = null
-      if (error instanceof ApiClientError && error.code === ABORTED_CODE) {
+      if (stallReason !== null) {
+        // 看门狗判停（停滞/超时）：文案自带区分，均为可重试失败态
+        placeholder.failure = stallReason
+        placeholder.retryable = true
+      } else if (error instanceof ApiClientError && error.code === ABORTED_CODE) {
         // 用户停止：不打失败原因文案，可重问（重试=同问题新发一条）
         placeholder.stopped = true
         placeholder.retryable = true
@@ -290,6 +336,7 @@ export function useChatStream(hooks: ChatStreamHooks = {}) {
         placeholder.retryable = retryable
       }
     } finally {
+      clearTimers()
       controller = null
       streaming.value = false
       hooks.onSettled?.(conversationId)

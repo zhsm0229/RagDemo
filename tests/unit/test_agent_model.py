@@ -11,12 +11,8 @@ import json
 import httpx
 import pytest
 
-from app.core.agent_model import (
-    AgentChatModel,
-    ChannelTurn,
-    OpenAICompatToolChannel,
-    ReactParseError,
-)
+from app.core.agent_model import AgentChatModel, ChannelTurn, OpenAICompatToolChannel
+from app.core.agent_react import REACT_FEEDBACK_TOOL_NAME, ReactParseError, parse_react_tool_calls
 from app.core.llm import UpstreamError
 
 _TOOL = {
@@ -155,16 +151,38 @@ def test_空参数对象_合法且解析为空args() -> None:
     assert message.tool_calls[0]["args"] == {}
 
 
-def test_协议调用未绑定工具_抛ReactParseError() -> None:
-    channel = StubChannel([ChannelTurn(content="<<TOOL:web_search|{}>>")])
+def test_协议调用未绑定工具_解析层严格抛错() -> None:
+    """协议层严格性保留（specs §4.4：宁可一次 step error 也不半解析）；模型层把它转成
+    反馈调用（见下），不再直接终止 agent 循环。"""
     with pytest.raises(ReactParseError, match="未绑定工具"):
-        _model(channel).bind_tools([_TOOL]).invoke("q")
+        parse_react_tool_calls("<<TOOL:web_search|{}>>", {"knowledge_base_search"})
 
 
-def test_协议参数非法JSON_抛ReactParseError() -> None:
-    channel = StubChannel([ChannelTurn(content="<<TOOL:knowledge_base_search|{bad>>")])
+def test_协议参数非法JSON_解析层严格抛错() -> None:
     with pytest.raises(ReactParseError, match="合法 JSON"):
-        _model(channel).bind_tools([_TOOL]).invoke("q")
+        parse_react_tool_calls("<<TOOL:knowledge_base_search|{bad>>", {"knowledge_base_search"})
+
+
+def test_解析失败合成反馈工具调用_不终止运行() -> None:
+    """B1 步级语义：ReAct 解析失败不再向上抛（旧径落入 generic Exception → RUN_ERROR
+    "系统繁忙"），模型层合成 react_parse_feedback 调用，失败摘要进 args——桥接层以
+    {"error": ...} 观察喂回循环（与工具失败路径同形），模型据此修正输出。"""
+    channel = StubChannel([ChannelTurn(content="<<TOOL:knowledge_base_search|{bad>>")])
+    message = _model(channel).bind_tools([_TOOL]).invoke("q")
+
+    assert message.content == ""
+    assert message.tool_calls[0]["name"] == REACT_FEEDBACK_TOOL_NAME
+    assert "合法 JSON" in message.tool_calls[0]["args"]["error"]
+    assert message.tool_calls[0]["type"] == "tool_call"
+
+
+def test_调用未绑定工具_同样合成反馈调用() -> None:
+    channel = StubChannel([ChannelTurn(content="<<TOOL:web_search|{}>>")])
+    message = _model(channel).bind_tools([_TOOL]).invoke("q")
+
+    assert message.tool_calls[0]["name"] == REACT_FEEDBACK_TOOL_NAME
+    assert "未绑定工具" in message.tool_calls[0]["args"]["error"]
+    assert message.tool_calls[0]["id"].startswith("react_err_")  # 多次失败 id 可区分
 
 
 def test_未绑定工具时_协议标记按普通文本透传() -> None:

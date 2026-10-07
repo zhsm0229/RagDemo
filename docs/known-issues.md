@@ -33,7 +33,10 @@ curl 在 Windows Git Bash 直传中文文件名导致 id=9/10 等 title/original
 DELETE /api/documents/{id}（admin-only）：软删+级联停用 chunks+审计 document.delete；parsing 态 422；前端删除按钮解除置灰（二次确认）。设计见 docs/specs/2026-10-06-document-delete-review.md；测试 test_document_delete.py。
 
 ### 开放-8：前端零散项
-①KnowledgeGapCard 周切换失败时旧周数据残留（错误可见可重试，cosmetic）；②fmtTime 尚有 6 处内联未收敛（工具已备）；③前端 load 无 catch 的 unhandled rejection 统一收口；④全仓 lint 红来自并行会话未跟踪的 `frontend/e2e/`（trace 产物），归你会话收口（eslint ignore 或清理）。
+①KnowledgeGapCard 周切换失败时旧周数据残留（错误可见可重试，cosmetic）；②fmtTime 尚有 6 处内联未收敛（工具已备）；③~~前端 load 无 catch 的 unhandled rejection 统一收口~~（2026-10-07 OverviewView 已收口，余下随触碰偿还）；④~~全仓 lint 红来自并行会话未跟踪的 `frontend/e2e/`（trace 产物）~~（eslint ignore 已配置，M28 已修复）。
+
+### 已裁决-8a：LLM 流式无服务端重试（书面豁免，M2 收口）
+SSE 问答/生成链路的服务端流式调用不做进程内重试：**重试语义归属前端重新发起请求**（standards §3.6-51 / api.md §1.3 已明文，中断消息由 mark_interrupted 标失败、用户端可重试）。非流式 LLM 调用（embed/rerank/convert/ocr/记忆抽取）维持"超时 + 一次重试"纪律。本条为登记裁决，非缺陷。
 
 ### 开放-9：50MB 解析性能与 20 并发压测
 待真实语料与部署机（本机跳过）。
@@ -100,10 +103,10 @@ DELETE /api/documents/{id}（admin-only）：软删+级联停用 chunks+审计 d
 - **修复**：① 嵌入按字符预算分批（EMBED_BATCH_CHARS=1200，逐批调用、批级进度落库）；② 错误双轨：parse_error（用户文案）+ parse_error_detail（技术摘要：UpstreamError 原文/异常类型+消息+末栈帧，截 500 字）；③ logging.basicConfig 体系补齐，解析管道结构化日志（doc_id/阶段/耗时/批数）+ 失败 logger.exception；④ 迁移 0004：documents 加 parse_stage/parse_progress/parse_error_detail；⑤ 前端真实百分比进度条（旧数据回退不确定动画）、失败 tooltip 双行（友好原因+技术详情）；⑥ degraded 独立字段下发（deviations #24 兑现）。测试：tests/integration/test_ingest_progress.py + 前端 spec 更新；E2E DOC/SVC 回归通过。
 - **同类修复**：评测跑分 running 卡死无自愈——entrypoint 自愈补齐（遗留 running → failed，逐题已完成的明细保留）。
 
-### 开放-3（新）：E2E 与手工测试共库冲突——E2E_WIPE 清空业务表导致用户数据丢失
-- **事故**：2026-10-05 手工测试库上运行 E2E 回归，auth.setup 的 E2E_WIPE=1 TRUNCATE 全部业务表，用户已上传的 6 份文档被清空且无备份（backup.sh 从未执行）。
-- **缓解（已落地）**：manual-test-guide.md 明示"手工测试期间禁跑 E2E"；runbook 部署节建议生产机严禁运行 E2E 套件。
-- **根治方向（登记待办）**：E2E 切换独立库（deploy/docker-compose.e2e-isolated.yml 的 pg-e2e 已具备条件，需 playwright 配置接入）；手工测试前执行 backup.sh 快照。
+### 已根治-3（2026-10-06 A2 收口）：E2E 与手工测试共库冲突——E2E_WIPE 清空业务表导致用户数据丢失
+- **事故（记录保留）**：2026-10-05 手工测试库上运行 E2E 回归，auth.setup 的 E2E_WIPE=1 TRUNCATE 全部业务表，用户已上传的 6 份文档被清空且无备份（backup.sh 从未执行）。
+- **根治（2026-10-06 落地）**：E2E 全链路切独立隔离库——`npm run e2e:up` 三文件叠加（含 deploy/docker-compose.e2e-isolated.yml，app 指向 pg-e2e/rag_e2e，`npm run e2e:down` 收尾恢复试点栈）；auth.setup.ts 自举段种子前断言 DATABASE_URL 指向 rag_e2e，失败即中止；`app/db/e2e_seed.py` 在 E2E_WIPE=1 时校验库名（非隔离库 sys.exit 非零，无豁免开关）；CI e2e job 同步三文件栈 + 先 `app.db.seed` 后 `e2e_seed`（隔离库无 departments）。自此 E2E 对试点/业务库零接触。
+- **附带缓解（保留）**：manual-test-guide.md 明示"手工测试期间禁跑 E2E"；手工测试前执行 backup.sh 快照。
 
 
 ## 四-2、2026-10-05 文档原文件预览功能（已实施收口）

@@ -49,4 +49,11 @@ describe('parseSseFrames（SSE 文本帧解析纯函数）', () => {
     const { frames } = parseSseFrames('data: 1\n\n')
     expect(frames).toEqual([{ event: 'message', data: '1' }])
   })
+
+  it('同一事件多个 data: 行按 SSE 规范以换行拼接（M26），拼接结果可 JSON.parse', () => {
+    const { frames } = parseSseFrames('event: token\ndata: {"content":\ndata: "你好"}\n\n')
+    expect(frames).toEqual([{ event: 'token', data: '{"content":\n"你好"}' }])
+    // 换行是合法 JSON 空白：多行负载可正常解析（此前无分隔符粘连会解析失败）
+    expect(JSON.parse(frames[0]!.data)).toEqual({ content: '你好' })
+  })
 })

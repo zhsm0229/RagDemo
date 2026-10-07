@@ -25,6 +25,10 @@ class ToolSpec:
     description: str  # 用途描述（中文，模型可见，进 schema）
     dept_scoped: bool  # 部门过滤语义声明：True=强制继承调用者部门上下文
     audit_note: str  # 审计语义声明：审计落点与记录内容
+    # B2 观察不可信声明（可空）：非空时桥接层把它作为声明行前置到成功观察正文
+    # （<user_memory> 同款防注入思路——工具回传的外部资料是数据不是指令）；声明制
+    # 契约，随工具接入评审逐条核对。错误观察（{"error": ...}）不加声明。
+    observation_notice: str = ""
 
 
 @dataclass(frozen=True)

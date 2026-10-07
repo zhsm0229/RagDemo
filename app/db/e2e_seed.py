@@ -1,7 +1,11 @@
 r"""E2E 造数种子（幂等 upsert）：给 Playwright L1 层提供固定凭据与确定性数据。
 
 为什么不用 seed.py：主种子 admin 密码随机且首登强制改密（§5.2），自动化需要
-可复现凭据；本模块只服务 E2E 环境，严禁对任何真实库执行。
+可复现凭据。本模块两条路径的口径（2026-10-05 试点库被 E2E_WIPE 清空事故根治）：
+- 硬复位路径（E2E_WIPE=1 TRUNCATE）只允许 E2E 隔离库（rag_e2e / *_e2e 后缀），
+  main() 入口防呆强制，无豁免开关——豁免即事故重演；
+- 无 wipe 的幂等 upsert 路径不受库名限制：startup-check.sh 在试点库播 e2e-*
+  冒烟账号是有意设计（幂等、可重复装配、不清理业务数据）。
 
 - e2e-admin：管理员（全员部门，免首登改密）——常规冒烟身份
 - e2e-fresh：管理员，must_change_password=TRUE——AUTH-04 首登改密流专用
@@ -15,6 +19,7 @@ r"""E2E 造数种子（幂等 upsert）：给 Playwright L1 层提供固定凭�
 """
 
 import os
+import sys
 
 from sqlalchemy import func, select, text, update
 
@@ -78,6 +83,31 @@ def _upsert_seed_qa(session) -> None:
 
 def _admin_id(session) -> int:
     return session.scalars(select(User.id).where(User.username == "e2e-admin")).first()
+
+
+# E2E_WIPE 只允许打在 E2E 隔离库上（库名白名单 + *_e2e 后缀）；无豁免开关。
+_E2E_DB_WHITELIST = frozenset({"rag_e2e"})
+
+
+def _wipe_target_db() -> str:
+    """从 DATABASE_URL 解析库名（末段路径，忽略查询串；rstrip 处理尾斜杠）。"""
+    from app.core.config import get_settings
+
+    url = get_settings().database_url.rstrip("/")
+    return url.rsplit("/", 1)[-1].split("?", 1)[0]
+
+
+def _assert_wipe_isolated() -> None:
+    """E2E_WIPE 防呆：目标库不是 E2E 隔离库时非零退出（在触库之前拦截）。"""
+    db = _wipe_target_db()
+    if db not in _E2E_DB_WHITELIST and not db.endswith("_e2e"):
+        print(
+            f"[e2e-seed] 拒绝执行 E2E_WIPE：DATABASE_URL 指向「{db}」，不是 E2E 隔离库"
+            f"（允许：rag_e2e 或 *_e2e 后缀）。隔离栈用法见 frontend/package.json 的 "
+            f"e2e:up / e2e:down 与 deploy/e2e-visible.sh，禁止对试点/业务库跑硬复位。",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
 
 # 套级硬复位开关：E2E_WIPE=1 时清空业务表（文档/块/问答对/会话/消息/审计/评测），
@@ -165,6 +195,7 @@ def main() -> None:
     wipe = os.environ.get("E2E_WIPE") == "1"
     if wipe:
         assert set(_WIPE_TABLES.replace(",", " ").split()) <= _ALLOWED_WIPE, "TRUNCATE 清单越界"
+        _assert_wipe_isolated()  # 先验库后动手：隔离库名不对即中止，绝不 TRUNCATE 业务库
     with SessionLocal() as session, session.begin():
         if wipe:
             session.execute(text(f"TRUNCATE {_WIPE_TABLES}"))

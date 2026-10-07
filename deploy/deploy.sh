@@ -12,6 +12,17 @@ cd "$(dirname "$0")"
 
 log() { echo "[deploy] $*"; }
 
+# 发布红线（standards §13.2）：必须按 digest 引用发布——tag 可被覆盖推送、不可追溯，
+# digest 才是发布/回滚的锚点。rollback.sh 同口径。digest 清单与登记见 deploy/releases.md。
+case "$IMAGE_REF" in
+  *@sha256:*) ;;
+  *)
+    log "拒绝发布：IMAGE_REF 必须为 digest 形态（<镜像>@sha256:<摘要>），收到：$IMAGE_REF"
+    log "发布必须按 digest，参照 deploy/releases.md（同 digest 双 tag 登记口径）"
+    exit 1
+    ;;
+esac
+
 await_health() { # $1=容器名 $2=strict（1=超时中止发布；0=仅告警不阻塞，如 mineru/gotenberg）
   local name="$1" strict="${2:-1}" i
   for i in $(seq 1 90); do
@@ -30,9 +41,29 @@ await_health() { # $1=容器名 $2=strict（1=超时中止发布；0=仅告警�
 
 COMPOSE="docker compose -f docker-compose.prod.yml"
 
-# [0/6] 前置校验：内存分档 + mineru 镜像
-# 内存分档（MB 精度比较防整数截断误报，与 bootstrap.sh 体检同源阈值）：≥22G 三巨头可常驻；
-# <22G 时 mineru 延后拉起（pdf 解析前按需启停）。读不到限额（MemTotal=0）按低配档保守处理。
+# [0/6] 前置校验：发布红线 + 生产 .env.prod 安全四项 + 内存分档 + mineru 镜像
+# .env.prod 安全四项（与 bootstrap.sh 体检同源口径；内联实现为侵入最小方案）：
+# 发布动作直接消费 deploy/.env.prod（compose env_file），留占位密钥/缺省口令/演示桩上线=事故。
+ENV_FILE=".env.prod"
+if [ ! -f "$ENV_FILE" ]; then
+  log "缺少 $ENV_FILE（逐字段清单见 runbook §9）——从 .env.example 复制并填写部署必填项"
+  exit 1
+fi
+jwt=$(grep -E "^JWT_SECRET=" "$ENV_FILE" | tail -1 | cut -d= -f2- | tr -d '"' | tr -d ' ')
+if [ "${#jwt}" -lt 32 ]; then log "JWT_SECRET 缺失或长度不足 32（安全红线）"; exit 1; fi
+if echo "$jwt" | grep -q "please-generate"; then
+  log "JWT_SECRET 仍是 .env.example 占位值——必须换随机强密钥（openssl rand -base64 48）"
+  exit 1
+fi
+pgpwd=$(grep -E "^POSTGRES_PASSWORD=" "$ENV_FILE" | tail -1 | cut -d= -f2- | tr -d '"' | tr -d ' ')
+if [ "$pgpwd" = "rag" ]; then log "POSTGRES_PASSWORD 仍是缺省 rag——必须换强口令（安全红线）"; exit 1; fi
+test_mode=$(grep -E "^TEST_MODE=" "$ENV_FILE" | tail -1 | cut -d= -f2- | tr -d ' ')
+if [ "$test_mode" = "true" ]; then
+  log "生产发布 TEST_MODE 必须 false（演示桩回答对外是不可接受事故）"
+  exit 1
+fi
+# 内存分档（MB 精度比较防整数截断误报；与 bootstrap.sh 同源唯一常量 MEM_FULL_MB=22528）：
+# ≥22G 三巨头可常驻；<22G 时 mineru 延后拉起（pdf 解析前按需启停）。读不到限额（MemTotal=0）按低配档保守处理。
 MEM_FULL_MB=22528
 MEM_TOTAL=$(docker info --format '{{.MemTotal}}' 2>/dev/null || echo 0)
 MEM_MB=$((MEM_TOTAL / 1024 / 1024))
@@ -108,7 +139,9 @@ curl -sf http://localhost/healthz >/dev/null
 curl -sf -o /dev/null http://localhost/
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost/api/auth/login \
   -H 'Content-Type: application/json' -d '{"username":"__smoke__","password":"__smoke__"}')
-if [ "$code" != "401" ]; then log "登录接口异常：HTTP $code"; exit 1; fi
+# 429=登录滑动窗口限流（60s/10 次·IP+用户名，runbook §7；发布演练连续冒烟易触发）——
+# 端点活着即探活通过，不再中止发布（M23：发布冒烟目标是探活，不是压测登录成功率）。
+if [ "$code" != "401" ] && [ "$code" != "429" ]; then log "登录接口异常：HTTP $code"; exit 1; fi
 # gotenberg 连通（老格式转换 F-1015；未部署时跳过——老格式功能降级知情即可）
 if docker ps --format '{{.Names}}' | grep -q ragdemo-gotenberg; then
   docker exec ragdemo-gotenberg curl -sf http://localhost:3000/health >/dev/null \

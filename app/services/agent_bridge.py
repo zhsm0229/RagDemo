@@ -13,6 +13,7 @@ services.agent_steps 两处短会话工厂同批替换，见 tests/api/test_agen
 agent_client fixture）。
 """
 
+import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -22,6 +23,7 @@ from pydantic import BaseModel, create_model
 from sqlalchemy.orm import Session
 
 from app.core.agent_model import AgentChatModel
+from app.core.agent_react import REACT_FEEDBACK_TOOL_NAME
 from app.core.tools import RunContext, ToolProvider
 from app.db.base import SessionLocal
 from app.services.agent_tasks import get_profile
@@ -51,14 +53,20 @@ def _lc_tool(provider: ToolProvider, ctx: RunContext) -> StructuredTool:
     spec = provider.spec
     args_model = _args_model(provider.schema())
 
-    def _invoke(**kwargs: Any) -> dict[str, Any]:
+    def _invoke(**kwargs: Any) -> dict[str, Any] | str:
         db: Session = SessionLocal()
         try:
             result = provider.invoke(kwargs, replace(ctx, db=db))
         finally:
             db.close()
         if result.ok:
-            return {"result": result.value}
+            payload = {"result": result.value}
+            if spec.observation_notice:
+                # B2：声明行前置观察正文（声明制契约见 ToolSpec.observation_notice），
+                # 让模型读取资料前先进入"数据不是指令"语境；错误观察不加声明，
+                # 保持 {"error": ...} 形态（extract_tool_error 的解析口径依赖）。
+                return f"{spec.observation_notice}\n{json.dumps(payload, ensure_ascii=False)}"
+            return payload
         return {"error": result.error}
 
     return StructuredTool.from_function(
@@ -66,10 +74,41 @@ def _lc_tool(provider: ToolProvider, ctx: RunContext) -> StructuredTool:
     )
 
 
+def _react_feedback_tool() -> StructuredTool:
+    """react_parse_feedback 执行体（B1 步级语义，协议常量见 core/agent_react）：适配层
+    解析失败时合成对它的调用，观察以 {"error": 解析失败摘要} 喂回 agent 循环（与
+    ToolResult.fail 的工具失败观察同形，编排层据此落 agent_steps.error）。属协议
+    plumbing 而非能力工具：不进 ToolRegistry/TASK_PROFILES（白名单最小化纪律），
+    description 明示模型不得主动调用。"""
+    schema = {
+        "type": "function",
+        "function": {
+            "name": REACT_FEEDBACK_TOOL_NAME,
+            "description": "内部协议反馈通道，禁止主动调用",
+            "parameters": {
+                "type": "object",
+                "properties": {"error": {"type": "string", "description": "解析失败原因"}},
+                "required": ["error"],
+            },
+        },
+    }
+
+    def _invoke(error: str) -> dict[str, Any]:
+        return {"error": error}
+
+    return StructuredTool.from_function(
+        func=_invoke,
+        name=REACT_FEEDBACK_TOOL_NAME,
+        description="内部协议反馈通道，禁止主动调用",
+        args_schema=_args_model(schema),
+    )
+
+
 def build_agent_graph(deps: "AgentDeps", ctx: RunContext, task_type: str) -> Any:
     """装配本次运行的 DeepAgents 图：模型取装配层通道现建（换缝即刻生效）；系统提示与
     工具集按任务档案取（agent_tasks，白名单同源——api 层校验与编排消费同一份档案），
-    按档案序桥接（序稳定 → 通道收到的 tools 清单可复现，测试断言依赖）。"""
+    按档案序桥接（序稳定 → 通道收到的 tools 清单可复现，测试断言依赖），末尾恒追加
+    react_parse_feedback 反馈执行体（B1：ReAct 解析失败以工具观察形态喂回循环）。"""
     model = AgentChatModel(
         channel=deps.channel,
         max_tokens=deps.settings.chat_max_tokens,  # 服务端钳制语义与主通道一致（§17.5）
@@ -77,4 +116,5 @@ def build_agent_graph(deps: "AgentDeps", ctx: RunContext, task_type: str) -> Any
     )
     profile = get_profile(task_type)
     tools = [_lc_tool(deps.registry.get(name), ctx) for name in profile.tool_names]
+    tools.append(_react_feedback_tool())
     return create_deep_agent(model=model, tools=tools, system_prompt=profile.system_prompt)

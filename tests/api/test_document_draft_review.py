@@ -188,15 +188,20 @@ def test_approve_non_draft_422(client, session, test_mode, sandbox_storage):
     assert "草稿" in resp.json()["message"]
 
 
-def test_double_review_422(client, session, test_mode, sandbox_storage):
-    """重复审核 → 第二次 422/1003（非法迁移 fail-fast）。"""
+def test_double_review_422(client, session, test_mode, sandbox_storage, monkeypatch):
+    """重复审核 → 第二次 422/1003（非法迁移 fail-fast）；入库管道恰触发一次（B3：
+    双管理员并发双触发即双份解析编排，条件 UPDATE + rowcount 保证只有首次成功路径
+    到达 api 层管道触发点，mock assert_called_once 收口）。"""
     _make_user(session, "dadmin", "DraftAdmin#2026", role="admin")
     assert login_as(client, "dadmin", "DraftAdmin#2026").status_code == 200
     doc = _create_draft_via_service(session, "重复")
+    mocked = MagicMock()
+    monkeypatch.setattr("app.api.document_admin.process_document", mocked)
     assert client.post(f"/api/documents/{doc.id}/draft/approve").status_code == 200
     resp = client.post(f"/api/documents/{doc.id}/draft/approve")
     assert resp.status_code == 422
     assert "待审核" in resp.json()["message"]
+    mocked.assert_called_once()  # 两次请求，管道恰一次
 
 
 # ---------------------------------------------------------------------------

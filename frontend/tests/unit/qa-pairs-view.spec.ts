@@ -6,8 +6,9 @@
  * 共享 mock 后端见 helpers/qa-pairs-mock.ts（全链路走真 client.ts）。
  */
 import { flushPromises, type VueWrapper } from '@vue/test-utils'
-import { DOMWrapper } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ElMessageBox } from 'element-plus'
+import type { MessageBoxData } from 'element-plus'
 import type { UploadFile } from 'element-plus'
 import {
   deleteQaPair,
@@ -52,6 +53,10 @@ beforeEach(() => {
 
 afterEach(() => {
   unmountAllQaPairs()
+  ElMessageBox.close() // 复位 MessageBox 单例（队列语义：未关的弹窗会扣住下一个调用）
+  document.body
+    .querySelectorAll('.el-overlay, .el-message-box, .el-message')
+    .forEach((n) => n.remove())
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
   vi.clearAllMocks()
@@ -117,6 +122,23 @@ describe('列表加载与渲染', () => {
     const wrapper = await mountQaPairs()
     expect(wrapper.text()).toContain('还没有问答对')
     expect(wrapper.findAll('button').some((b) => b.text().includes('Excel 批量导入'))).toBe(true)
+  })
+
+  it('筛选无结果空态：显示"没有匹配筛选条件的问答对"+清除筛选，回真空态（B9）', async () => {
+    // 全程 0 行数据：真空态 → 筛选无结果 → 清除筛选回真空态
+    const wrapper = await mountQaPairs()
+    expect(wrapper.text()).toContain('还没有问答对')
+    await wrapper.find('input[placeholder="问题关键字"]').setValue('不存在的关键字')
+    await clickBtn(wrapper.findAll('button'), '查询')
+    await flushPromises()
+    expect(wrapper.find('[data-test="qa-empty-filtered"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('没有匹配筛选条件的问答对')
+    expect(wrapper.text()).not.toContain('还没有问答对')
+    // 清除筛选 → 回真空态分支
+    await wrapper.find('[data-test="qa-empty-filtered"] button').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('还没有问答对')
+    expect(lastListCall()).toBe('/api/admin/qa-pairs?page=1&pageSize=20')
   })
 
   it('工具栏对照原型：仅有 下载导入模板/Excel 批量导入，无"新建问答对"按钮（后端无单条新建端点）', async () => {
@@ -217,8 +239,12 @@ describe('编辑对话框', () => {
   })
 })
 
-describe('删除（popconfirm 二次确认）', () => {
-  it('确认后 DELETE → 行消失；删空当前页回退第 1 页（§22.3）', async () => {
+describe('删除（ElMessageBox 二次确认，M33）', () => {
+  it('确认后 DELETE → 行消失；删空当前页回退第 1 页（§22.3）；文案对齐 DocumentsView 审计口径', async () => {
+    // jsdom 下 MessageBox 过渡永不收尾：照 documents-view 惯例在边界 mock（弹窗渲染是 EP 自身职责）
+    const confirmSpy = vi
+      .spyOn(ElMessageBox, 'confirm')
+      .mockResolvedValue('confirm' as MessageBoxData)
     // 21 条 → 第 2 页只剩 1 条；删除该条应回退到第 1 页
     backend.qaPairs = Array.from({ length: 21 }, (_, i) => qaItem({ question: `问答${i}` }))
     const lastId = backend.qaPairs[backend.qaPairs.length - 1]!.id
@@ -233,21 +259,30 @@ describe('删除（popconfirm 二次确认）', () => {
       .findAll('button')
       .find((b) => b.text() === '删除')!
       .trigger('click')
-    // popconfirm 内容 teleport 到 body：等"确定"按钮出现后点击
-    let confirmBtn: HTMLButtonElement | null = null
-    await waitFor(() => {
-      confirmBtn =
-        [...document.querySelectorAll<HTMLButtonElement>('.el-popconfirm__action button')].find(
-          (b) => b.textContent?.trim() === '确定',
-        ) ?? null
-      return confirmBtn !== null
-    }, 'popconfirm 确定按钮渲染')
-    await new DOMWrapper(confirmBtn!).trigger('click')
     await flushPromises()
 
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    const [message, title] = confirmSpy.mock.calls[0]!
+    expect(String(message)).toContain('软删保留审计')
+    expect(String(message)).toContain('问答20')
+    expect(String(title)).toBe('删除问答对')
     expect(backend.deleteCalls).toEqual([lastId])
     await waitFor(() => lastListCall().includes('page=1'), '删空回退第 1 页')
     expect(wrapper.findAll('.el-table__row')).toHaveLength(20)
+  })
+
+  it('取消确认不发 DELETE', async () => {
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('cancel' as MessageBoxData)
+    backend.qaPairs = [qaItem()]
+    const wrapper = await mountQaPairs()
+    await wrapper
+      .find('.el-table__row')
+      .findAll('button')
+      .find((b) => b.text() === '删除')!
+      .trigger('click')
+    await flushPromises()
+    expect(backend.deleteCalls).toHaveLength(0)
+    expect(wrapper.findAll('.el-table__row')).toHaveLength(1)
   })
 })
 

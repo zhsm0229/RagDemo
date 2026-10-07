@@ -1,13 +1,14 @@
 r"""长期记忆自动闭环 api 测试（F-210 §3.3/§3.4，agent-evolution 工单 03）：注入生效面与
-缓存键分叉、后台抽取落库读回、cache/拒答/中断/开关关闭各路径零变化。
+缓存键分叉、后台抽取落库读回、cache 命中/中断/开关关闭各路径零变化、拒答轮也抽取。
 
-机制口径：端点对 qa/rag 计划挂 BackgroundTasks（cache/refuse 不挂），任务体自管
-SessionLocal 短会话读回收尾后的回答再抽取——chat_client 已把 memory_extract 的
-SessionLocal 指向测试连接（tests/api/conftest.py），TestClient 在响应体发完后同步
-执行后台任务，client.post 返回即可断言终态；抽取通道 LLM 经 monkeypatch
-memory_extract.build_llm 替换（独立实例设计：与问答主链路 deps.llm 的调用计数互不可见）。
-断言精确：同部门有/无记忆两用户同题不串（键分叉）、注入非空才分叉（无记忆保持旧键
-命中）、qa 直答生成提示零 <user_memory>、拒答不抽取不生成。
+机制口径：端点对 qa/rag/refuse 计划挂 BackgroundTasks（cache 不挂，A7：拒答轮用户
+问题同样可能携带画像信息），任务体自管 SessionLocal 短会话读回收尾后的回答再抽取
+——chat_client 已把 memory_extract 的 SessionLocal 指向测试连接（tests/api/conftest.py），
+TestClient 在响应体发完后同步执行后台任务，client.post 返回即可断言终态；抽取通道
+LLM 经 monkeypatch memory_extract.build_llm 替换（独立实例设计：与问答主链路
+deps.llm 的调用计数互不可见）。断言精确：同部门有/无记忆两用户同题不串（键分叉）、
+注入非空才分叉（无记忆保持旧键命中）、qa 直答生成提示零 <user_memory>、拒答轮抽取
+以声明文字替代回答段且主链路零生成调用。
 """
 
 import hashlib
@@ -287,20 +288,32 @@ def test_cache_hit_and_interrupted_skip_extraction(chat_client, session, extract
     assert session.scalars(select(UserMemory)).all() == []  # 全程零入库
 
 
-def test_refuse_skips_extraction_and_generation(chat_client, session, extraction_stub) -> None:
-    """空知识库拒答：零生成调用、零抽取任务（端点不对 refuse 计划挂任务）。"""
-    make_user(session, "refuse-skip-user")  # 不播种任何 chunk：检索恒空 → refuse
-    assert login_as(chat_client, "refuse-skip-user", "right-one").status_code == 200
+def test_refuse_round_extracts_from_question_but_never_generates(
+    chat_client, session, extraction_stub
+) -> None:
+    """A7 拒答轮也抽取：任务体拿到合法 JSON 时画像落库溯源到本轮 assistant 消息；
+    主链路仍零生成调用（refuse 不调 LLM、不写缓存、逐字 REFUSAL_TEXT 下发）。"""
+    user = make_user(session, "refuse-extract-user")  # 不播种任何 chunk：检索恒空 → refuse
+    recording = _RecordingLLM()  # 主链路替身：观测 refuse 轮是否有生成调用
+    app.state.chat_deps.llm = recording
+    extraction_stub["llm"] = StubLLMProvider(chunks=('["倾向简洁回答"]',))
+    assert login_as(chat_client, "refuse-extract-user", "right-one").status_code == 200
 
-    resp = post_chat(chat_client, QUESTION)
+    resp = post_chat(chat_client, "记住我喜欢简洁回答")
 
     assert resp.status_code == 200
     events = parse_sse(resp.text)
     assert [name for name, _ in events] == ["citations", "token", "done"]
     assert events[1][1]["content"] == REFUSAL_TEXT
-    assert extraction_stub["count"] == 0
+    assert recording.stream_calls == 0  # 拒答零生成（A7 只影响抽取通道，不动生成面）
+    assert extraction_stub["count"] == 1  # 拒答轮挂了抽取任务
     session.expire_all()
-    assert session.scalars(select(UserMemory)).all() == []
+    assistant = session.scalars(
+        select(Message).where(Message.role == "assistant").order_by(Message.id)
+    ).all()[-1]
+    memory = session.scalars(select(UserMemory).where(UserMemory.user_id == user.id)).one()
+    assert memory.content == "倾向简洁回答"
+    assert memory.source_message_id == assistant.id  # 溯源指向本轮 assistant 消息
 
 
 def test_extraction_failure_never_breaks_chat_response(

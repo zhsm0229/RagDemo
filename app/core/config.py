@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     agent_model_react_fallback: bool = (
         True  # 模型无原生 tool-calling 时启用 ReAct 文本协议兜底解析（app/core/agent_model.py）
     )
+    agent_run_stale_minutes: int = (
+        15  # agent 运行幽灵清扫阈值（分钟，A4）：running 且 started_at 超过此时长的
+        # agent_runs 视为进程中断遗留的幽灵行，由定时任务置 failed（error=运行超时被清扫）
+    )
     test_mode: bool = False
 
 

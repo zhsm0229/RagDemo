@@ -231,10 +231,12 @@ function onCiteClick(n: number): void {
         >引用面板</el-button
       >
       <div ref="msgsEl" class="msgs">
-        <el-empty
-          v-if="messages.length === 0"
-          description="问点什么吧，例如：差旅报销标准是多少？"
-        />
+        <el-empty v-if="messages.length === 0" description="问点什么吧，例如：差旅报销标准是多少？">
+          <!-- 部门可见性口径常驻空态（B12）：提问前先知道检索范围，减少无效等待 -->
+          <span class="dept-hint" data-test="chat-empty-dept-hint"
+            >问答仅检索你所在部门与通用知识库</span
+          >
+        </el-empty>
         <MessageBubble
           v-for="m in messages"
           :key="m.key"
@@ -298,5 +300,9 @@ function onCiteClick(n: number): void {
   flex: 1;
   overflow: auto;
   padding: 16px 20px;
+}
+.dept-hint {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 </style>

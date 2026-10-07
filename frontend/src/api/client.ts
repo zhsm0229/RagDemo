@@ -6,6 +6,8 @@
  * - code !== 0 抛 ApiClientError(code, message, data)，默认 ElMessage.error 兜底，
  *   页面要内联展示错误（如登录页 §22.2）时传 silent: true 关掉；
  * - body 传 FormData 时按 multipart 发送（文件上传），不设 Content-Type；
+ * - 请求默认挂 30s AbortSignal.timeout（M27）：显式传 signal 时不覆盖；chat/agent
+ *   流式与文件下载不走本封装，不受影响；
  * - SSE 与文件下载不走本封装（text/event-stream / 字节流无统一信封）；
  * - HTTP 401 或业务码 2003（W4 终审 I 项③）触发全局未授权通道：经装配层注册的
  *   onUnauthorized 回调清登录态并回登录页（本模块不感知路由，避免 client→router 循环依赖）。
@@ -19,6 +21,8 @@ const API_PREFIX = '/api'
 export const NETWORK_ERROR_CODE = -1
 /** 用户中断（AbortController） */
 export const ABORTED_CODE = -2
+/** 默认请求超时（M27：fetch 无超时则挂死页面交互；流式调用不走本封装不受影响） */
+export const REQUEST_TIMEOUT_CODE = -3
 /** 响应体非统一信封（网关 502 页面等），按系统兜底码呈现 */
 export const BAD_RESPONSE_CODE = 5000
 /** 未登录 / 令牌无效或过期 / 账号已禁用（app/core/errors.py ERR_UNAUTHENTICATED） */
@@ -26,7 +30,11 @@ export const UNAUTHORIZED_CODE = 2003
 
 export const NETWORK_ERROR_MESSAGE = '网络异常，请检查网络后重试'
 export const ABORTED_MESSAGE = '请求已取消'
+export const REQUEST_TIMEOUT_MESSAGE = '请求超时，请稍后重试'
 export const FALLBACK_MESSAGE = '系统繁忙，请稍后重试'
+
+/** 默认请求超时（M27）：30s 覆盖管理面全部列表/写操作（后端接口 P95 << 1s） */
+export const REQUEST_TIMEOUT_MS = 30_000
 
 export class ApiClientError extends Error {
   readonly code: number
@@ -84,7 +92,12 @@ async function parseEnvelope(res: Response): Promise<ApiResponse<unknown> | null
 }
 
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { method = 'GET', body, signal, silent = false } = options
+  const { method = 'GET', body, silent = false } = options
+
+  // 默认 30s 超时（M27）：调用方显式传 signal 时不覆盖（自行管理取消语义）；
+  // chat/agent 流式调用不走本封装（streamChat/streamAgentRun 自带 AbortController），
+  // 文件上传（multipart）同样可用此默认超时——试点文件体积上限内 30s 充裕
+  const signal = options.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS)
 
   // FormData（multipart 上传）不设 Content-Type：boundary 由浏览器生成，手工设置会缺 boundary
   const isForm = body instanceof FormData
@@ -102,6 +115,11 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     // fetch 仅在网络层失败/中断时 reject；HTTP 错误状态仍走下方统一解包
     if (error instanceof DOMException && error.name === 'AbortError') {
       throw new ApiClientError(ABORTED_CODE, ABORTED_MESSAGE)
+    }
+    // AbortSignal.timeout 到点以 TimeoutError 中止（区别于用户 AbortError）
+    if (error instanceof DOMException && error.name === 'TimeoutError') {
+      if (!silent) ElMessage.error(REQUEST_TIMEOUT_MESSAGE)
+      throw new ApiClientError(REQUEST_TIMEOUT_CODE, REQUEST_TIMEOUT_MESSAGE)
     }
     if (!silent) ElMessage.error(NETWORK_ERROR_MESSAGE)
     throw new ApiClientError(NETWORK_ERROR_CODE, NETWORK_ERROR_MESSAGE)

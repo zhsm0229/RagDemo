@@ -23,11 +23,12 @@ const fetchMock = vi.fn()
 const T0 = '2026-09-28T10:00:00+08:00'
 
 /** 相对当天偏移 N 天的 ISO 日期（YYYY-MM-DD）：待过期/已到期 fixture 用，
- * 硬编码日期跨月后断言失效（2026-10-02 事故：'2026-10-02' 写死于 9 月用例）。 */
+ * 硬编码日期跨月后断言失效（2026-10-02 事故：'2026-10-02' 写死于 9 月用例）。
+ * 用本地日期（M39 同口径）：toISOString 是 UTC 口径，东八区 0-8 点会偏一天。 */
 function isoDaysFromToday(offset: number): string {
   const d = new Date()
   d.setDate(d.getDate() + offset)
-  return d.toISOString().slice(0, 10)
+  return d.toLocaleDateString('sv')
 }
 
 const overviewData = {
@@ -224,7 +225,8 @@ describe('统计卡与 days 切换', () => {
       '/api/admin/health',
     ])
     const text = wrapper.text()
-    expect(text).toContain('今日提问')
+    expect(text).toContain('近1天提问') // M31：与切档按钮同口径，不用"今日"
+    expect(text).not.toContain('今日提问')
     expect(text).toContain('128')
     expect(text).toContain('命中率（非拒答）')
     expect(text).toContain('87.5')
@@ -355,10 +357,34 @@ describe('语料健康度面板', () => {
     const expired = wrapper.find('.expired')
     expect(expired.exists()).toBe(true)
     expect(expired.text()).toBe(isoDaysFromToday(-7))
-    // 零召回/待过期行点击 → 跳转文档管理（P3）
+    // 零召回/待过期行点击 → 带 keyword 跳转文档管理（M42，直达目标文档）
     const rows = wrapper.findAll('.el-table__row')
     await rows[rows.length - 1]!.trigger('click')
+    expect(pushSpy).toHaveBeenCalledWith({
+      name: 'kb-documents',
+      query: { keyword: '已到期未下线文档' },
+    })
+    // 待确认"去处理"跳转不带条件（M42 口径：进页即可见，无需关键字）
+    await wrapper
+      .findAll('button')
+      .find((b) => b.text() === '去处理')!
+      .trigger('click')
     expect(pushSpy).toHaveBeenCalledWith({ name: 'kb-documents' })
+  })
+
+  it('健康度接口失败：页面不崩、健康面板隐藏、无 unhandled rejection（M36）', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url) === '/api/admin/health') return errEnvelope(500, '健康服务暂不可用')
+      return routeFetch(String(url))
+    })
+    const wrapper = await mountOverview()
+    expect(wrapper.text()).not.toContain('语料健康度') // health=null → 面板隐藏
+    expect(wrapper.text()).toContain('近1天提问') // 其余区块正常
+    wrapper.unmount()
+    // M36：挂载期被吞掉的 rejection 不再冒泡为 unhandled rejection（vitest 会判红）
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    consoleError.mockRestore()
   })
 })
 

@@ -40,7 +40,8 @@ log "2/4 拉起 tei-rerank（此时加载，避免与 embed 互挤）"
 docker compose up -d tei-rerank
 await_health ragdemo-tei-rerank
 
-# mineru 仅文档解析需要（3.15g 大户）；默认不随栈拉起（8G 内存按需启停，12G 内存可放开）
+# mineru 仅文档解析需要（3.15g 大户）；默认不随栈拉起（8G 内存按需启停；是否常驻由
+# WITH_MINERU 决定——≥22G 全常驻，阈值唯一常量 MEM_FULL_MB=22528，与 bootstrap.sh/deploy.sh 同源）
 if [ "${WITH_MINERU:-0}" = "1" ]; then
   log "  WITH_MINERU=1：拉起 mineru"
   docker compose up -d mineru
@@ -54,6 +55,25 @@ docker compose up -d app
 await_health ragdemo-app
 
 log "4/4 冒烟提问（embed→检索→rerank→LLM 全链，CPU rerank 慢，最长等 3 分钟）"
+# —— pilot-only 守卫：本段会向目标库播 E2E 冒烟账号并跑冒烟问答，仅限试点链路执行 ——
+# 生产标志（任一命中即视为生产/业务环境）：① deploy/.env.prod 存在；② 当前 compose 渲染
+# 的 app 服务为镜像直拉、无 build 段（prod compose 引 ghcr 镜像，pilot 基础 compose 自建）。
+# 命中且未显式 PILOT_CONFIRM=1 → 拒绝执行种子并中止；显式放行 = 放行人自行接受
+# e2e-* 测试账号与冒烟问答写入该库。
+PROD_FLAG=0
+if [ -f deploy/.env.prod ]; then PROD_FLAG=1; fi
+if [ "$PROD_FLAG" -eq 0 ]; then
+  APP_RENDER=$(docker compose config 2>/dev/null | sed -n '/^  app:/,/^  [a-z][a-z-]*:/p' || true)
+  if [ -n "$APP_RENDER" ] && ! echo "$APP_RENDER" | grep -q "build:"; then PROD_FLAG=1; fi
+fi
+if [ "$PROD_FLAG" = "1" ] && [ "${PILOT_CONFIRM:-0}" != "1" ]; then
+  log "检测到生产环境标志（deploy/.env.prod 或 prod compose 形态），拒绝在业务库播 E2E 冒烟账号，中止。"
+  log "确为试点链路且接受测试账号入库时，显式 PILOT_CONFIRM=1 重新执行本脚本；生产发布走 deploy.sh，不经本脚本。"
+  exit 1
+fi
+if [ "$PROD_FLAG" = "1" ]; then
+  log "PILOT_CONFIRM=1：已确认试点链路，继续执行（生产机请勿放行）。"
+fi
 # 冒烟前种子账号（全新机无账号登录必 401；e2e_seed 为幂等 upsert，重复装配安全）。
 # 种子只在试点装配链路执行：e2e 测试账号不进生产（prod 发布走 deploy.sh，不经本段）
 log "  种子冒烟账号（app.db.e2e_seed，幂等；口令对齐 SMOKE_PASS）"

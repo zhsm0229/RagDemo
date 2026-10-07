@@ -103,6 +103,60 @@ describe('列表加载与渲染', () => {
     expect(wrapper.findAll('button').some((b) => b.text().includes('上传第一份文档'))).toBe(true)
   })
 
+  it('加载失败空态显示"加载失败，点击重试"而非"还没有"，重试成功恢复列表（B11）', async () => {
+    backend.docs = [docItem()]
+    fetchMock.mockImplementation((url: string, init: RequestInit = {}) => {
+      if (String(url).startsWith('/api/documents?') && (init.method ?? 'GET') === 'GET') {
+        return Promise.reject(new TypeError('Network Error'))
+      }
+      return routeFetch(String(url), init)
+    })
+    const wrapper = await mountDocuments()
+    expect(wrapper.find('[data-test="documents-load-error"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('加载失败，点击重试')
+    expect(wrapper.text()).not.toContain('还没有文档') // 失败 ≠ 没有数据
+    expect(wrapper.text()).not.toContain('没有匹配筛选条件的文档')
+    // 后端恢复后点重试：列表恢复、错误态退场
+    fetchMock.mockImplementation(routeFetch)
+    await wrapper.find('[data-test="documents-load-error"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="documents-load-error"]').exists()).toBe(false)
+    expect(wrapper.findAll('.el-table__row')).toHaveLength(1)
+  })
+
+  it('筛选无结果空态：显示"没有匹配筛选条件的文档"+清除筛选；真空态保持原引导（B9）', async () => {
+    // 全程 0 行数据：真空态 → 筛选无结果 → 清除筛选回真空态（文案与 CTA 随分支切换）
+    const wrapper = await mountDocuments()
+    expect(wrapper.text()).toContain('还没有文档')
+    expect(wrapper.findAll('button').some((b) => b.text().includes('上传第一份文档'))).toBe(true)
+
+    await wrapper.find('input[placeholder="标题关键字"]').setValue('不存在的关键字')
+    await wrapper
+      .findAll('button')
+      .find((b) => b.text() === '查询')!
+      .trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="documents-empty-filtered"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('没有匹配筛选条件的文档')
+    expect(wrapper.text()).not.toContain('还没有文档')
+    expect(wrapper.findAll('button').some((b) => b.text().includes('上传第一份文档'))).toBe(false)
+
+    // 清除筛选 → 回真空态分支（文案 + 上传引导按钮）
+    await wrapper.find('[data-test="documents-empty-filtered"] button').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('还没有文档')
+    expect(wrapper.findAll('button').some((b) => b.text().includes('上传第一份文档'))).toBe(true)
+  })
+
+  it('部门列挂检索可见性提示 tooltip（B12）', async () => {
+    backend.docs = [docItem()]
+    const wrapper = await mountDocuments()
+    const contents = wrapper
+      .findAllComponents({ name: 'ElTooltip' })
+      .map((t) => String(t.props('content')))
+    expect(contents.some((c) => c.includes('service/hr 部门专属文档不参与你的问答检索'))).toBe(true)
+  })
+
   it('状态列渲染矩阵：就绪/排队中/解析中(进度条)/失败(悬浮原因+重试)逐一对应', async () => {
     backend.docs = [
       docItem({ title: 'A就绪', status: 'ready' }),
@@ -537,6 +591,38 @@ describe('zip 批量导入对话框（T3 契约）', () => {
     await flushPromises()
     expect(dialog.emitted('imported')).toHaveLength(2)
   })
+
+  it('同会话内二次选包即清空上次汇总，避免旧结果与新包混淆（M34）', async () => {
+    backend.zipSummary = {
+      results: [{ filename: 'a.pdf', status: 'accepted', documentId: 101 }],
+      accepted: 1,
+      rejected: 0,
+      skipped: 0,
+    }
+    const visible = ref(false)
+    const harness = mount(
+      defineComponent({ setup: () => () => h(ZipImportDialog, { visible: visible.value }) }),
+      { global: { plugins: [[ElementPlus, { locale: zhCn }]] } },
+    )
+    await flushPromises()
+    visible.value = true
+    await flushPromises()
+    const dialog = harness.findComponent(ZipImportDialog)
+    dialog.vm.handleFile({ name: '批次01.zip', raw: makeFile('批次01.zip') } as UploadFile)
+    await flushPromises()
+    await dialog
+      .findAll('button')
+      .find((b) => b.text() === '开始导入')!
+      .trigger('click')
+    await flushPromises()
+    expect(dialog.text()).toContain('共 1 个条目：入库 1 · 拒绝 0 · 跳过 0')
+
+    // 不关弹窗直接换包：上次汇总立即清空（换包完成前不残留旧结果误导确认）
+    dialog.vm.handleFile({ name: '批次02.zip', raw: makeFile('批次02.zip') } as UploadFile)
+    await flushPromises()
+    expect(dialog.text()).not.toContain('共 1 个条目')
+    expect(dialog.findComponent({ name: 'ElTable' }).exists()).toBe(false)
+  })
 })
 
 describe('状态轮询（§8.4）', () => {
@@ -663,6 +749,39 @@ describe('草稿审核（agent-evolution #05）', () => {
     expect(wrapper.find('.el-table__row').text()).toContain('待审核')
   })
 
+  it('审核请求在飞防连点：确认框挂起期间再次点击不重复弹确认、按钮禁用（B8）', async () => {
+    let resolveConfirm: (value: MessageBoxData) => void = () => undefined
+    const confirmSpy = vi.spyOn(ElMessageBox, 'confirm').mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveConfirm = resolve
+        }),
+    )
+    backend.docs = [
+      docItem({ sourceType: 'draft', reviewStatus: '待审核', status: 'pending', isActive: false }),
+    ]
+    const wrapper = await mountDocuments()
+    const approveBtn = () =>
+      wrapper
+        .find('.el-table__row')
+        .findAll('button')
+        .find((b) => b.text() === '通过')!
+    const firstClick = approveBtn().trigger('click')
+    await flushPromises()
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(approveBtn().attributes('disabled')).toBeDefined() // 在飞禁用
+    await approveBtn().trigger('click')
+    await flushPromises()
+    expect(confirmSpy).toHaveBeenCalledTimes(1) // 重复点击被吞
+    resolveConfirm('confirm' as MessageBoxData)
+    await firstClick
+    await flushPromises()
+    expect(backend.draftApproveCalls).toHaveLength(1)
+    // 通过后刷新：行转"已通过"，通过按钮随 v-if 消失（ actingId 已在 finally 解锁）
+    expect(wrapper.find('.el-table__row').text()).toContain('已通过')
+    expect(approveBtn()).toBeUndefined()
+  })
+
   it('驳回：prompt 必填原因（文案含永不入库+审计）；空原因视图内联拦截不发请求；填原因调 reject 且首尾空白被剔除', async () => {
     const promptSpy = vi
       .spyOn(ElMessageBox, 'prompt')
@@ -718,7 +837,9 @@ describe('草稿审核（agent-evolution #05）', () => {
 
 describe('去审核入口 query 预填（agent-evolution #08 模板生成落点）', () => {
   /** 带 router 上下文挂载（useRoute 预填依赖 route.query）；直挂无 router 时预填静默跳过 */
-  async function mountDocumentsAtQuery(query: Record<string, string>): Promise<VueWrapper> {
+  async function mountDocumentsAtQuery(
+    query: Record<string, string>,
+  ): Promise<{ wrapper: VueWrapper; router: ReturnType<typeof createRouter> }> {
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [
@@ -732,12 +853,12 @@ describe('去审核入口 query 预填（agent-evolution #08 模板生成落点�
       global: { plugins: [[ElementPlus, { locale: zhCn }], router] },
     })
     await flushPromises()
-    return wrapper
+    return { wrapper, router }
   }
 
   it('sourceType/reviewStatus 合法值预填筛选并随首拉生效（#05 同字段口径），与草稿审核快捷态联动', async () => {
     backend.docs = [docItem({ sourceType: 'draft', reviewStatus: '待审核' })]
-    const wrapper = await mountDocumentsAtQuery({ sourceType: 'draft', reviewStatus: '待审核' })
+    const { wrapper } = await mountDocumentsAtQuery({ sourceType: 'draft', reviewStatus: '待审核' })
     try {
       expect(lastListCall()).toContain('sourceType=draft')
       expect(lastListCall()).toContain(`reviewStatus=${encodeURIComponent('待审核')}`)
@@ -752,12 +873,51 @@ describe('去审核入口 query 预填（agent-evolution #08 模板生成落点�
 
   it('白名单外 query 值忽略，回落全量列表不报错', async () => {
     backend.docs = [docItem()]
-    const wrapper = await mountDocumentsAtQuery({ sourceType: 'bogus', reviewStatus: 'hacked' })
+    const { wrapper } = await mountDocumentsAtQuery({ sourceType: 'bogus', reviewStatus: 'hacked' })
     try {
       expect(lastListCall()).not.toContain('sourceType=')
       expect(lastListCall()).not.toContain('reviewStatus=')
     } finally {
       wrapper.unmount()
+    }
+  })
+
+  it('keyword query 预填进关键字筛选（M42 零召回/待过期落点），白名单外空值忽略', async () => {
+    backend.docs = [docItem({ title: '客服_报销制度' }), docItem({ title: 'HR_考勤' })]
+    const { wrapper } = await mountDocumentsAtQuery({ keyword: '报销' })
+    try {
+      expect(decodeURIComponent(lastListCall())).toContain('keyword=报销')
+      expect(wrapper.findAll('.el-table__row')).toHaveLength(1)
+      expect(wrapper.find('.el-table__row').text()).toContain('客服_报销制度')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('预填消费后 router.replace 清除已消费键（B10）：刷新/重挂不再被 query 盖回', async () => {
+    backend.docs = [docItem({ sourceType: 'draft', reviewStatus: '待审核' })]
+    const { wrapper, router } = await mountDocumentsAtQuery({
+      sourceType: 'draft',
+      reviewStatus: '待审核',
+      keyword: '退货',
+      keepMe: '1',
+    })
+    // 首拉按预填执行
+    expect(lastListCall()).toContain('sourceType=draft')
+    expect(decodeURIComponent(lastListCall())).toContain('keyword=退货')
+    // 消费完成：query 中已无预填键（保留未知键），刷新不再被盖回
+    expect(router.currentRoute.value.query.sourceType).toBeUndefined()
+    expect(router.currentRoute.value.query.reviewStatus).toBeUndefined()
+    expect(router.currentRoute.value.query.keyword).toBeUndefined()
+    expect(router.currentRoute.value.query.keepMe).toBe('1')
+    // 用户改条件再挂载（模拟刷新）：query 已清 → 回落全量列表
+    wrapper.unmount()
+    backend.docs = [docItem()]
+    const second = await mountDocumentsAtQuery({ keepMe: '1' })
+    try {
+      expect(lastListCall()).toBe('/api/documents?page=1&pageSize=20')
+    } finally {
+      second.wrapper.unmount()
     }
   })
 })

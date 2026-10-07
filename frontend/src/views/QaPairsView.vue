@@ -6,13 +6,14 @@
  * 建语料仅批量导入入口）+ 表格（问题/答案/部门/创建时间/启停 switch/批次/操作）+
  * 分页（10/20/50/100 默认 20 右下）。
  * 启停 switch 即时生效（F-402，开关即刷无确认弹窗），失败回滚开关（client 统一
- * toast 错误）；编辑/删除后保持当前页刷新（§22.3，删空回退一页）；删除 el-popconfirm
- * 二次确认（对照原型）；列表 DTO 无 updatedAt（api.md §4.1.3），时间列以 createdAt
- * 呈现（deviations #30）。部门列按真实 deptCode 渲染中文（后端 join departments
- * 下发库内编码，api.md §4.1.3 9 键），不再按种子序 id 映射（T11 裁定脆弱点已除）。
+ * toast 错误）；编辑/删除后保持当前页刷新（§22.3，删空回退一页）；删除
+ * ElMessageBox.confirm 二次确认（文案对齐 DocumentsView，M33）；列表 DTO 无
+ * updatedAt（api.md §4.1.3），时间列以 createdAt 呈现（deviations #30）。部门列按
+ * 真实 deptCode 渲染中文（后端 join departments 下发库内编码，api.md §4.1.3 9 键），
+ * 不再按种子序 id 映射（T11 裁定脆弱点已除）。空态双分支（B9）：筛选无结果 vs 未积累。
  */
-import { onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, onMounted, reactive, ref } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   QA_PAIRS_TEMPLATE_FILENAME,
   QA_PAIRS_TEMPLATE_URL,
@@ -40,6 +41,11 @@ const loading = ref(false)
 const importVisible = ref(false)
 const editVisible = ref(false)
 const editing = ref<QaPairItem | null>(null)
+
+// 空态双分支判定（B9）：任一筛选条件非空即"筛选无结果"
+const hasFilter = computed(
+  () => filters.deptId !== undefined || filters.status !== '' || filters.keyword.trim() !== '',
+)
 
 async function load(): Promise<void> {
   loading.value = true
@@ -115,7 +121,14 @@ function onEdited(): void {
   void load()
 }
 
+/** 删除确认（M33，对齐 DocumentsView 模式）：ElMessageBox + 审计口径文案 */
 async function removeRow(row: QaPairItem): Promise<void> {
+  const action = await ElMessageBox.confirm(
+    `删除后问答对不可恢复（软删保留审计），检索与问答将不再命中「${row.question}」。确认删除？`,
+    '删除问答对',
+    { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+  ).catch(() => 'cancel')
+  if (action === 'cancel') return
   await deleteQaPair(row.id)
   ElMessage.success('已删除')
   // §22.3：删除后保持当前页刷新，当前页被删空时回退一页
@@ -210,15 +223,20 @@ function formatTime(iso: string): string {
       <el-table-column label="操作" width="130" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
-          <el-popconfirm title="确认删除该问答对？" @confirm="removeRow(row)">
-            <template #reference>
-              <el-button link type="danger">删除</el-button>
-            </template>
-          </el-popconfirm>
+          <el-button link type="danger" @click="removeRow(row)">删除</el-button>
         </template>
       </el-table-column>
+      <!-- 空态双分支（B9）：筛选无结果 vs 未积累 -->
       <template #empty>
-        <el-empty description="还没有问答对" :image-size="60">
+        <el-empty
+          v-if="hasFilter"
+          description="没有匹配筛选条件的问答对"
+          :image-size="60"
+          data-test="qa-empty-filtered"
+        >
+          <el-button size="small" @click="resetFilters">清除筛选</el-button>
+        </el-empty>
+        <el-empty v-else description="还没有问答对" :image-size="60">
           <el-button type="primary" size="small" @click="importVisible = true"
             >Excel 批量导入</el-button
           >

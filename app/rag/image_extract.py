@@ -131,6 +131,6 @@ def collect_pdf_page_images(page, page_no: int) -> ExtractionResult:
             name = getattr(image_file, "name", "") or "image"
             ext = name.rsplit(".", 1)[-1] if "." in name else "png"
             _admit(result, image_file.data, page_no, ext)
-    except Exception as exc:  # noqa: BLE001 —— 图片枚举失败不阻塞文本解析（ depress 语义）
+    except Exception as exc:  # noqa: BLE001 —— 图片枚举失败不阻塞文本解析（降级语义）
         logger.warning("pdf 图片枚举失败 page=%s: %s", page_no, exc)
     return result

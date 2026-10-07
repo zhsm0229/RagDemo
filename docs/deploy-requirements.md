@@ -97,7 +97,7 @@ bash deploy/bootstrap.sh --check-only   # 干跑：只体检不装配
 | # | 检查项 | 阈值 | 依据 |
 |---|--------|------|------|
 | 1 | Docker daemon | 运行中 | — |
-| 2 | 内存（Docker 可分配） | <11G FAIL；11-22G WARN（mineru 按需）；≥22G 全常驻 | 实测常驻 ≈10GB；MB 精度防整数截断误报 |
+| 2 | 内存（Docker 可分配） | <11G FAIL；11-22G WARN（mineru 按需）；≥22G 全常驻。阈值唯一常量 **MEM_FULL_MB=22528（22G，以代码为准）**，bootstrap.sh / deploy.sh 同源引用，改阈值须含本表四处一并改 | 实测常驻 ≈10GB；MB 精度防整数截断误报 |
 | 3 | 磁盘（Docker 数据根） | <50G FAIL；<100G WARN | 基础占用 ≈25GB |
 | 4 | CPU 核数 | <8 WARN | 重排延迟翻倍 |
 | 5 | 外网 api.deepseek.com | 不可达 WARN（本地轨可忽略） | 云轨必需 |

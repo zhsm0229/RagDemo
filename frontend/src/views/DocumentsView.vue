@@ -9,9 +9,12 @@
  * 草稿审核（agent-evolution #05）：工具栏「草稿审核」一键筛出待审核草稿；行内通过
  * （confirm 双示审计提示）/驳回（prompt 必填原因）；红线：无审核不落地——驳回永不入库，
  * 通过才进解析管道。草稿不显示"确认激活"（激活权在审核流，非敏感待确认语义）。
+ * query 预填（#08 去审核 + M42 零召回/待过期 keyword 落点）：白名单键消费后
+ * router.replace 清残留（B10）；空态四分支：加载失败可重试（B11）> 草稿审核 >
+ * 筛选无结果（B9）> 真空态；审核操作行级在飞锁（B8）；部门列挂检索可见性提示（B12）。
  */
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   approveDraft,
@@ -38,7 +41,11 @@ import ZipImportDialog from '@/components/documents/ZipImportDialog.vue'
 
 const POLL_INTERVAL_MS = 30_000
 
+/** 部门可见性提示（B12，管理员视角通用简化句）：挂在部门列，提醒检索范围口径 */
+const DEPT_VISIBILITY_HINT = 'service/hr 部门专属文档不参与你的问答检索'
+
 const route = useRoute()
+const router = useRouter()
 
 const filters = reactive({
   dept: '',
@@ -52,6 +59,10 @@ const total = ref(0)
 const page = ref(1)
 const pageSize = ref(20)
 const loading = ref(false)
+/** 加载失败标记（B11）：失败 ≠ 没有数据，空态区呈现"可重试"而非"还没有" */
+const loadError = ref(false)
+/** 草稿审核行级在飞标记（B8）：通过/驳回请求挂起期间禁用按钮防连点重复提交 */
+const actingId = ref<number | null>(null)
 const uploadVisible = ref(false)
 const zipVisible = ref(false)
 const previewVisible = ref(false)
@@ -60,6 +71,11 @@ const previewDoc = ref<DocumentItem | null>(null)
 /** 草稿审核视图激活态：来源=草稿 且 审核状态=待审核 的快捷筛选（工具栏按钮高亮） */
 const isDraftReview = computed(
   () => filters.sourceType === 'draft' && filters.reviewStatus === '待审核',
+)
+
+/** 空态双分支判定（B9，照 MemoryView §2.5 范式）：dept/status/keyword 任一激活即"筛选无结果" */
+const hasFilter = computed(
+  () => filters.dept !== '' || filters.status !== '' || filters.keyword.trim() !== '',
 )
 
 let pollTimer: number | null = null
@@ -78,10 +94,19 @@ async function load(silent = false): Promise<void> {
     })
     items.value = data.items
     total.value = data.total
+    if (!silent) loadError.value = false
+  } catch {
+    // client 已统一 toast；非 silent 拉取失败标错误态（B11）——silent 轮询失败不打断展示
+    if (!silent) loadError.value = true
   } finally {
     if (!silent) loading.value = false
   }
   syncPolling()
+}
+
+/** 加载失败重试（B11）：保留当前筛选与分页原地重拉 */
+function retryLoad(): void {
+  void load()
 }
 
 /** parsing 行存在才维持 30s 轮询；全部到终态即停。轮询走 silent：后台刷新不闪 loading（M-6） */
@@ -107,9 +132,10 @@ function refresh(): void {
 }
 
 /**
- * 路由 query 预填筛选（agent-evolution #08 模板生成"去审核"落点）：参数名对齐本页
- * 筛选字段（sourceType/reviewStatus，即 #05 草稿审核的筛选口径），白名单外的值忽略，
- * 非法参数不报错只回落全量列表。
+ * 路由 query 预填筛选（agent-evolution #08 模板生成"去审核"落点 + M42 零召回/待过期
+ * 行跳转 keyword 落点）：参数名对齐本页筛选字段（sourceType/reviewStatus/keyword），
+ * 白名单外的值忽略，非法参数不报错只回落全量列表。预填只做一次：消费后立即
+ * router.replace 清掉已消费键（B10），用户改条件刷新不再被 query 盖回。
  */
 function prefillFromQuery(): void {
   // useRoute 在无 router 上下文（单测直挂）时为 undefined：可选链兜底，预填只是增强路径
@@ -120,10 +146,23 @@ function prefillFromQuery(): void {
   if (reviewStatus === '待审核' || reviewStatus === '已通过' || reviewStatus === '已驳回') {
     filters.reviewStatus = reviewStatus
   }
+  const keyword = query?.keyword
+  if (typeof keyword === 'string' && keyword !== '') filters.keyword = keyword
+}
+
+/** 清掉已消费的预填键（B10）：其余 query 键原样保留 */
+function stripConsumedQuery(): void {
+  if (route?.query === undefined || router === undefined) return
+  const rest = { ...route.query }
+  delete rest.sourceType
+  delete rest.reviewStatus
+  delete rest.keyword
+  void router.replace({ query: rest })
 }
 
 onMounted(() => {
   prefillFromQuery()
+  stripConsumedQuery()
   void load()
 })
 onUnmounted(() => {
@@ -206,41 +245,55 @@ async function confirmRow(row: DocumentItem): Promise<void> {
   void load()
 }
 
-/** 草稿审核通过（agent-evolution #05）：confirm 双示审计提示；通过后进解析入库管道 */
+/** 草稿审核通过（agent-evolution #05）：confirm 双示审计提示；通过后进解析入库管道。
+ * 行级在飞锁（B8）：入口即占 actingId，确认框挂起/请求在飞期间吞掉重复与并发点击。 */
 async function approveDraftRow(row: DocumentItem): Promise<void> {
-  const action = await ElMessageBox.confirm(
-    `通过后「${row.title}」将立即进入解析入库管道，收口后可被检索命中；本操作将记入审计日志。确认通过？`,
-    '草稿审核 · 通过',
-    { type: 'warning', confirmButtonText: '通过并入库', cancelButtonText: '取消' },
-  ).catch(() => 'cancel')
-  if (action === 'cancel') return
-  await approveDraft(row.id)
-  ElMessage.success('草稿已通过，进入解析入库队列')
-  void load()
+  if (actingId.value !== null) return
+  actingId.value = row.id
+  try {
+    const action = await ElMessageBox.confirm(
+      `通过后「${row.title}」将立即进入解析入库管道，收口后可被检索命中；本操作将记入审计日志。确认通过？`,
+      '草稿审核 · 通过',
+      { type: 'warning', confirmButtonText: '通过并入库', cancelButtonText: '取消' },
+    ).catch(() => 'cancel')
+    if (action === 'cancel') return
+    await approveDraft(row.id)
+    ElMessage.success('草稿已通过，进入解析入库队列')
+    void load()
+  } finally {
+    actingId.value = null
+  }
 }
 
-/** 草稿驳回：prompt 必填原因（弹窗校验 + 视图内联双闸），原因留档并记入审计日志 */
+/** 草稿驳回：prompt 必填原因（弹窗校验 + 视图内联双闸），原因留档并记入审计日志。
+ * 行级在飞锁（B8）：同通过口径。 */
 async function rejectDraftRow(row: DocumentItem): Promise<void> {
-  const result = await ElMessageBox.prompt(
-    '驳回后草稿永不入库（不进解析与检索），原因留档并记入审计日志。',
-    '草稿审核 · 驳回',
-    {
-      type: 'warning',
-      confirmButtonText: '确认驳回',
-      cancelButtonText: '取消',
-      inputPlaceholder: '请填写驳回原因（必填）',
-      inputValidator: (input: string) => (input.trim() === '' ? '驳回原因不能为空' : true),
-    },
-  ).catch(() => null)
-  if (result === null) return
-  const reason = String(result.value ?? '').trim()
-  if (reason === '') {
-    ElMessage.warning('请填写驳回原因后再提交')
-    return
+  if (actingId.value !== null) return
+  actingId.value = row.id
+  try {
+    const result = await ElMessageBox.prompt(
+      '驳回后草稿永不入库（不进解析与检索），原因留档并记入审计日志。',
+      '草稿审核 · 驳回',
+      {
+        type: 'warning',
+        confirmButtonText: '确认驳回',
+        cancelButtonText: '取消',
+        inputPlaceholder: '请填写驳回原因（必填）',
+        inputValidator: (input: string) => (input.trim() === '' ? '驳回原因不能为空' : true),
+      },
+    ).catch(() => null)
+    if (result === null) return
+    const reason = String(result.value ?? '').trim()
+    if (reason === '') {
+      ElMessage.warning('请填写驳回原因后再提交')
+      return
+    }
+    await rejectDraft(row.id, reason)
+    ElMessage.success('草稿已驳回')
+    void load()
+  } finally {
+    actingId.value = null
   }
-  await rejectDraft(row.id, reason)
-  ElMessage.success('草稿已驳回')
-  void load()
 }
 
 function onUploaded(): void {
@@ -303,7 +356,12 @@ function onZipImported(): void {
         </template>
       </el-table-column>
       <el-table-column label="部门" width="90">
-        <template #default="{ row }">{{ deptName(row.deptCode) }}</template>
+        <template #default="{ row }">
+          <!-- 部门可见性提示（B12）：管理员视角通用简化句，提醒该列文档的检索可见口径 -->
+          <el-tooltip :content="DEPT_VISIBILITY_HINT" placement="top">
+            <span class="dept-cell">{{ deptName(row.deptCode) }}</span>
+          </el-tooltip>
+        </template>
       </el-table-column>
       <el-table-column label="状态" width="220">
         <template #default="{ row }">
@@ -377,6 +435,7 @@ function onZipImported(): void {
             v-if="row.sourceType === 'draft' && row.reviewStatus === '待审核'"
             link
             type="success"
+            :disabled="actingId !== null"
             @click="approveDraftRow(row)"
           >
             通过
@@ -385,6 +444,7 @@ function onZipImported(): void {
             v-if="row.sourceType === 'draft' && row.reviewStatus === '待审核'"
             link
             type="danger"
+            :disabled="actingId !== null"
             @click="rejectDraftRow(row)"
           >
             驳回
@@ -417,9 +477,29 @@ function onZipImported(): void {
           <el-button link type="danger" @click="removeDoc(row)">删除</el-button>
         </template>
       </el-table-column>
+      <!-- 空态多分支：加载失败可重试（B11）> 草稿审核专属空态 > 筛选无结果（B9，照
+           MemoryView §2.5 范式）> 真空态引导上传 -->
       <template #empty>
-        <el-empty :description="isDraftReview ? '暂无待审核草稿' : '还没有文档'" :image-size="60">
-          <el-button v-if="!isDraftReview" type="primary" size="small" @click="uploadVisible = true"
+        <div
+          v-if="loadError"
+          class="load-error"
+          data-test="documents-load-error"
+          role="alert"
+          @click="retryLoad"
+        >
+          加载失败，点击重试
+        </div>
+        <el-empty v-else-if="isDraftReview" description="暂无待审核草稿" :image-size="60" />
+        <el-empty
+          v-else-if="hasFilter"
+          description="没有匹配筛选条件的文档"
+          :image-size="60"
+          data-test="documents-empty-filtered"
+        >
+          <el-button size="small" @click="resetFilters">清除筛选</el-button>
+        </el-empty>
+        <el-empty v-else description="还没有文档" :image-size="60">
+          <el-button type="primary" size="small" @click="uploadVisible = true"
             >上传第一份文档</el-button
           >
         </el-empty>
@@ -487,5 +567,17 @@ function onZipImported(): void {
 }
 .gap-tag {
   margin-left: 4px;
+}
+/* 部门列 tooltip 宿主（B12）：span 便于 hover 命中 */
+.dept-cell {
+  cursor: default;
+}
+/* 加载失败可重试空态（B11）：整块可点，颜色区分于普通空态 */
+.load-error {
+  padding: 24px 0;
+  text-align: center;
+  color: var(--el-color-danger);
+  font-size: 13px;
+  cursor: pointer;
 }
 </style>

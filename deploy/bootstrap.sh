@@ -42,7 +42,8 @@ if docker info >/dev/null 2>&1; then pass "Docker daemon 运行中"; else
   fail "Docker 不可用——先启动 Docker Desktop / dockerd"; fi
 
 # 2. 内存（Docker 可分配总量，MB 精度比较防整数截断误报；<11G 必 OOM——三巨头互挤事故实证）
-# 全常驻阈值唯一常量：≥22G 三巨头常驻（与 §4.1 体检表、§4.2 装配口径一致，装配段同源引用）
+# 全常驻阈值唯一常量：MEM_FULL_MB=22528（22G），≥22G 三巨头常驻——deploy.sh 与
+# deploy-requirements.md §4.1 同源引用本值，改阈值须四处（含文档）一并改。
 MEM_FULL_MB=22528
 MEM_TOTAL=$(docker info --format '{{.MemTotal}}' 2>/dev/null || echo 0)
 MEM_MB=$((MEM_TOTAL / 1024 / 1024))
@@ -56,7 +57,8 @@ DOCKER_ROOT=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo ".")
 DISK_AVAIL_GB=$(df -BG "$DOCKER_ROOT" 2>/dev/null | awk 'NR==2 {gsub("G","",$4); print $4}')
 if [ "${DISK_AVAIL_GB:-0}" -ge 100 ]; then pass "磁盘可用 ${DISK_AVAIL_GB}G（$DOCKER_ROOT）"
 elif [ "${DISK_AVAIL_GB:-0}" -ge 50 ]; then warn "磁盘可用 ${DISK_AVAIL_GB}G：可部署，注意备份与日志增长"
-elif [ -n "$DISK_AVAIL_GB" ]; then fail "磁盘可用 ${DISK_AVAIL_GB}G（<50G）：镜像 13.5G + TEI 模型 8.6G + 数据备份放不下"; fi
+elif [ -n "$DISK_AVAIL_GB" ]; then fail "磁盘可用 ${DISK_AVAIL_GB}G（<50G）：镜像 13.5G + TEI 模型 8.6G + 数据备份放不下"
+else warn "无法核查磁盘（df 不可达或输出异常），请人工确认可用空间 ≥50G（M22：不可静默跳过）"; fi
 
 # 4. CPU 核数（<8 仅影响重排延迟，不阻断）
 NCPU=$(docker info --format '{{.NCPU}}' 2>/dev/null || echo 0)

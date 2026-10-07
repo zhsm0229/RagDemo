@@ -42,10 +42,18 @@
 ## 运行方式
 
 ```bash
-# L1 栈（TEST_MODE 由 deploy/docker-compose.e2e.yml 硬编码，杜绝环境传递丢失）：
-docker compose -f docker-compose.yml -f deploy/docker-compose.e2e.yml up -d --build pg app
+# L1 栈（TEST_MODE 由 deploy/docker-compose.e2e.yml 硬编码，杜绝环境传递丢失；
+# 第三层 e2e-isolated 把 app 指向独立隔离库 pg-e2e/rag_e2e——E2E_WIPE 硬复位只打隔离库，
+# 试点/业务库零接触，2026-10-05 共库清空事故根治）：
+docker compose -f docker-compose.yml -f deploy/docker-compose.e2e.yml \
+  -f deploy/docker-compose.e2e-isolated.yml up -d --build pg-e2e app
+docker compose exec -T app python -m app.db.seed            # 隔离库为空库：先部门后账号
 docker compose exec -T -e E2E_PASSWORD=e2e-ci-password app python -m app.db.e2e_seed
 cd frontend && E2E_CHANNEL=msedge npm run e2e     # 本机无 Playwright 浏览器下载通道时用系统 Edge
+npm run e2e:down                                  # 收尾：恢复试点栈 app + 删除隔离库容器
 # L2（部署机）：E2E_REAL=1 E2E_CHANNEL=chrome npm run e2e
 # CI：e2e job 自动（TEST_MODE，官方 CDN 装 chromium）
 ```
+
+- 防呆兜底：`app/db/e2e_seed.py` 在 E2E_WIPE=1 时校验库名必须为 `rag_e2e`（或 `*_e2e` 后缀），
+  指向其余库直接非零退出；auth.setup.ts 自举段在种子前同样断言，指错库绝不照跑。

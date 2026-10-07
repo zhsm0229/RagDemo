@@ -8,8 +8,9 @@
  * 后端 422 → 表格上方内联（§22.2）；重置密码 popconfirm → 同一次性展示。
  * 原型第三态"解锁"操作无后端契约（锁定由重置密码清除或自然过期）→ 不渲染
  * （deviations #37）；mustChangePassword 不单独成列（原型无此列，重置即置位）。
+ * 空态双分支（B9，照 MemoryView §2.5 范式）：筛选无结果 vs 未积累。
  */
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   listAdminUsers,
@@ -35,6 +36,9 @@ const pwdVisible = ref(false)
 const pwdValue = ref('')
 /** 行级操作错误（禁用自己 422 等）内联于表格上方（§22.2） */
 const actionErr = ref('')
+
+// 空态双分支判定（B9）：关键字筛选非空即"筛选无结果"
+const hasFilter = computed(() => filters.keyword.trim() !== '')
 
 async function load(): Promise<void> {
   loading.value = true
@@ -199,8 +203,17 @@ function formatTime(iso: string | null): string {
           </el-popconfirm>
         </template>
       </el-table-column>
+      <!-- 空态双分支（B9）：筛选无结果 vs 未积累 -->
       <template #empty>
-        <el-empty description="还没有用户" :image-size="60">
+        <el-empty
+          v-if="hasFilter"
+          description="没有匹配筛选条件的用户"
+          :image-size="60"
+          data-test="users-empty-filtered"
+        >
+          <el-button size="small" @click="resetFilters">清除筛选</el-button>
+        </el-empty>
+        <el-empty v-else description="还没有用户" :image-size="60">
           <el-button type="primary" size="small" @click="createVisible = true">
             新建第一个用户
           </el-button>

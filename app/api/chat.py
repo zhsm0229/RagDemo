@@ -17,13 +17,13 @@ SSE 线格式化（`event: {name}\ndata: {json}\n\n`，presentation 关切）。
 测试经 monkeypatch 把 services.chat_stream.SessionLocal 指向测试连接
 （tests/api/conftest.py chat_client）。
 
-长期记忆抽取（F-210 §3.2，agent-evolution）：qa/rag 计划在构造 StreamingResponse 前
-挂 BackgroundTasks——响应发完后由任务体（memory_extract.extract_memory_task，自管
-SessionLocal 短会话）按 assistant_msg_id 读回收尾后的回答再抽取，cache 命中与 refuse
-不挂任务；端点阶段回答尚未生成，"test_mode 同步执行"（documents.py 先例）在此不
-适用——同步跑在端点内读到的是空占位正文；测试可依赖 TestClient 同步驱动完整 ASGI
-生命周期（后台任务在响应体发完后、client.post 返回前执行完毕），可断言性与同步
-模式等价。
+长期记忆抽取（F-210 §3.2，agent-evolution）：qa/rag/refuse 计划在构造 StreamingResponse
+前挂 BackgroundTasks（A7：拒答轮用户问题同样可能携带画像信息，refused 标志随任务
+传入）——响应发完后由任务体（memory_extract.extract_memory_task，自管 SessionLocal
+短会话）按 assistant_msg_id 读回收尾后的回答再抽取，cache 命中不挂任务；端点阶段
+回答尚未生成，"test_mode 同步执行"（documents.py 先例）在此不适用——同步跑在端点内
+读到的是空占位正文；测试可依赖 TestClient 同步驱动完整 ASGI 生命周期（后台任务在
+响应体发完后、client.post 返回前执行完毕），可断言性与同步模式等价。
 """
 
 import json
@@ -149,10 +149,19 @@ def chat_stream(
     except UpstreamError:
         interrupt_turn(assistant_msg_id)  # CHAT-12：事务①已提交，不留 is_active=true 幽灵占位
         raise  # 开流前失败：交全局 500 兜底（话术脱敏不变），事务随依赖 teardown 回滚
-    if plan.kind in ("qa", "rag"):
-        # 长期记忆抽取（F-210 §3.2）：仅 qa/rag 挂后台任务，cache/refuse 不抽取；
-        # 任务体自管短会话读回收尾后的回答执行（响应发完后运行，失败静默不影响主链路）
-        background.add_task(extract_memory_task, deps, user.id, assistant_msg_id, body.question)
+    if plan.kind in ("qa", "rag", "refuse"):
+        # 长期记忆抽取（F-210 §3.2；A7：refuse 轮用户问题同样可能携带画像信息，如
+        # "记住我喜欢简洁回答"）：qa/rag/refuse 挂后台任务，cache 命中不抽取；任务体
+        # 自管短会话读回收尾后的回答执行（响应发完后运行，失败静默不影响主链路）；
+        # refuse 轮回答正文是逐字拒答话术，任务体按 refused 标志以声明文字替代回答段
+        background.add_task(
+            extract_memory_task,
+            deps,
+            user.id,
+            assistant_msg_id,
+            body.question,
+            refused=plan.kind == "refuse",
+        )
     db.commit()  # 终结 history/prepare 的 autobegin 读事务：连接还池，流期间不占连接
     return StreamingResponse(
         _format_stream(event_stream(deps, plan, assistant_msg_id, perf_counter())),

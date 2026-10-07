@@ -181,8 +181,9 @@ jobs:
           echo "\`${REF}\`（tag \`${TAG}\`）" >> "$GITHUB_STEP_SUMMARY"
 
   # ---------- ⑤b e2e：Playwright L1 确定性冒烟（TEST_MODE stub 全链，每 MR 必跑） ----------
-  # 栈 = compose 起 pg + app（容器内自迁移 + healthz 门）→ 容器内灌 e2e 种子 →
-  # 前端 Playwright（官方 CDN 装 chromium，runner 无网络限制）。红 = 禁合入。
+  # 栈 = compose 三文件叠加起 pg-e2e（独立隔离库 rag_e2e）+ app（容器内自迁移 + healthz 门）
+  # → 容器内灌部门种子 + e2e 种子 → 前端 Playwright（官方 CDN 装 chromium，runner 无网络
+  # 限制）。红 = 禁合入。
   e2e:
     needs: [test, fe-build]
     runs-on: ubuntu-latest
@@ -192,10 +193,11 @@ jobs:
       E2E_PASSWORD: e2e-ci-password
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0（SHA pin）
-      - name: Start stack (pg + app, TEST_MODE via e2e override)
+      - name: Start stack (pg-e2e 隔离库 + app, TEST_MODE via e2e override)
         run: |
           cp .env.example .env
-          docker compose -f docker-compose.yml -f deploy/docker-compose.e2e.yml up -d --build pg app
+          docker compose -f docker-compose.yml -f deploy/docker-compose.e2e.yml \
+            -f deploy/docker-compose.e2e-isolated.yml up -d --build pg-e2e app
       - name: Wait for healthz (entrypoint 迁移 + 服务就绪)
         run: |
           for i in $(seq 1 60); do
@@ -204,8 +206,10 @@ jobs:
           done
           docker compose logs app
           exit 1
-      - name: Seed e2e accounts (容器内，口令与 Playwright 侧同源)
-        run: docker compose exec -T -e E2E_PASSWORD="$E2E_PASSWORD" app python -m app.db.e2e_seed
+      - name: Seed departments + e2e accounts (隔离库先部门后账号，口令与 Playwright 侧同源)
+        run: |
+          docker compose exec -T app python -m app.db.seed
+          docker compose exec -T -e E2E_PASSWORD="$E2E_PASSWORD" app python -m app.db.e2e_seed
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0（SHA pin）
         with:
           node-version: "20"

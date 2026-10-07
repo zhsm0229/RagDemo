@@ -8,7 +8,7 @@ brief 用例 4 条：①FakeClock 拨到 expiry_date 之后 → run_due_sweeps �
 
 import hashlib
 from collections.abc import Iterator
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select, text
@@ -16,8 +16,13 @@ from sqlalchemy.orm import Session
 
 from app.core.clock import FakeClock, SystemClock, set_clock
 from app.core.config import Settings
-from app.db.models import AuditLog, Document, User
-from app.services.scheduler import build_scheduler, ensure_month_partitions, run_due_sweeps
+from app.db.models import AgentRun, AuditLog, Document, User
+from app.services.scheduler import (
+    build_scheduler,
+    ensure_month_partitions,
+    run_due_sweeps,
+    sweep_stale_agent_runs,
+)
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
@@ -180,8 +185,8 @@ def test_ensure_month_partitions_creates_next_three_months(
 
 
 def test_build_scheduler_registers_cron_jobs_without_starting() -> None:
-    """装配断言：三任务按 cron 注册（每日 02:00 清扫、每日 03:00 提问记录清理、每月 1 日
-    02:30 分区）；test_mode 不自启。"""
+    """装配断言：四任务按 cron 注册（每日 02:00 清扫、每日 03:00 提问记录清理、每月 1 日
+    02:30 分区、每小时 45 分 agent 幽灵清扫）；test_mode 不自启。"""
     scheduler = build_scheduler(Settings(jwt_secret="scheduler-test", test_mode=True))
     assert scheduler.running is False
     jobs = {job.id: job for job in scheduler.get_jobs()}
@@ -189,6 +194,7 @@ def test_build_scheduler_registers_cron_jobs_without_starting() -> None:
         "run_due_sweeps",
         "message_retention_cleanup",
         "ensure_month_partitions",
+        "agent_run_stale_sweep",
     }
     sweeps = {field.name: str(field) for field in jobs["run_due_sweeps"].trigger.fields}
     assert (sweeps["hour"], sweeps["minute"], sweeps["day"]) == ("2", "0", "*")
@@ -198,6 +204,8 @@ def test_build_scheduler_registers_cron_jobs_without_starting() -> None:
     assert (retention["hour"], retention["minute"], retention["day"]) == ("3", "0", "*")
     parts = {field.name: str(field) for field in jobs["ensure_month_partitions"].trigger.fields}
     assert (parts["day"], parts["hour"], parts["minute"]) == ("1", "2", "30")
+    stale = {field.name: str(field) for field in jobs["agent_run_stale_sweep"].trigger.fields}
+    assert (stale["day"], stale["hour"], stale["minute"]) == ("*", "*", "45")
 
 
 def test_build_scheduler_starts_in_normal_mode() -> None:
@@ -209,6 +217,57 @@ def test_build_scheduler_starts_in_normal_mode() -> None:
             "run_due_sweeps",
             "message_retention_cleanup",
             "ensure_month_partitions",
+            "agent_run_stale_sweep",
         }
     finally:
         scheduler.shutdown(wait=False)
+
+
+# ---------- ⑤ agent run 幽灵清扫（A4）：running 超龄置 failed ----------
+
+
+def _make_running_run(session: Session, *, started_at: datetime) -> AgentRun:
+    """直插 running 占位行（清扫只关心 status/started_at；归属挂 admin 种子行满足外键）。"""
+    run = AgentRun(
+        user_id=_admin_id(session),
+        dept_id=_dept_id(session),
+        run_type="kb_qa",
+        input={"taskType": "kb_qa", "input": "占位"},
+        status="running",
+        started_at=started_at,
+    )
+    session.add(run)
+    session.flush()
+    return run
+
+
+def test_sweep_stale_agent_runs_marks_stale_failed_and_keeps_fresh(session: Session) -> None:
+    """A4：running 且 started_at 早于阈值（15 分钟）→ failed + error="运行超时被清扫"
+    （终态时刻=注入时钟）；阈值内 fresh running 行不动。返回清扫条数。"""
+    now = datetime(2026, 10, 15, 8, 0, tzinfo=UTC)
+    stale = _make_running_run(session, started_at=now - timedelta(minutes=20))
+    fresh = _make_running_run(session, started_at=now - timedelta(minutes=5))
+
+    swept = sweep_stale_agent_runs(session, FakeClock("2026-10-15T08:00:00+00:00"), 15)
+
+    assert swept == 1
+    session.expire_all()
+    swept_row = session.get(AgentRun, stale.id)
+    assert swept_row.status == "failed"
+    assert swept_row.error == "运行超时被清扫"
+    assert swept_row.finished_at is not None
+    fresh_row = session.get(AgentRun, fresh.id)
+    assert fresh_row.status == "running"
+    assert fresh_row.error is None
+    assert fresh_row.finished_at is None
+
+
+def test_sweep_stale_agent_runs_without_stale_is_noop(session: Session) -> None:
+    """无超龄 running：返回 0，库内 running 行保持原状（ 幽灵清扫对活跃任务零误伤）。"""
+    fresh = _make_running_run(session, started_at=datetime(2026, 10, 15, 7, 59, tzinfo=UTC))
+
+    swept = sweep_stale_agent_runs(session, FakeClock("2026-10-15T08:00:00+00:00"), 15)
+
+    assert swept == 0
+    session.expire_all()
+    assert session.get(AgentRun, fresh.id).status == "running"

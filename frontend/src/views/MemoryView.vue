@@ -5,10 +5,11 @@
  * （左筛选 关键字+查询/重置 同行 §22.1；右手动添加 1-200 字，Enter 提交带 IME
  * 守卫，开关关闭时入口禁用 tooltip）+ 表格（内容/来源/添加时间/操作）+ 分页右下。
  *
- * 交互红线：开关切换即保存（v-model 先行更新，失败回滚，client 统一 toast）；
- * 删除统一 ElMessageBox.confirm（§2.6，文案面向员工不出现"软删"术语）；空态双
- * 分支（§2.5 未积累 vs 筛选无结果）；关闭开关出现冻结说明 alert（§2.7），列表
- * 不隐藏不置灰——传达"冻结而非删除"。
+ * 交互红线：开关切换即保存（v-model 先行更新，失败回滚，client 统一 toast；在飞锁
+ * 防并发保存 B7）；删除统一 ElMessageBox.confirm（§2.6，文案面向员工不出现"软删"
+ * 术语；行级在飞锁防连点 B8）；空态双分支（§2.5 未积累 vs 筛选无结果）+ 加载失败
+ * 可重试态（B11）；关闭开关出现冻结说明 alert（§2.7），列表不隐藏不置灰——传达
+ * "冻结而非删除"。
  */
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -37,6 +38,8 @@ const total = ref(0)
 const page = ref(1)
 const pageSize = ref(20)
 const loading = ref(false)
+/** 加载失败标记（B11）：失败 ≠ 没有数据，空态区呈现"可重试"而非"还没有" */
+const loadError = ref(false)
 
 const draft = ref('')
 const draftInputRef = ref<InputInstance>()
@@ -56,6 +59,10 @@ async function load(): Promise<void> {
     })
     items.value = data.items
     total.value = data.total
+    loadError.value = false
+  } catch {
+    // client 已统一 toast；此处标错误态供空态区呈现"失败可重试"（B11）
+    loadError.value = true
   } finally {
     loading.value = false
   }
@@ -84,14 +91,21 @@ function onSizeChange(size: number): void {
   void load()
 }
 
-/** 开关切换即保存（§2.2）：v-model 先行更新，失败回滚；成功以后端落库值校准 */
+/** 开关切换即保存（§2.2）：v-model 先行更新，失败回滚；成功以后端落库值校准。
+ * 在飞锁（B7）：请求挂起期间禁用开关并吞掉重复触发，防并发保存互相覆盖。 */
+const toggling = ref(false)
+
 async function onToggleSettings(): Promise<void> {
+  if (toggling.value) return
+  toggling.value = true
   try {
     const data = await updateMemorySettings(enabled.value)
     enabled.value = data.memoryEnabled
   } catch {
     enabled.value = !enabled.value
     return
+  } finally {
+    toggling.value = false
   }
   frozenAlertVisible.value = !enabled.value // 关闭瞬间出现冻结说明（§2.7）
   ElMessage.success(
@@ -101,14 +115,27 @@ async function onToggleSettings(): Promise<void> {
   )
 }
 
-/** 手动添加（§2.3）：strip 口径 1-200 字；成功清空 + 回第 1 页刷新（新条目首行可见） */
+/** 手动添加（§2.3）：strip 口径 1-200 字；成功清空 + 回第 1 页刷新（新条目首行可见）。
+ * 在飞锁（B7）：提交期间按钮 loading 并吞掉重复提交；超限给出明确警示而非静默吞掉。 */
+const adding = ref(false)
+
 async function submitDraft(): Promise<void> {
-  if (!enabled.value || overLimit.value || trimmed.value.length === 0) return
-  await addMemory(trimmed.value)
-  draft.value = ''
-  ElMessage.success('已添加')
-  page.value = 1
-  void load()
+  if (!enabled.value || adding.value) return
+  if (overLimit.value) {
+    ElMessage.warning('记忆内容不能超过 200 字')
+    return
+  }
+  if (trimmed.value.length === 0) return
+  adding.value = true
+  try {
+    await addMemory(trimmed.value)
+    draft.value = ''
+    ElMessage.success('已添加')
+    page.value = 1
+    void load()
+  } finally {
+    adding.value = false
+  }
 }
 
 function onEnter(event: KeyboardEvent): void {
@@ -117,27 +144,41 @@ function onEnter(event: KeyboardEvent): void {
   void submitDraft()
 }
 
-/** 删除确认（§2.6）：统一 ElMessageBox，文案面向员工不出现内部术语 */
+/** 删除确认（§2.6）：统一 ElMessageBox，文案面向员工不出现内部术语。
+ * 行级在飞锁（B8）：删除确认挂起/请求在飞期间吞掉重复点击，防连点重复删除。 */
+const deletingId = ref<number | null>(null)
+
 async function removeRow(row: MemoryItem): Promise<void> {
+  if (deletingId.value !== null) return
+  deletingId.value = row.id
   try {
-    await ElMessageBox.confirm('删除后，回答将不再参考这条记忆，确认删除？', '删除记忆', {
-      type: 'warning',
-      confirmButtonText: '删除',
-      cancelButtonText: '取消',
-    })
-  } catch {
-    return // 取消归取消，不发请求
+    try {
+      await ElMessageBox.confirm('删除后，回答将不再参考这条记忆，确认删除？', '删除记忆', {
+        type: 'warning',
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+      })
+    } catch {
+      return // 取消归取消，不发请求
+    }
+    await deleteMemory(row.id)
+    ElMessage.success('已删除')
+    // §22.3：保持当前页刷新，当前页被删空时回退一页
+    if (items.value.length <= 1 && page.value > 1) page.value -= 1
+    void load()
+  } finally {
+    deletingId.value = null
   }
-  await deleteMemory(row.id)
-  ElMessage.success('已删除')
-  // §22.3：保持当前页刷新，当前页被删空时回退一页
-  if (items.value.length <= 1 && page.value > 1) page.value -= 1
-  void load()
 }
 
 /** 空态引导（§2.5）：未积累 → 聚焦添加输入框；开关关闭时不渲染该按钮（不引导进死胡同） */
 function focusDraft(): void {
   draftInputRef.value?.focus()
+}
+
+/** 加载失败重试（B11）：保留当前筛选与分页原地重拉 */
+function retryLoad(): void {
+  void load()
 }
 
 /** DTO createdAt 为 ISO 字符串 → "YYYY-MM-DD HH:mm"（同 QaPairsView 口径） */
@@ -153,7 +194,7 @@ function formatTime(iso: string): string {
       <span class="switch-label">记忆功能</span>
       <el-switch
         v-model="enabled"
-        :disabled="!settingsLoaded"
+        :disabled="!settingsLoaded || toggling"
         data-test="memory-switch"
         @change="onToggleSettings"
       />
@@ -201,7 +242,13 @@ function formatTime(iso: string): string {
           <span class="draft-counter" :class="{ over: overLimit }">
             {{ trimmed.length }}/{{ CONTENT_MAX }}
           </span>
-          <el-button type="primary" :disabled="!canAdd" data-test="memory-add" @click="submitDraft">
+          <el-button
+            type="primary"
+            :disabled="!canAdd"
+            :loading="adding"
+            data-test="memory-add"
+            @click="submitDraft"
+          >
             添加
           </el-button>
         </span>
@@ -229,15 +276,30 @@ function formatTime(iso: string): string {
       </el-table-column>
       <el-table-column label="操作" width="90">
         <template #default="{ row }">
-          <el-button link type="danger" data-test="memory-delete" @click="removeRow(row)">
+          <el-button
+            link
+            type="danger"
+            :disabled="deletingId !== null"
+            data-test="memory-delete"
+            @click="removeRow(row)"
+          >
             删除
           </el-button>
         </template>
       </el-table-column>
-      <!-- 空态双分支（§2.5）：未积累 vs 筛选无结果，判定条件 = 任一筛选非空 -->
+      <!-- 空态三分支：加载失败可重试（B11）优先，其后筛选无结果 vs 未积累（§2.5） -->
       <template #empty>
+        <div
+          v-if="loadError"
+          class="load-error"
+          data-test="memory-load-error"
+          role="alert"
+          @click="retryLoad"
+        >
+          加载失败，点击重试
+        </div>
         <el-empty
-          v-if="hasFilter"
+          v-else-if="hasFilter"
           description="没有匹配筛选条件的记忆，试试更换关键字"
           :image-size="60"
           data-test="memory-empty-filtered"
@@ -316,5 +378,13 @@ function formatTime(iso: string): string {
   display: flex;
   justify-content: flex-end;
   margin-top: 12px;
+}
+/* 加载失败可重试空态（B11）：整块可点，颜色区分于普通空态 */
+.load-error {
+  padding: 24px 0;
+  text-align: center;
+  color: var(--el-color-danger);
+  font-size: 13px;
+  cursor: pointer;
 }
 </style>

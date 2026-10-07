@@ -29,8 +29,12 @@ setup('prepare login states', async ({ playwright }) => {
   // 套件级复位（本地/CI 同一机制）：复位锁定态 + 软删上轮 e2e 文档（释放 content_hash）
   // + 重新生成内容唯一的上传夹具。仓库根 = specs 的上三级。
   const repoRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta.url)))
-  // 栈自举（守卫式）：healthz 不通才以 e2e override 拉起（TEST_MODE=true 硬编码），
-  // 已健康则跳过——避免每轮重建重启打断后续 API 预置。
+  // 栈自举（守卫式）：healthz 不通才以 e2e 三文件叠加拉起（TEST_MODE=true 硬编码 + 独立
+  // 隔离库 pg-e2e/rag_e2e，2026-10-05 试点库被 E2E_WIPE 清空事故的根治），已健康则跳过
+  // ——避免每轮重建重启打断后续 API 预置。
+  const COMPOSE_E2E =
+    'docker compose -f docker-compose.yml -f deploy/docker-compose.e2e.yml' +
+    ' -f deploy/docker-compose.e2e-isolated.yml'
   const stackUp = async (): Promise<boolean> => {
     const probe = await playwright.request.newContext({ baseURL })
     try {
@@ -41,7 +45,7 @@ setup('prepare login states', async ({ playwright }) => {
     }
   }
   if (!(await stackUp())) {
-    execSync('docker compose -f docker-compose.yml -f deploy/docker-compose.e2e.yml up -d pg app', {
+    execSync(`${COMPOSE_E2E} up -d --build pg-e2e app`, {
       cwd: repoRoot,
       stdio: 'inherit',
       env: process.env,
@@ -51,7 +55,21 @@ setup('prepare login states', async ({ playwright }) => {
       await new Promise((r) => setTimeout(r, 3_000))
     }
   }
-  execSync('docker compose exec -T -e E2E_PASSWORD -e E2E_WIPE=1 app python -m app.db.e2e_seed', {
+  // 隔离防呆断言（防"指错库还照跑"）：app 的 DATABASE_URL 必须指向隔离库 rag_e2e，
+  // 否则下面的 E2E_WIPE TRUNCATE 会清掉试点/业务库——断言不过立即中止，绝不种子。
+  execSync(
+    'docker compose exec -T app python -c "from app.core.config import get_settings; ' +
+      `assert get_settings().database_url.rstrip('/').endswith('rag_e2e'), ` +
+      `'E2E 隔离断言失败：DATABASE_URL 未指向 rag_e2e，拒绝执行种子'"`,
+    { cwd: repoRoot, stdio: 'inherit', env: process.env },
+  )
+  // 隔离库为全新空库（无 departments）：先部门种子后 E2E 账号（对齐 e2e-visible.sh 顺序）。
+  execSync(`${COMPOSE_E2E} exec -T app python -m app.db.seed`, {
+    cwd: repoRoot,
+    stdio: 'inherit',
+    env: process.env,
+  })
+  execSync(`${COMPOSE_E2E} exec -T -e E2E_PASSWORD -e E2E_WIPE=1 app python -m app.db.e2e_seed`, {
     cwd: repoRoot,
     stdio: 'inherit',
     env: process.env,

@@ -10,6 +10,8 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
 import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it } from 'vitest'
+import { createMemoryHistory, createRouter, RouterView } from 'vue-router'
+import { defineComponent, h } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import HelpView from '@/views/HelpView.vue'
 
@@ -29,6 +31,41 @@ async function mountHelp(role: 'admin' | 'member'): Promise<VueWrapper> {
   })
   await flushPromises()
   return wrapper
+}
+
+/** M40：带 router 上下文挂载（query.tab 同步依赖 useRoute/useRouter） */
+async function mountHelpAtQuery(
+  query: Record<string, string>,
+  role: 'admin' | 'member' = 'admin',
+): Promise<{ wrapper: VueWrapper; router: ReturnType<typeof createRouter> }> {
+  const pinia = createPinia()
+  setActivePinia(pinia)
+  const auth = useAuthStore()
+  auth.user = {
+    userId: 1,
+    username: 'tester',
+    role,
+    mustChangePassword: false,
+    memoryEnabled: true,
+  }
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/help', name: 'help', component: HelpView },
+      { path: '/', name: 'chat', component: defineComponent({ render: () => null }) },
+    ],
+  })
+  await router.push({ path: '/help', query })
+  await router.isReady()
+  const wrapper = mount(defineComponent({ name: 'Harness', setup: () => () => h(RouterView) }), {
+    global: { plugins: [pinia, ElementPlus, router] },
+  })
+  await flushPromises()
+  return { wrapper, router }
+}
+
+function activeTabText(wrapper: VueWrapper): string {
+  return wrapper.find('.el-tabs__item.is-active').text()
 }
 
 describe('帮助中心页', () => {
@@ -67,5 +104,31 @@ describe('帮助中心页', () => {
     // 演示模式辨别（TEST_MODE stub 模板文案特征 + 处置指引）
     expect(text).toContain('根据知识库检索结果')
     expect(text).toContain('TEST_MODE')
+  })
+
+  it('挂载读 query.tab 选中对应页签；切换页签 router.replace 写回 query（M40）', async () => {
+    const { wrapper, router } = await mountHelpAtQuery({ tab: 'faq' })
+    expect(activeTabText(wrapper)).toBe('常见问题')
+
+    // 切换页签 → query.tab 写回（replace 不留历史，其余键保留）
+    await router.push({ query: { tab: 'faq', keepMe: '1' } })
+    await flushPromises()
+    const skillTab = wrapper.findAll('.el-tabs__item').find((t) => t.text() === '提问技巧')!
+    await skillTab.trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.query.tab).toBe('skills')
+    expect(router.currentRoute.value.query.keepMe).toBe('1')
+    expect(activeTabText(wrapper)).toBe('提问技巧')
+  })
+
+  it('query.tab 非法值回落首个页签；成员带 adminOnly 页签名同样回落（不越权）', async () => {
+    const { wrapper } = await mountHelpAtQuery({ tab: 'not-a-tab' })
+    expect(activeTabText(wrapper)).toBe('快速上手')
+    const member = await mountHelpAtQuery({ tab: 'admin-guide' }, 'member')
+    try {
+      expect(activeTabText(member.wrapper)).toBe('快速上手')
+    } finally {
+      member.wrapper.unmount()
+    }
   })
 })

@@ -132,6 +132,34 @@ def test_add_memory_accepts_200_chars(client, session) -> None:
     assert len(row.content) == 200
 
 
+def test_add_memory_rejects_duplicate_content(client, session) -> None:
+    """A6 手动添加查重：strip 后与本人活跃记忆精确重复 → 409/3001 零入库零审计；
+    同内容归属他人不冲突（按用户隔离查重），软删行不参与查重（删后可重加）。"""
+    alice = make_user(session, "alice")
+    make_user(session, "bob")
+    login(client, "alice")
+    first = client.post("/api/memories", json={"content": "  我负责华东区客服排班  "})
+    assert first.status_code == 201
+
+    dup = client.post("/api/memories", json={"content": "我负责华东区客服排班"})
+    assert dup.status_code == 409
+    assert dup.json() == {"code": 3001, "message": "已存在相同内容的记忆", "data": None}
+
+    login(client, "bob")
+    foreign = client.post("/api/memories", json={"content": "我负责华东区客服排班"})
+    assert foreign.status_code == 201  # 用户隔离：他人已有同内容不影响本人添加
+    login(client, "alice")
+    session.expire_all()
+    session.query(UserMemory).filter(UserMemory.user_id == alice.id).update({"is_active": False})
+    session.flush()
+    readd = client.post("/api/memories", json={"content": "我负责华东区客服排班"})
+    assert readd.status_code == 201  # 软删行不参与查重：删后可重新添加
+
+    assert len(active_memories(session)) == 2  # alice 1 条（重加）+ bob 1 条
+    add_audits = session.scalars(select(AuditLog).where(AuditLog.action == "memory.add")).all()
+    assert len(add_audits) == 3  # alice 首加 + bob 添加 + alice 重加；409 不留痕
+
+
 def test_add_memory_capacity_evicts_oldest(client, session, monkeypatch) -> None:
     """容量上限（settings.memory_max_per_user）：写满后再加，最旧（updated_at 早）软删淘汰。"""
     alice = make_user(session, "alice")
@@ -153,6 +181,12 @@ def test_add_memory_capacity_evicts_oldest(client, session, monkeypatch) -> None
     assert rows["较新画像"].is_active is True
     assert rows["最新画像"].is_active is True
     assert len(active_memories(session)) == 2
+    evict_audits = session.scalars(select(AuditLog).where(AuditLog.action == "memory.evict")).all()
+    assert len(evict_audits) == 1  # B6：淘汰留痕（容量淘汰不是静默丢失）
+    assert evict_audits[0].object_id == rows["旧画像"].id
+    assert evict_audits[0].detail["id"] == rows["旧画像"].id
+    assert evict_audits[0].detail["content"] == "旧画像"
+    assert evict_audits[0].actor_user_id == alice.id
 
 
 # ---------- 列表 ----------

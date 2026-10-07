@@ -6,15 +6,11 @@ BaseChatModel 实现（bind_tools + _generate + _stream），通道构造口径�
 Settings，不复制密钥加载逻辑），档位留空复用主问答通道的决策在 Settings 注释与工单 #06 装配。
 不进 core/llm：core 保持无 agent 语义（specs/agent-evolution.md §4.4）。
 
-ReAct 文本兜底协议（specs §4.4：内网/小档模型可能无原生 tool-calling）::
-
-    <<TOOL:工具名|{"参数名": "值"}>>
-
-约定：绑定工具后，模型在正文用上面的单行标记表达一次工具调用，可多行连用表达多次；参数为
-JSON 对象（空 ``{}`` 合法）；工具名必须命中绑定集合（防幻觉工具）；解析为 AIMessage.tool_calls
-交给 agent 循环，正文清空。仅在"绑定了工具 + 未返回原生 tool_calls + react_fallback 开启"
-三条件同时成立时解析；含标记但参数非法 / 工具未绑定 → ReactParseError（计一次 step error，由循环计数，
-不在适配层重试）；无标记即普通文本回答原样透传。
+ReAct 文本兜底协议的语法与失败语义见 app/core/agent_react.py（拆分自本模块，300 行
+红线）；本模块只消费：绑定工具 + 无原生 tool_calls + fallback 开启时解析正文，解析
+失败（ReactParseError）按 B1 步级语义转成对 react_parse_feedback 的合成调用——失败
+摘要进 args，桥接层以 {"error": ...} 观察喂回 agent 循环继续（与工具失败路径同形），
+循环仍失败由 LangGraph 递归上限收口为既有失败路径（RUN_ERROR），不在适配层重试。
 
 上游故障语义：通道一切失败统一 UpstreamError（broken=False，非流式无半成品），不吞不改；一次重试收口在
 真实通道内部（tei 同款纪律：传输错误/超时/5xx 重试 1 次，4xx 不重试）。测试以 Stub 通道注入；真实通道
@@ -22,9 +18,9 @@ JSON 对象（空 ``{}`` 合法）；工具名必须命中绑定集合（防幻�
 """
 
 import json
-import re
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import count
 from typing import Any, Protocol
 
 import httpx
@@ -36,37 +32,26 @@ from langchain_core.runnables import Runnable
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import Field
 
+from app.core.agent_react import (
+    REACT_FEEDBACK_TOOL_NAME,
+    ReactParseError,
+    parse_react_tool_calls,
+)
 from app.core.llm import UpstreamError
 
-_TOOL_MARKER = re.compile(r"<<TOOL:([A-Za-z0-9_.-]+)\|(.*?)>>", re.DOTALL)
 _MAX_ATTEMPTS: int = 2  # 一次重试：最多 2 次尝试（每次独立新请求，tei 同款）
+_REACT_ERR_SEQ = count(1)  # 反馈调用 id 序列：多次解析失败各自可区分（tool_call_id 唯一）
 
 
-class ReactParseError(ValueError):
-    """ReAct 文本协议解析失败（specs §4.4：计一次 step error，不无限重试）。"""
-
-
-def parse_react_tool_calls(text: str, allowed: set[str]) -> list[dict[str, Any]]:
-    """按模块 docstring 协议解析正文为 tool_calls：无标记返回 []，有标记即严格解析。
-
-    参数必须为 JSON 对象（空 ``{}`` 合法）、工具名必须已绑定；任一不满足抛 ReactParseError
-    ——宁可一次 step error，也不把半解析结果喂给 agent 循环。
-    """
-    matches = _TOOL_MARKER.findall(text)
-    if not matches:
-        return []
-    calls: list[dict[str, Any]] = []
-    for index, (name, raw_args) in enumerate(matches):
-        if name not in allowed:
-            raise ReactParseError(f"react 协议调用了未绑定工具: {name}")
-        try:
-            args = json.loads(raw_args) if raw_args.strip() else {}
-        except ValueError as exc:  # 含 JSONDecodeError；同族收口不裸抛
-            raise ReactParseError(f"react 协议参数不是合法 JSON: {exc}") from exc
-        if not isinstance(args, dict):
-            raise ReactParseError("react 协议参数必须是 JSON 对象")
-        calls.append({"name": name, "args": args, "id": f"react_{index}", "type": "tool_call"})
-    return calls
+def _react_feedback_call(summary: str) -> dict[str, Any]:
+    """B1 步级语义的合成调用：解析失败摘要 → react_parse_feedback 调用（桥接层供
+    同名执行体，观察以 {"error": 摘要} 形态喂回循环，编排层据此落 agent_steps.error）。"""
+    return {
+        "name": REACT_FEEDBACK_TOOL_NAME,
+        "args": {"error": summary},
+        "id": f"react_err_{next(_REACT_ERR_SEQ)}",
+        "type": "tool_call",
+    }
 
 
 @dataclass(frozen=True)
@@ -227,7 +212,8 @@ class AgentChatModel(BaseChatModel):
     """DeepAgents 可消费的 BaseChatModel 最小面：bind_tools + _generate + _stream。
 
     react_fallback=True 时：绑定工具且上游未返回原生 tool_calls，正文含协议标记即解析为
-    tool_calls（协议与失败语义见模块 docstring）；未绑定或 fallback 关闭时正文原样透传
+    tool_calls（语法与失败语义见 agent_react）；解析失败按 B1 步级语义合成
+    react_parse_feedback 调用（不终止循环）；未绑定或 fallback 关闭时正文原样透传
     （协议标记只是普通文本，不误伤普通问答）。上游故障抛 UpstreamError，不吞不改。
     """
 
@@ -266,10 +252,18 @@ class AgentChatModel(BaseChatModel):
                 for tool in self.bound_tools
                 if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
             }
-            parsed = parse_react_tool_calls(content, allowed)
-            if parsed:
-                content = ""  # 协议行不进正文：工具调用语义由 tool_calls 承载
-                tool_calls = parsed
+            try:
+                parsed = parse_react_tool_calls(content, allowed)
+            except ReactParseError as exc:
+                # B1：解析失败不向上终止运行（旧径落入 generic Exception → RUN_ERROR
+                # "系统繁忙"），转为反馈调用——桥接层以 {"error": 摘要} 观察喂回循环
+                # （与工具失败路径同形），模型据此修正输出格式后重试。
+                content = ""
+                tool_calls = [_react_feedback_call(str(exc))]
+            else:
+                if parsed:
+                    content = ""  # 协议行不进正文：工具调用语义由 tool_calls 承载
+                    tool_calls = parsed
         return ChatResult(
             generations=[ChatGeneration(message=AIMessage(content=content, tool_calls=tool_calls))]
         )

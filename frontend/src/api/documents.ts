@@ -5,9 +5,9 @@
  * FormData 识别后不设 Content-Type（boundary 由浏览器生成）。响应体按 api.md 手写
  * （后端未声明 response_model）。
  *
- * metadata-suggest（F-1008，T4）与 import-zip（F-1007，T3）端点在车道 A 分支
- * （6a88cd8 / 36da916），尚未合入 feat/w4-fe：调用侧 silent 并对失败静默降级
- * （建议仅本地预填、导入入口置灰），合并后自动生效（deviations #21/#22）。
+ * metadata-suggest（F-1008，T4）与 import-zip（F-1007，T3）端点已上线（历史注记：
+ * 曾在车道 A 分支先行，2026-10-06 对账时合入口径以 docs/api.md 为准），
+ * 调用侧 silent 并对失败静默降级（建议仅本地预填、导入入口置灰）。
  */
 import { ApiClientError, del, get, post, request } from './client'
 import type { PageData } from './types'
@@ -191,7 +191,7 @@ export function rejectDraft(
   )
 }
 
-// ---- 车道 A T3/T4 端点（尚未合入本分支，契约按合入提交逐字段对齐） ----
+// ---- 车道 A T3/T4 端点（已上线，契约见 docs/api.md §2.8a-c） ----
 
 export type ZipEntryStatus = 'accepted' | 'duplicate' | 'rejected' | 'skipped_metadata'
 

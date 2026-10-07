@@ -7,6 +7,9 @@ alembic upgrade head
 # 自愈（2026-10-02 事故）：真实模式解析走容器内 BackgroundTasks，不持久化——容器重启
 # 后队列丢失，遗留 parsing 会永久卡住且 UI 无重试入口。启动时统一转 failed+原因，
 # 管理员即可在列表点重试（retry 走新任务，幂等）。
+# 前提：本容器独占其数据库（单机 compose 一库一 app；E2E 隔离库 pg-e2e/rag_e2e 落地后，
+# 共库跑套件的事故形态已消除）——若未来多实例共享同一库，本段会把其他实例正在跑的
+# parsing/running 任务误标 failed，届时须按实例归属加过滤再执行。
 python - <<'PY'
 from app.db.base import SessionLocal
 from app.db.models import Document, EvalRun

@@ -1,4 +1,4 @@
-r"""重建索引路由（F-304，W7 补齐）：POST /documents/rebuild-index（全库级）+
+r"""重建索引路由（F-304，W6 后追加）：POST /documents/rebuild-index（全库级）+
 POST /documents/{doc_id}/rebuild-index（文档级）——独立成文件因 documents.py 已近
 行数上限（同 admin_eval.py/admin_retrieval_test.py 先例，§1.4）。
 

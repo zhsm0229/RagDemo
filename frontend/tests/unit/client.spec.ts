@@ -14,6 +14,8 @@ import {
   ApiClientError,
   BAD_RESPONSE_CODE,
   NETWORK_ERROR_CODE,
+  REQUEST_TIMEOUT_CODE,
+  REQUEST_TIMEOUT_MESSAGE,
   UNAUTHORIZED_CODE,
   request,
   setUnauthorizedHandler,
@@ -66,6 +68,41 @@ describe('request 统一信封解包', () => {
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(init.body).toBeUndefined()
     expect(init.headers).toBeUndefined()
+  })
+})
+
+describe('request 默认超时（M27）', () => {
+  it('未显式传 signal 时默认挂 AbortSignal.timeout（30s）', async () => {
+    fetchMock.mockResolvedValue(envelopeResponse({ code: 0, message: 'ok', data: null }))
+    await request('/conversations')
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(init.signal).toBeInstanceOf(AbortSignal)
+    expect((init.signal as AbortSignal).aborted).toBe(false)
+  })
+
+  it('显式传 signal 时不覆盖（调用方自行管理取消语义）', async () => {
+    fetchMock.mockResolvedValue(envelopeResponse({ code: 0, message: 'ok', data: null }))
+    const controller = new AbortController()
+    await request('/conversations', { signal: controller.signal })
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(init.signal).toBe(controller.signal)
+  })
+
+  it('默认超时中止（TimeoutError）抛 REQUEST_TIMEOUT_CODE 并弹超时提示（区别于用户中断）', async () => {
+    fetchMock.mockRejectedValue(new DOMException('signal timed out', 'TimeoutError'))
+    await expect(request('/conversations')).rejects.toMatchObject({
+      code: REQUEST_TIMEOUT_CODE,
+      message: REQUEST_TIMEOUT_MESSAGE,
+    })
+    expect(ElMessage.error).toHaveBeenCalledWith(REQUEST_TIMEOUT_MESSAGE)
+  })
+
+  it('silent=true 超时不弹提示', async () => {
+    fetchMock.mockRejectedValue(new DOMException('signal timed out', 'TimeoutError'))
+    await expect(request('/conversations', { silent: true })).rejects.toMatchObject({
+      code: REQUEST_TIMEOUT_CODE,
+    })
+    expect(ElMessage.error).not.toHaveBeenCalled()
   })
 })
 

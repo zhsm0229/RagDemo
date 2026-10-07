@@ -52,6 +52,8 @@ function handleFile(uploadFile: UploadFile): void {
   }
   fileErr.value = ''
   file.value = uploadFile
+  // 换包即清空上次汇总（M34）：不关弹窗直接换包时，旧结果不得残留误导确认
+  summary.value = null
 }
 
 async function submit(): Promise<void> {
@@ -62,9 +64,8 @@ async function submit(): Promise<void> {
   submitting.value = true
   try {
     summary.value = await importDocumentsZip(raw)
-    ElMessage.success(
-      `导入完成：入库 ${summary.value.accepted} 份，拒绝 ${summary.value.rejected} 份，跳过 ${summary.value.skipped} 份`,
-    )
+    // 短句即可（M34）：逐文件结果与汇总行已在弹窗内呈现，toast 不再复述数字
+    ElMessage.success('导入完成')
     if (summary.value.accepted > 0) emit('imported')
   } catch (e) {
     error.value = e instanceof ApiClientError ? e.message : '系统繁忙，请稍后重试'

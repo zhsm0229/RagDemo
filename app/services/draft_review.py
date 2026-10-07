@@ -15,6 +15,7 @@ audit_document 留痕并与业务写入同事务提交。
 
 from pathlib import PureWindowsPath
 
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from app.core.clock import Clock
@@ -96,41 +97,74 @@ def create_draft(
 
 
 def approve_draft(session: Session, clock: Clock, doc_id: int, actor_user_id: int) -> Document:
-    """审核通过：待审核 → 已通过，审计并提交；入库管道由 api 层在提交后触发
-    （test_mode 同步 process_document，生产挂 BackgroundTasks——与 retry 同一编排），
-    本函数不碰 status/is_active：交给管道收口，杜绝绕过敏感扫描/查重的旁路。"""
-    doc = _pending_draft(session, doc_id)
-    doc.review_status = REVIEW_APPROVED
-    doc.updated_at = clock.now()
+    """审核通过：待审核 → 已通过（条件 UPDATE 判 rowcount），审计并提交；入库管道由
+    api 层在提交后触发（test_mode 同步 process_document，生产挂 BackgroundTasks——
+    与 retry 同一编排），本函数不碰 status/is_active：交给管道收口，杜绝绕过敏感
+    扫描/查重的旁路。
+
+    B3 TOCTOU：旧"前置检查 + UPDATE"两步形态下，双管理员并发审核都能读到待审核而
+    双双放行（双触发入库管道）；条件 UPDATE 把"判定与迁移"合并为一条语句——PG 行锁
+    排队 + WHERE 复评保证恰一次迁移，0 行即对手已收口或前提不成立（_raise_untransitable
+    定性）。"""
+    updated = session.execute(
+        update(Document)
+        .where(
+            Document.id == doc_id,
+            Document.source_type == "draft",
+            Document.review_status == REVIEW_PENDING,
+        )
+        .values(review_status=REVIEW_APPROVED, updated_at=clock.now())
+    )
+    if updated.rowcount == 0:
+        _raise_untransitable(session, doc_id)
     audit_document(
         session,
         actor_user_id,
         "document.draft_approve",
-        doc.id,
+        doc_id,
         {"before": {"reviewStatus": REVIEW_PENDING}, "after": {"reviewStatus": REVIEW_APPROVED}},
         clock=clock,
     )
     session.commit()
+    return _updated_row(session, doc_id)
+
+
+def _updated_row(session: Session, doc_id: int) -> Document:
+    """迁移提交后回读库内真相：条件 UPDATE 是语句级写入，SQLAlchemy 的会话镜像同步
+    并不保证覆盖全部 SET 列（实测 review_status 同步而 reject_reason 残留旧值），
+    refresh 强制回读，保证回传字段（reviewStatus/rejectReason）是库内终值而非残影。"""
+    doc = session.get(Document, doc_id)
+    if doc is None:  # 理论不可达（迁移刚成功）；防御读优于 assert（-O 不裁语义）
+        raise ApiError(ERR_NOT_FOUND, _MSG_NOT_FOUND, 404)
+    session.refresh(doc)
     return doc
 
 
 def reject_draft(
     session: Session, clock: Clock, doc_id: int, actor_user_id: int, reason: str
 ) -> Document:
-    """驳回：待审核 → 已驳回 + 原因留档（reject_reason），审计并提交。
-    驳回后永不触发解析：status 停在 pending，检索侧天然不命中；文件与行保留供追溯。"""
+    """驳回：待审核 → 已驳回 + 原因留档（reject_reason），审计并提交（条件 UPDATE
+    判 rowcount，TOCTOU 防线同 approve_draft）。驳回后永不触发解析：status 停在
+    pending，检索侧天然不命中；文件与行保留供追溯。"""
     reason = (reason or "").strip()
     if not reason:
         raise ApiError(ERR_PARAM_INVALID, _MSG_REASON_REQUIRED, 422)
-    doc = _pending_draft(session, doc_id)
-    doc.review_status = REVIEW_REJECTED
-    doc.reject_reason = reason
-    doc.updated_at = clock.now()
+    updated = session.execute(
+        update(Document)
+        .where(
+            Document.id == doc_id,
+            Document.source_type == "draft",
+            Document.review_status == REVIEW_PENDING,
+        )
+        .values(review_status=REVIEW_REJECTED, reject_reason=reason, updated_at=clock.now())
+    )
+    if updated.rowcount == 0:
+        _raise_untransitable(session, doc_id)
     audit_document(
         session,
         actor_user_id,
         "document.draft_reject",
-        doc.id,
+        doc_id,
         {
             "before": {"reviewStatus": REVIEW_PENDING},
             "after": {"reviewStatus": REVIEW_REJECTED, "reason": reason},
@@ -138,17 +172,16 @@ def reject_draft(
         clock=clock,
     )
     session.commit()
-    return doc
+    return _updated_row(session, doc_id)
 
 
-def _pending_draft(session: Session, doc_id: int) -> Document:
-    """寻址 + 状态机前置校验：不存在 404/3003（I13 同判口径）；非草稿或非待审核
-    422/1003——重复审核、对 upload 语料审核都是非法迁移，fail-fast 不给幂等假象。"""
+def _raise_untransitable(session: Session, doc_id: int) -> None:
+    """条件 UPDATE 0 行的定性读回（与旧 _pending_draft 前置检查同判同话术）：不存在
+    404/3003（I13 同判口径）；非草稿 / 非待审核 422/1003——重复审核、对 upload 语料
+    审核都是非法迁移，fail-fast 不给幂等假象（并发对手已收口同落 422/1003）。"""
     doc = session.get(Document, doc_id)
     if doc is None:
         raise ApiError(ERR_NOT_FOUND, _MSG_NOT_FOUND, 404)
     if doc.source_type != "draft":
         raise ApiError(ERR_PARAM_INVALID, _MSG_NOT_DRAFT, 422)
-    if doc.review_status != REVIEW_PENDING:
-        raise ApiError(ERR_PARAM_INVALID, _MSG_NOT_PENDING, 422)
-    return doc
+    raise ApiError(ERR_PARAM_INVALID, _MSG_NOT_PENDING, 422)

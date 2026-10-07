@@ -9,13 +9,15 @@ r"""草稿审核状态机集成测试（agent-evolution #05，真 pg + StubEmbed
 
 import hashlib
 import os
+import threading
 from datetime import date
+from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.core.clock import FakeClock
+from app.core.clock import FakeClock, SystemClock
 from app.core.config import Settings, get_settings
 from app.core.errors import (
     ERR_DUPLICATE_DOC,
@@ -290,3 +292,139 @@ def test_double_approve_rejected(session, sandbox_storage):
     with pytest.raises(ApiError) as exc_info:
         reject_draft(session, FakeClock(), doc.id, actor_user_id=1, reason="再驳")
     assert exc_info.value.code == ERR_PARAM_INVALID
+
+
+# ---------------------------------------------------------------------------
+# ④ B3 TOCTOU：条件 UPDATE——并发审核恰一次迁移、恰一次触发管道
+# ---------------------------------------------------------------------------
+
+
+def test_concurrent_approve_transition_exactly_once(pg):
+    """双管理员并发审核（两线程独立连接，同刻起跑放大竞态）→ 恰一次迁移成功（另一方
+    422/1003），document.draft_approve 审计恰一条。api 层按"审核成功才触发既有入库
+    管道"编排（api/document_admin.approve_draft），审计唯一即管道恰触发一次的等价证据
+    ——旧"前置检查 + UPDATE"两步形态下两个线程都能读到待审核而双双放行。"""
+    digest = uuid4().hex  # uuid 内容防与库内残留行撞唯一约束
+    with Session(pg) as setup:
+        admin_id = setup.scalars(select(User.id).where(User.username == "admin")).one()
+        dept_id = setup.scalars(select(Department.id).where(Department.code == "service")).one()
+        doc = Document(
+            title=f"客服_并发审核_{digest[:8]}",
+            dept_id=dept_id,
+            original_filename=f"{digest[:8]}.md",
+            file_path=f"seed/{digest[:8]}.md",
+            mime=MD_MIME,
+            size_bytes=16,
+            content_hash=digest,
+            version=1,
+            effective_date=date(2026, 10, 1),
+            owner_name="制度责任人",
+            status="pending",
+            is_active=False,
+            source_type="draft",
+            review_status=REVIEW_PENDING,
+            uploaded_by=admin_id,
+        )
+        setup.add(doc)
+        setup.commit()
+        doc_id = doc.id
+
+    barrier = threading.Barrier(2)
+    outcomes: list[str] = []
+
+    def _approve() -> None:
+        with Session(pg) as worker:  # 独立连接：真行锁竞态，非同事务假并发
+            barrier.wait()
+            try:
+                approve_draft(worker, SystemClock(), doc_id, actor_user_id=admin_id)
+                outcomes.append("approved")
+            except ApiError as exc:
+                outcomes.append(f"{exc.http_status}/{exc.code}")
+
+    threads = [threading.Thread(target=_approve) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    try:
+        assert sorted(outcomes) == ["422/1003", "approved"]  # 恰一次成功，另一方 422
+        with Session(pg) as verify:
+            assert verify.get(Document, doc_id).review_status == REVIEW_APPROVED
+            audits = verify.scalars(
+                select(AuditLog).where(
+                    AuditLog.object_type == "document",
+                    AuditLog.object_id == doc_id,
+                    AuditLog.action == "document.draft_approve",
+                )
+            ).all()
+            assert len(audits) == 1  # 恰一次成功路径：审计唯一 → 管道恰触发一次
+    finally:
+        with Session(pg) as cleanup:  # 本测试独立连接提交的行自清，不污染其他用例
+            cleanup.execute(
+                delete(AuditLog).where(
+                    AuditLog.object_type == "document", AuditLog.object_id == doc_id
+                )
+            )
+            cleanup.execute(delete(Document).where(Document.id == doc_id))
+            cleanup.commit()
+
+
+def test_approve_with_stale_pending_read_rejected(pg):
+    """确定性 TOCTOU（不依赖线程时序）：本会话先持"待审核"陈旧读数 → 对手在另一连接
+    完成迁移并提交 → 本会话仍按陈旧读数发起迁移 → 条件 UPDATE 0 行 → 422/1003。
+    旧"前置检查 + UPDATE"两步形态在此剧本下会按缓存读数放行并留下第二份审计
+    （= api 层第二次触发管道）；条件 UPDATE 把判定与迁移合并为一条语句后不可能。"""
+    digest = uuid4().hex
+    with Session(pg) as setup:
+        admin_id = setup.scalars(select(User.id).where(User.username == "admin")).one()
+        dept_id = setup.scalars(select(Department.id).where(Department.code == "service")).one()
+        doc = Document(
+            title=f"客服_陈旧读数_{digest[:8]}",
+            dept_id=dept_id,
+            original_filename=f"{digest[:8]}.md",
+            file_path=f"seed/{digest[:8]}.md",
+            mime=MD_MIME,
+            size_bytes=16,
+            content_hash=digest,
+            version=1,
+            effective_date=date(2026, 10, 1),
+            owner_name="制度责任人",
+            status="pending",
+            is_active=False,
+            source_type="draft",
+            review_status=REVIEW_PENDING,
+            uploaded_by=admin_id,
+        )
+        setup.add(doc)
+        setup.commit()
+        doc_id = doc.id
+
+    try:
+        with Session(pg) as mine:
+            stale_view = mine.get(Document, doc_id)  # 陈旧读数：对手提交前取得
+            assert stale_view.review_status == REVIEW_PENDING
+            with Session(pg) as rival:  # 对手抢先完成迁移并提交
+                approve_draft(rival, SystemClock(), doc_id, actor_user_id=admin_id)
+            with pytest.raises(ApiError) as exc_info:
+                approve_draft(mine, SystemClock(), doc_id, actor_user_id=admin_id)
+            assert (exc_info.value.http_status, exc_info.value.code) == (422, ERR_PARAM_INVALID)
+        with Session(pg) as verify:  # 终态唯一：迁移恰一次，审计恰一条
+            assert verify.get(Document, doc_id).review_status == REVIEW_APPROVED
+            audits = verify.scalars(
+                select(AuditLog).where(
+                    AuditLog.object_type == "document",
+                    AuditLog.object_id == doc_id,
+                    AuditLog.action == "document.draft_approve",
+                )
+            ).all()
+            assert len(audits) == 1
+    finally:
+        with Session(pg) as cleanup:
+            cleanup.execute(
+                delete(AuditLog).where(
+                    AuditLog.object_type == "document", AuditLog.object_id == doc_id
+                )
+            )
+            cleanup.execute(delete(Document).where(Document.id == doc_id))
+            cleanup.commit()

@@ -88,6 +88,38 @@ describe('列表加载与渲染', () => {
     const wrapper = await mountMessages()
     expect(wrapper.text()).toContain('暂无提问记录')
   })
+
+  it('筛选无结果空态：显示"没有匹配筛选条件的提问记录"+清除筛选，回列表（B9）', async () => {
+    // 仅一条点踩记录：筛"无点踩"→ 0 行 → 筛选无结果分支（非"暂无提问记录"）
+    messageItem({ feedback: 'down' })
+    const wrapper = await mountMessages()
+    expect(wrapper.findAll('.el-table__row')).toHaveLength(1)
+
+    // 反馈下拉（teleport）：选"无点踩"
+    await wrapper.findAll('.el-select')[1]!.find('.el-select__wrapper').trigger('click')
+    await waitFor(
+      () =>
+        [...document.querySelectorAll('.el-select-dropdown')].some((d) =>
+          d.textContent?.includes('无点踩'),
+        ),
+      '反馈下拉渲染',
+    )
+    const noneOption = [...document.querySelectorAll('.el-select-dropdown__item')].find((el) =>
+      el.textContent?.includes('无点踩'),
+    )!
+    await new DOMWrapper(noneOption).trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="messages-empty-filtered"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('没有匹配筛选条件的提问记录')
+    expect(wrapper.text()).not.toContain('暂无提问记录')
+
+    // 清除筛选 → 筛选空态退场，原行恢复展示
+    await wrapper.find('[data-test="messages-empty-filtered"] button').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="messages-empty-filtered"]').exists()).toBe(false)
+    expect(wrapper.findAll('.el-table__row')).toHaveLength(1)
+    expect(lastListCall()).not.toContain('hasFeedback=')
+  })
 })
 
 describe('筛选与分页（§22.1）', () => {

@@ -9,8 +9,9 @@
  * 原型"会话/回答摘要"列无对应字段（列表以 user 行为单位）→ deviations #38；
  * DTO 仅 hasCitations 布尔（无条数）、反馈无 category → 引用列"有/无"、反馈列仅
  * 点踩标记（同 #38）。日期范围经 checkDateRange 预检（§21.3）。
+ * 空态双分支（B9，照 MemoryView §2.5 范式）：筛选无结果 vs 未积累。
  */
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { checkDateRange } from '@/validators'
 import { listAdminMessages, type AdminMessageItem } from '@/api/adminMessages'
 import { answerTypeLabel, ADMIN_DEPT_ID_OPTIONS, deptCodeLabel } from '@/components/admin/options'
@@ -30,6 +31,11 @@ const pageSize = ref(20)
 const loading = ref(false)
 const detailVisible = ref(false)
 const detailId = ref<number | null>(null)
+
+// 空态双分支判定（B9）：任一筛选条件激活即"筛选无结果"
+const hasFilter = computed(
+  () => filters.deptId !== undefined || filters.dateRange !== null || filters.fb !== '',
+)
 
 async function load(): Promise<void> {
   loading.value = true
@@ -173,8 +179,17 @@ function formatTime(iso: string): string {
           <el-button link type="primary" @click="openDetail(row)">详情</el-button>
         </template>
       </el-table-column>
+      <!-- 空态双分支（B9）：筛选无结果 vs 未积累 -->
       <template #empty>
-        <el-empty description="暂无提问记录" :image-size="60" />
+        <el-empty
+          v-if="hasFilter"
+          description="没有匹配筛选条件的提问记录"
+          :image-size="60"
+          data-test="messages-empty-filtered"
+        >
+          <el-button size="small" @click="resetFilters">清除筛选</el-button>
+        </el-empty>
+        <el-empty v-else description="暂无提问记录" :image-size="60" />
       </template>
     </el-table>
 

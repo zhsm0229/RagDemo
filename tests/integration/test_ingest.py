@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.core.clock import Clock, FakeClock
 from app.core.config import Settings
-from app.core.errors import ERR_DUPLICATE_DOC, ApiError
+from app.core.errors import ERR_DUPLICATE_DOC, ERR_PARAM_INVALID, ApiError
 from app.core.llm import StubEmbedder
 from app.core.storage import LocalFileStorage
 from app.db.models import AuditLog, Chunk, Document, User
@@ -272,6 +272,47 @@ def test_confirm_missing_document_404(session: Session) -> None:
     with pytest.raises(ApiError) as ei:
         confirm_document(session, 987654321, actor_user_id=admin_id)
     assert ei.value.http_status == 404
+
+
+def test_double_confirm_second_rejected_single_audit(session: Session) -> None:
+    """B3 TOCTOU：confirm 为条件迁移（仅 is_active=False 可激活）——已生效文档重复确认
+    422/1003，document.confirm 审计恰一条（双管理员并发确认同构：第二个 0 行迁移即
+    422，不产生第二条审计、不重复留痕）；不存在的文档仍 404（上一用例口径不变）。"""
+    admin_id = session.scalars(select(User.id).where(User.username == "admin")).one()
+    dept_id = session.scalar(select(User.dept_id).where(User.username == "admin"))
+    digest = hashlib.sha256(b"double-confirm-probe").hexdigest()
+    doc = Document(
+        title="客服_重复确认样本",
+        dept_id=dept_id,
+        original_filename="double_confirm.md",
+        file_path=f"seed/{digest}.md",
+        mime="text/markdown",
+        size_bytes=16,
+        content_hash=digest,
+        version=1,
+        effective_date=date(2026, 9, 1),
+        owner_name="制度责任人",
+        status="ready",
+        is_active=False,
+        uploaded_by=admin_id,
+    )
+    session.add(doc)
+    session.flush()
+
+    confirmed = confirm_document(session, doc.id, actor_user_id=admin_id)
+    assert confirmed.is_active is True
+    with pytest.raises(ApiError) as ei:
+        confirm_document(session, doc.id, actor_user_id=admin_id)
+    assert ei.value.http_status == 422
+    assert ei.value.code == ERR_PARAM_INVALID
+    audits = session.scalars(
+        select(AuditLog).where(
+            AuditLog.object_type == "document",
+            AuditLog.object_id == doc.id,
+            AuditLog.action == "document.confirm",
+        )
+    ).all()
+    assert len(audits) == 1
 
 
 def test_exact_duplicate_rejected_409_pointing_to_existing(session: Session, tmp_path) -> None:

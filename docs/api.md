@@ -699,7 +699,7 @@ DeepAgents 骨架的 agent 任务流式端点。SSE 线格式同 §1.3（`event:
 | 鉴权 | ReadyUser |
 | 请求体 | `taskType`（白名单：`kb_qa` 知识库问答 / `template_draft` 模板草稿生成（agent-evolution #06，2026-10-06），未知 422/1003）、`input`（任务输入，strip 后 1-2000 字，§21.5） |
 | 成功响应 | `200`，`text/event-stream`。事件序 **RUN_STARTED → (STEP_STARTED → TOOL_CALL_START → TOOL_CALL_ARGS → TOOL_CALL_END → STEP_FINISHED)×N → TEXT_MESSAGE_START → TEXT_MESSAGE_CONTENT → TEXT_MESSAGE_END → RUN_FINISHED**；失败以 RUN_ERROR 收尾 |
-| 开流前错误（普通 JSON） | `422/1003` taskType 不支持 / input 长度非法（字段级）；`429/3002` 今日额度用尽（与问答共享同一计数器，换端点不绕限） |
+| 开流前错误（普通 JSON） | `422/1003` taskType 不在白名单（现支持 `kb_qa` / `template_draft`）/ input 长度非法（字段级）；`429/3002` 今日额度用尽（与问答共享同一计数器，换端点不绕限）；`429/2005` 同一用户已有 2 个进行中任务（并发上限，完成后再发起） |
 | 流中错误 | SSE `RUN_ERROR` 事件（`message` 对外脱敏、`code` 为字符串型共享错误码：5001 上游故障 / 5000 兜底意外）；agent_runs 行同步置 failed，不留 running 幽灵行；客户端断连由服务端兜底置 failed |
 
 关键事件载荷（AG-UI 官方键名）：`RUN_STARTED`/`RUN_FINISHED` 带 `thread_id`、`run_id`（RUN_FINISHED 另带 `result.text` 成稿）；`STEP_*` 带 `step_name`（step-N，一次模型迭代一步）；`TOOL_CALL_*` 带 `tool_call_id`、`tool_call_name`（ARGS 的 `delta` 为参数 JSON）；`TEXT_MESSAGE_*` 带 `message_id`、`delta`。检索工具 `knowledge_base_search` 部门范围恒为 `[本人部门, 全员]`（F-502，调用者上下文强制继承，参数携带的部门字段一律无效）。

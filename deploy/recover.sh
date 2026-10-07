@@ -64,8 +64,20 @@ case "${1:-diag}" in
     docker compose up -d gotenberg; await_health ragdemo-gotenberg ;;
   all) exec bash "$(dirname "$0")/startup-check.sh" ;;
   app)
+    # 重建前对比"当前运行"与"重建后将生效"的库环境（只显示库名与 TEST_MODE，密码不落日志——红线 4）。
+    # 不一致即告警：防误在错误环境重建（如 TEST_MODE 被 e2e-visible 拉成 true 忘切回、
+    # DATABASE_URL 被隔离栈覆盖后指向已删库）。
+    RUN_DB=$(docker exec ragdemo-app printenv DATABASE_URL 2>/dev/null | sed 's|.*/||' || echo "未知")
+    RUN_TM=$(docker exec ragdemo-app printenv TEST_MODE 2>/dev/null || echo "未设")
+    EFF_DB=$(docker compose config 2>/dev/null | awk '/DATABASE_URL:/ {print $2}' | sed 's|.*/||')
+    # 渲染输出对字符串值带 YAML 引号（TEST_MODE: "true"），与 printenv 口径对齐须去引号
+    EFF_TM=$(docker compose config 2>/dev/null | awk '/TEST_MODE:/ {print $2}' | tr -d '"')
+    log "  重建后将生效：DATABASE_URL 库名=${EFF_DB:-未知} TEST_MODE=${EFF_TM:-未设}"
+    log "  当前运行态：DATABASE_URL 库名=${RUN_DB} TEST_MODE=${RUN_TM}"
+    if [ -n "$EFF_DB" ] && { [ "$EFF_DB" != "$RUN_DB" ] || [ "$EFF_TM" != "$RUN_TM" ]; }; then
+      log "  警告：重建将改变库环境（见上两行对比）——如非预期请先核对 .env 再继续"
+    fi
     docker compose up -d --force-recreate app; await_health ragdemo-app
     log "  环境变量（如 TEST_MODE）已按 .env 重新生效" ;;
-  all) exec bash "$(dirname "$0")/startup-check.sh" ;;
   *) log "未知组件：$1（可用：diag/embed/rerank/mineru/app/all）"; exit 1 ;;
 esac

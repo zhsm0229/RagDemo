@@ -26,22 +26,26 @@ async function load(): Promise<void> {
   loading.value = true
   try {
     overview.value = await getOverview(days.value)
+  } catch {
+    // client 已统一 toast；概览卡保持空（v-if 隐藏），等待用户切档/刷新重拉（M36）
   } finally {
     loading.value = false
   }
 }
 
 onMounted(() => {
-  void load()
-  void getHealth().then((data) => {
-    health.value = data
-  })
+  void load().catch(() => {})
+  void getHealth()
+    .then((data) => {
+      health.value = data
+    })
+    .catch(() => {}) // M36：健康度拉取失败仅缺健康面板，不产生 unhandled rejection
 })
 
 function switchDays(value: 1 | 7): void {
   if (value === days.value) return
   days.value = value
-  void load()
+  void load().catch(() => {})
 }
 
 /** 比率 0-1 → 百分比 1 位小数（el-statistic 数值口径，需 number） */
@@ -54,15 +58,23 @@ function pctText(value: number): string {
   return `${(value * 100).toFixed(1)}%`
 }
 
-const questionsLabel = computed(() => (days.value === 1 ? '今日提问' : '近7天提问'))
+/** 概览卡标题随窗口切换（M31："近1天"口径与切档按钮文案一致，不用"今日"） */
+const questionsLabel = computed(() => (days.value === 1 ? '近1天提问' : '近7天提问'))
 
+/** 待处理跳转：不带条件进文档管理（待确认文档数量少，进页即可见） */
 function gotoDocuments(): void {
   void router.push({ name: 'kb-documents' })
 }
 
-/** 待过期日期标红（含已到期未下线：≤ 今天即告警） */
+/** 零召回/待过期行跳转（M42）：带标题关键字进文档管理，直达目标文档 */
+function gotoDocumentsByTitle(row: { title: string }): void {
+  void router.push({ name: 'kb-documents', query: { keyword: row.title } })
+}
+
+/** 待过期日期标红（含已到期未下线：≤ 今天即告警）。
+ * 用本地日期比对（M39）：toISOString 是 UTC 口径，东八区 0-8 点会把"今天"算成昨天。 */
 function expiryClass(expiryDate: string): string {
-  return expiryDate <= new Date().toISOString().slice(0, 10) ? 'expired' : ''
+  return expiryDate <= new Date().toLocaleDateString('sv') ? 'expired' : ''
 }
 </script>
 
@@ -149,7 +161,7 @@ function expiryClass(expiryDate: string): string {
         :data="health.zeroRecall"
         size="small"
         class="click-table"
-        @row-click="gotoDocuments"
+        @row-click="gotoDocumentsByTitle"
       >
         <el-table-column prop="title" label="标题" min-width="200" show-overflow-tooltip />
         <el-table-column label="部门" width="90">
@@ -165,7 +177,7 @@ function expiryClass(expiryDate: string): string {
         :data="health.expiringSoon"
         size="small"
         class="click-table"
-        @row-click="gotoDocuments"
+        @row-click="gotoDocumentsByTitle"
       >
         <el-table-column prop="title" label="标题" min-width="200" show-overflow-tooltip />
         <el-table-column label="到期日" width="120">

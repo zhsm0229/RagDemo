@@ -84,6 +84,23 @@ describe('列表加载与渲染', () => {
     expect(wrapper.findAll('button').some((b) => b.text().includes('新建第一个用户'))).toBe(true)
   })
 
+  it('筛选无结果空态：显示"没有匹配筛选条件的用户"+清除筛选，回真空态（B9）', async () => {
+    // 全程 0 行数据：真空态 → 筛选无结果 → 清除筛选回真空态
+    const wrapper = await mountUsers()
+    expect(wrapper.text()).toContain('还没有用户')
+    await wrapper.find('input[placeholder="搜索用户名"]').setValue('不存在的用户')
+    await clickBtn(wrapper.findAll('button'), '查询')
+    await flushPromises()
+    expect(wrapper.find('[data-test="users-empty-filtered"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('没有匹配筛选条件的用户')
+    expect(wrapper.text()).not.toContain('还没有用户')
+    // 清除筛选 → 回真空态分支
+    await wrapper.find('[data-test="users-empty-filtered"] button').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('还没有用户')
+    expect(lastListCall()).toBe('/api/admin/users?page=1&pageSize=20')
+  })
+
   it('工具栏对照原型：仅有"＋ 新建用户"主操作，操作列为 禁用(启用)+重置密码', async () => {
     backend.users = [userItem()]
     const wrapper = await mountUsers()

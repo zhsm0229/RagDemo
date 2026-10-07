@@ -11,6 +11,16 @@ set -euo pipefail
 IMAGE_REF="${1:?用法: $0 <上一版镜像 digest 引用>}"
 cd "$(dirname "$0")"
 
+# 回滚红线（与 deploy.sh 同口径）：必须按 digest 引用——tag 可被覆盖推送、不可追溯。
+case "$IMAGE_REF" in
+  *@sha256:*) ;;
+  *)
+    echo "拒绝回滚：IMAGE_REF 必须为 digest 形态（<镜像>@sha256:<摘要>），收到：$IMAGE_REF"
+    echo "回滚必须按 digest，上一版引用见 deploy/releases.md 发布记录"
+    exit 1
+    ;;
+esac
+
 echo "[1/3] 拉取回滚目标 $IMAGE_REF"
 APP_IMAGE="$IMAGE_REF" docker compose -f docker-compose.prod.yml pull app
 

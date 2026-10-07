@@ -135,6 +135,8 @@ onUnmounted(() => {
     </div>
     <div v-else-if="message.status === 'done'" class="msg-meta">
       <el-tag v-if="message.refused" size="small" type="warning">已拒答</el-tag>
+      <!-- 拒答场景补充部门可见性口径（B12）：解释"为什么没答到"的最常见原因 -->
+      <span v-if="message.refused" class="refuse-hint">问答仅检索你所在部门与通用知识库</span>
       <el-tag v-if="message.cacheHit" size="small" type="info">来自缓存</el-tag>
       <span v-if="message.promptTokens !== null" class="token-info">
         token: in {{ message.promptTokens }} / out {{ message.completionTokens }} ·
@@ -265,5 +267,8 @@ onUnmounted(() => {
 .fb-down {
   color: var(--el-color-danger);
   white-space: nowrap;
+}
+.refuse-hint {
+  color: var(--el-text-color-secondary);
 }
 </style>

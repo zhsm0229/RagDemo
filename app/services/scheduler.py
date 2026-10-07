@@ -15,6 +15,12 @@ r"""定时任务（W1 Task 15）：到期文档下线清扫 + messages 月分区
   红线 §4.3「禁止 f-string 拼 SQL」字面达成；值为注入时钟 date 算术产物，非请求输入。
 - 调度任务一律用独立 SessionLocal 会话（调度线程无请求会话可依附）；
   settings.test_mode=True 时 build_scheduler 只装配不自启（测试进程不起后台线程）。
+- agent run 幽灵清扫（A4）：running 且 started_at 超过 agent_run_stale_minutes 的
+  agent_runs 置 failed（error="运行超时被清扫"）——正常路径收尾必达终态（services/
+  agent_runs finally 兜底），此任务兜的是进程崩溃/断电等"finally 也没跑成"的遗留行，
+  防幽灵 running 永久占用 A3 并发名额；单条条件 UPDATE 判定与迁移同语句（无 TOCTOU），
+  每小时 45 分跑一次（阈值 15 分钟，最长滞后 ≈1h，远小于占位行产生业务影响的量级；
+  错开 02:00/02:30/03:00 的既有任务窗口）。
 - chat 召回计数 flush（Task 7/F-1011）：HitCounter 进程内聚合经 run_hit_flush
   独立会话刷库，周期由调用方传（Task 8 装配传 settings.cache_ttl_s，与问答缓存
   同生命周期）；pg 异常被 logger.exception 吞掉、聚合保留滚入下一轮。任务注册走
@@ -27,19 +33,20 @@ r"""定时任务（W1 Task 15）：到期文档下线清扫 + messages 月分区
 
 import logging
 import re
-from datetime import date
+from datetime import date, timedelta
 from functools import partial
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from psycopg import sql
-from sqlalchemy import text
+from sqlalchemy import text, update
 from sqlalchemy.orm import Session
 
 from app.core.clock import Clock, get_clock
 from app.core.config import Settings, get_settings
 from app.db.base import SessionLocal
+from app.db.models import AgentRun
 from app.services.chat_cache import HitCounter
 from app.services.ingest import expire_due_documents
 from app.services.retention import purge_expired_messages, soft_archive_old_messages
@@ -52,6 +59,28 @@ _SWEEPS_JOB_ID = "run_due_sweeps"
 _PARTITIONS_JOB_ID = "ensure_month_partitions"
 _RETENTION_JOB_ID = "message_retention_cleanup"
 _HIT_FLUSH_JOB_ID = "flush_hit_counter"
+_AGENT_STALE_JOB_ID = "agent_run_stale_sweep"
+_MSG_AGENT_STALE = "运行超时被清扫"  # 落 agent_runs.error 的对外脱敏话术（技术细节只进日志）
+
+
+def sweep_stale_agent_runs(session: Session, clock: Clock, stale_minutes: int) -> int:
+    """agent run 幽灵清扫任务体（cron/runbook/测试共用入口）：running 且 started_at
+    早于时钟现在时刻减阈值 → failed。单条条件 UPDATE：判定与迁移同语句，PG 行锁 +
+    WHERE 复评保证与并发收尾（_fail_run）互斥不互覆，恰一次落终态；返回清扫条数。
+    阈值经调用方传入（cron 体从 settings 实时读取，改配置无需重装调度器）。"""
+    cutoff = clock.now() - timedelta(minutes=stale_minutes)
+    result = session.execute(
+        update(AgentRun)
+        .where(AgentRun.status == "running", AgentRun.started_at < cutoff)
+        .values(
+            status="failed",
+            error=_MSG_AGENT_STALE,
+            finished_at=clock.now(),
+            updated_at=clock.now(),
+        )
+    )
+    session.commit()
+    return int(result.rowcount or 0)
 
 
 def run_due_sweeps(session: Session, clock: Clock) -> int:
@@ -106,10 +135,11 @@ def ensure_month_partitions(session: Session, n: int = 3) -> int:
 
 def build_scheduler(settings: Settings) -> BackgroundScheduler:
     """装配 APScheduler（UTC）：每日 02:00 到期清扫、每日 03:00 提问记录清理、
-    每月 1 日 02:30 分区补建。
+    每月 1 日 02:30 分区补建、每小时 45 分 agent run 幽灵清扫。
 
     分区排在清扫之后，同窗口内先收口到期再补建下月分区；提问记录清理再后一小时
-    （03:00），避免与 02:00 清扫同窗口抢库。settings.test_mode=True 只装配不自启；
+    （03:00），避免与 02:00 清扫同窗口抢库；agent 幽灵清扫错开上述窗口（:45），
+    阈值 15 分钟下最长清扫滞后约 1 小时。settings.test_mode=True 只装配不自启；
     生产按单实例语义（多 worker 部署时各进程各持一份调度器，属 W4 部署关切）。
     """
     scheduler = BackgroundScheduler(timezone="UTC")
@@ -132,6 +162,13 @@ def build_scheduler(settings: Settings) -> BackgroundScheduler:
         CronTrigger(day="*", hour="3", minute="0", timezone="UTC"),
         id=_RETENTION_JOB_ID,
         name="提问记录两段式清理",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _run_agent_stale_job,
+        CronTrigger(day="*", hour="*", minute="45", timezone="UTC"),
+        id=_AGENT_STALE_JOB_ID,
+        name="agent 运行幽灵清扫",
         replace_existing=True,
     )
     if not settings.test_mode:
@@ -206,3 +243,12 @@ def _run_retention_job() -> None:
             settings.message_cleanup_cooldown_days,
         )
     logger.info("提问记录保留清理完成：归档 %d 条，物理清理 %d 条", archived, purged)
+
+
+def _run_agent_stale_job() -> None:
+    """cron 任务体（A4）：独立会话执行 agent run 幽灵清扫；阈值从 settings 实时读取。
+    清扫 >0 才留运行日志（常态空转不刷屏），清扫失败不吞也不拖垮调度线程。"""
+    with SessionLocal() as session:
+        swept = sweep_stale_agent_runs(session, get_clock(), get_settings().agent_run_stale_minutes)
+    if swept:
+        logger.info("agent run 幽灵清扫：%d 行 running 超龄置 failed", swept)

@@ -15,15 +15,23 @@ from datetime import date
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.core.errors import ERR_DAILY_LIMITED, ERR_INTERNAL, ERR_LLM_UNAVAILABLE, ERR_PARAM_INVALID
+from app.core.agent_react import REACT_FEEDBACK_TOOL_NAME
+from app.core.errors import (
+    ERR_DAILY_LIMITED,
+    ERR_INTERNAL,
+    ERR_LLM_UNAVAILABLE,
+    ERR_PARAM_INVALID,
+    ERR_RATE_LIMITED,
+)
 from app.core.llm import StubEmbedder, UpstreamError
 from app.core.tools import RunContext
 from app.db.models import AgentRun, AgentStep, Chunk, Department, Document, User
 from app.main import app
 from app.services.agent_runs import event_stream
+from app.services.agent_tasks import TASK_PROFILES, TaskType
 from tests.conftest import login_as
 
 INPUT_TEXT = "公司年假有多少天"
@@ -359,3 +367,131 @@ def test_generator_close_sweeps_failed_no_ghost(agent_client, session) -> None:
     assert swept.status == "failed"
     assert swept.error == "系统繁忙，请稍后重试"
     assert swept.finished_at is not None
+
+
+# ---------- ⑥ A3 并发上限：同用户 running≥2 → 429 拒新；终态后可再发起 ----------
+
+
+def test_concurrent_running_cap_429_until_terminal(agent_client, session) -> None:
+    """A3：该用户已有 2 个 status=running 占位行（并行会话在跑或进程中断遗留）→ 再发起
+    429（未开流普通 JSON、不落新行、错误码取共享枚举限流语义）；存量 run 到终态后
+    即可再次发起。"""
+    user = make_user(session, "capuser", "right-one")
+    for _ in range(2):
+        session.add(
+            AgentRun(
+                user_id=user.id,
+                dept_id=user.dept_id,
+                run_type="kb_qa",
+                input={"taskType": "kb_qa", "input": "占位"},
+            )
+        )
+    session.commit()
+    assert login_as(agent_client, "capuser", "right-one").status_code == 200
+
+    blocked = post_run(agent_client)
+
+    assert blocked.status_code == 429
+    body = blocked.json()
+    assert body["code"] == ERR_RATE_LIMITED
+    assert body["message"] == "已有生成任务进行中，请等待完成或停止后再试"
+    assert "event-stream" not in blocked.headers.get("content-type", "")
+    assert session.scalar(select(func.count()).select_from(AgentRun)) == 2  # 拒绝不落新行
+
+    # 存量 run 收尾/被清扫为终态（failed/succeeded 均不再是 running）→ 可再发起
+    session.execute(update(AgentRun).where(AgentRun.user_id == user.id).values(status="failed"))
+    session.commit()
+
+    assert post_run(agent_client).status_code == 200
+
+
+# ---------- ⑦ B1 ReAct 解析失败步级语义：反馈观察喂回模型继续循环 ----------
+
+
+class _RecordingScriptedChannel:
+    """逐回合吐 ChannelTurn 并记录每次收到的 messages（验证模型收到解析失败观察）。"""
+
+    def __init__(self, turns: list) -> None:
+        self._turns = turns
+        self._calls = 0
+        self.seen_messages: list[list[dict]] = []
+
+    def complete(self, messages, tools, max_tokens):
+        self.seen_messages.append([dict(m) for m in messages])
+        index = min(self._calls, len(self._turns) - 1)
+        self._calls += 1
+        return self._turns[index]
+
+
+def test_react_parse_error_fed_back_as_observation(agent_client, session, monkeypatch) -> None:
+    """B1：ReAct 文本非法 JSON → 不再直接 RUN_ERROR"系统繁忙"；解析失败摘要以
+    react_parse_feedback 工具观察（{"error": ...}，与工具失败路径同形）喂回模型继续
+    循环，agent_steps 落 error 行，模型收到观察后正常收口 succeeded。"""
+    from app.core.agent_model import ChannelTurn
+
+    make_user(session, "reactuser", "right-one")
+    channel = _RecordingScriptedChannel(
+        [
+            ChannelTurn(content="<<TOOL:knowledge_base_search|{bad>>"),  # 参数非法 JSON
+            ChannelTurn(content="知识库中未找到相关内容"),  # 收到观察后的正常收口
+        ]
+    )
+    monkeypatch.setattr(app.state.agent_deps, "channel", channel)
+    assert login_as(agent_client, "reactuser", "right-one").status_code == 200
+
+    resp = post_run(agent_client)
+
+    events = _parse_sse(resp.text)
+    assert events[-1][0] == "RUN_FINISHED"  # 不再 RUN_ERROR
+    run = _run_row(session)
+    assert run.status == "succeeded"
+    assert run.output == {"text": "知识库中未找到相关内容"}
+    # 轨迹：解析失败落一行 error（工具失败路径同款形态），供审核回放"哪一步坏了"
+    steps = session.scalars(
+        select(AgentStep).where(AgentStep.run_id == run.id).order_by(AgentStep.seq)
+    ).all()
+    assert [(s.tool_name, s.error is not None) for s in steps] == [(REACT_FEEDBACK_TOOL_NAME, True)]
+    assert "合法 JSON" in steps[0].error
+    assert '"error"' in steps[0].observation
+    # 模型确实收到观察：第二次通道调用的 messages 出现携带失败摘要的 tool 消息
+    assert len(channel.seen_messages) == 2
+    tool_msgs = [m for m in channel.seen_messages[1] if m["role"] == "tool"]
+    assert len(tool_msgs) == 1
+    assert "合法 JSON" in tool_msgs[0]["content"]
+
+
+# ---------- ⑧ B2 检索观察不可信声明：声明行前置正文 ----------
+
+
+def test_knowledge_search_observation_declares_untrusted(agent_client, session) -> None:
+    """B2：knowledge_base_search 的观察正文以不可信声明行开头（<user_memory> 同款防
+    注入：检索资料是数据不是指令），命中数据仍完整跟在声明后可回放。"""
+    from app.services.agent_tools import SEARCH_OBSERVATION_NOTICE
+
+    user = make_user(session, "noticeuser", "right-one")
+    _seed_chunk(session, user)
+    assert login_as(agent_client, "noticeuser", "right-one").status_code == 200
+
+    resp = post_run(agent_client)
+
+    assert _parse_sse(resp.text)[-1][0] == "RUN_FINISHED"
+    run = _run_row(session)
+    steps = session.scalars(
+        select(AgentStep).where(AgentStep.run_id == run.id).order_by(AgentStep.seq)
+    ).all()
+    notice, _, rest = steps[0].observation.partition("\n")
+    assert notice == SEARCH_OBSERVATION_NOTICE
+    assert DOC_TITLE in rest  # 声明行之后命中数据原样保留
+
+
+# ---------- ⑨ B5 taskType 枚举：Literal 与 TASK_PROFILES 单一真相源 ----------
+
+
+def test_task_type_literal_derives_from_task_profiles() -> None:
+    """B5 契约：请求体 taskType 的 Literal 从 agent_tasks.TASK_PROFILES 动态派生
+    （单一真相源，api 校验与编排永不漂移），OpenAPI schema 同源暴露 enum。"""
+    from typing import get_args
+
+    assert set(get_args(TaskType)) == set(TASK_PROFILES)
+    schema = app.openapi()["components"]["schemas"]["AgentRunRequest"]
+    assert schema["properties"]["taskType"]["enum"] == sorted(set(TASK_PROFILES))
