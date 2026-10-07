@@ -1,5 +1,6 @@
 # 企业内部智能工作台 — 项目共识文档 v2.0
 
+> 定位：活文档（决策基准）｜对账：2026-10-07｜同步保障：重大决策更新即评审
 > 更新于 2026-09-28。v1 经 grilling 访谈产出；v2 吸收后续决策：路线 C、双部门试点、简单账号登录、**按 100x 规格设计**。
 > 本文档是决策基准；设计细节见 [specs/](specs/)，规范见 [standards.md](standards.md)，演进见 [specs/scaling-plan.md](specs/scaling-plan.md)。
 
@@ -38,7 +39,7 @@ FastAPI(Python 3.11) · Vue3+TS+Element Plus · PostgreSQL+pgvector（messages �
 
 ## 四、评审门禁（开发前置条件，用户确认的流程）
 
-9 个包件**已于 2026-09-28 全部通过用户评审**（"4 项按推荐，9 包件通过"）：① brief v2（本文档）② features.md ③ ui-spec.md（含交互式 HTML 原型）④ flows.md ⑤ db-design.md ⑥ standards.md v1.7 ⑦ mvp-design.md ⑧ scaling-plan.md ⑨ **test-cases.md（102 条功能测试用例，P0/P1/P2 分级）**。两轮 7 角色交叉评审记录见 specs/review-report.md 与 review-report-r2.md。
+9 个包件**已于 2026-09-28 全部通过用户评审**（"4 项按推荐，9 包件通过"）：① brief v2（本文档）② features.md ③ ui-spec.md（含交互式 HTML 原型）④ flows.md ⑤ db-design.md ⑥ standards.md v1.7 ⑦ mvp-design.md ⑧ scaling-plan.md ⑨ **test-cases.md（102 条功能测试用例，P0/P1/P2 分级）**。两轮 7 角色交叉评审记录见 [archive/2026-09-28-review-report.md](archive/2026-09-28-review-report.md) 与 [archive/2026-09-28-review-report-r2.md](archive/2026-09-28-review-report-r2.md)（已按快照规范归档）。
 单包件后续修改仍须关联包件级联复核；**门禁已放行，进入 writing-plans（TDD 粒度实施计划），计划评审通过后动工**。
 
 ## 五、MVP 明确不做（范围锁死）
@@ -64,4 +65,4 @@ FastAPI(Python 3.11) · Vue3+TS+Element Plus · PostgreSQL+pgvector（messages �
 ## 七、里程碑
 
 W1 脚手架+入库管道+同步预检（白名单+精确查重）+黄金样本+合规答案 → W2 问答 API+SSE+引用 → W3 知识库管理+解析后异步预检（敏感/乱码/近似）+到期下线+健康度看板+RAGFlow 基线 → W4 客服内测+管理后台+评测+zip 批量+元数据自动建议+阈值扫描 → W5 HR 接入+串库+恢复演练+知识缺口报告/chunk 召回统计 → W6 缓冲+验收。
-**M10 工作量修正（二轮评审）**：全量约 8-12 人日，非 3 天。裁剪顺序（W5-W6 进度紧张时依次降级）：F-1011 → F-1010 → F-1012（简化为 3 档扫描）；**F-1001~1006/1009 为必做**。经裁剪机制守住 6 周周期，存在 ±3 天风险（详见 [mvp-design.md §10](specs/2026-09-28-mvp-design.md)）
+**M10 工作量修正（二轮评审）**：全量约 8-12 人日，非 3 天。裁剪顺序（W5-W6 进度紧张时依次降级）：F-1011 → F-1010 → F-1012（简化为 3 档扫描）；**F-1001~1006/1009 为必做**。经裁剪机制守住 6 周周期，存在 ±3 天风险（详见 [mvp-design.md §10](archive/2026-09-28-mvp-design.md)）

@@ -20,10 +20,11 @@ import { ABORTED_CODE, ApiClientError } from '@/api/client'
 import { NON_RETRYABLE_PRESTREAM_CODES, streamChat, type MessageItem } from '@/api/chat'
 import type { ChatStreamEvent, CitationItem, FeedbackKind } from '@/api/types'
 
-/** 连接停滞阈值：3 个心跳周期（服务端心跳间隔 15s）无任何事件即判停（同 useAgentRun） */
-export const STALL_TIMEOUT_MS = 45_000
-/** 单次回答总时长兜底（对齐解析超时 300s 口径），到点强判失败 */
-export const TOTAL_TIMEOUT_MS = 300_000
+/** 连接停滞阈值：覆盖 CPU TEI 慢重排的检索期（rerank 20 条实测 ~110s，known-issues
+ * 开放-1 算力不足）；45s 问答口径在当前语料规模下会把"检索慢"误杀为"连接停滞" */
+export const STALL_TIMEOUT_MS = 240_000
+/** 单次回答总时长兜底（慢检索 + 流式生成余量），到点强判失败 */
+export const TOTAL_TIMEOUT_MS = 420_000
 
 export type MessageStatus = 'streaming' | 'done' | 'failed'
 

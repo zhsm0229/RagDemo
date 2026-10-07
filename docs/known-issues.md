@@ -1,6 +1,7 @@
 # 已知问题与测试发现汇总（known issues）
 
-> 更新：2026-10-01。来源：W1-W6 各冲刺账本（`.superpowers/sdd/`）、部署验收报告（`deploy-acceptance-report.md`）、验收状态对照（`acceptance-status.md`）。
+> 定位：活文档（开放问题清单，问题关闭即移出）｜对账：2026-10-06｜同步保障：修复随冲刺账本留指针
+> 更新：2026-10-06。来源：W1-W6 各冲刺账本（`.superpowers/sdd/`）、部署验收报告（`deploy-acceptance-report.md`）、验收状态对照（[archive/acceptance-status-2026-09-30.md](archive/acceptance-status-2026-09-30.md)）。
 > 状态：**开放**（未解决）/ **已修复**（含修复指针）/ **登记裁决**（待决策）。
 
 ## 一、开放问题

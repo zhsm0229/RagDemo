@@ -1,5 +1,6 @@
 # 运维手册（Runbook）
 
+> 定位：活文档｜对账：2026-10-07｜同步保障：评审纪律，随里程碑增量补全（§18.4）
 > 状态：W3 Task 13 产出骨架，W5 Task 6 定稿备份/恢复章节（第 3 节，§18）；W5 Task 8 增串库双向演练章节（第 5 节，T9 执行）。**T9 已于 2026-09-30 完成恢复演练与串库双向走查，实测数据已回填 3.4 / 3.5 / 5.5，串库判据按实测结论修正（见 5.3/5.4/5.5）**。其余章节随里程碑增量补全（§18.4：启动停止 / 备份恢复 / 常见故障 / 合规轨道切换 / 端口核查）。
 > 部署形态：单机 Docker Compose，4 核 16G VM（§12.5）。所有命令在仓库根目录执行（Windows Git Bash 或部署机 bash）。
 
@@ -408,7 +409,7 @@ HF_HUB_DISABLE_XET=1）。升级操作：改 download_models.py 钉的 revision 
 | LLM_API_KEY | DeepSeek key | 内网 vLLM 无鉴权时可留空 |
 | LLM_MODEL | deepseek-flash | Qwen2.5-32B-Instruct AWQ |
 
-步骤：①合规书面结论回填 docs/compliance-checklist-2026-09-30.md 第五节 → ②内网轨需
+步骤：①合规书面结论回填 [docs/archive/compliance-checklist-2026-09-30.md](archive/compliance-checklist-2026-09-30.md) 第五节 → ②内网轨需
 GPU（≥1×24G）+ vLLM 就绪 → ③改 `.env` 三键重启 app → ④跑评测集对比（§17.3，无对比不
 上线）→ ⑤runbook 本表与模型版本表同步。RAGFlow 基线环境同受出网白名单约束（§7.6）。
 

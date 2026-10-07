@@ -16,10 +16,20 @@ import { computed, onUnmounted, reactive, ref } from 'vue'
 import { AGENT_NON_RETRYABLE_PRESTREAM_CODES, streamAgentRun } from '@/api/agentSse'
 import { ABORTED_CODE, ApiClientError } from '@/api/client'
 
-/** 连接停滞阈值：3 个心跳周期（服务端心跳间隔 15s）无任何事件即判停 */
+/** 连接停滞阈值（缺省）：3 个心跳周期（服务端心跳间隔 15s）无任何事件即判停 */
 export const STALL_TIMEOUT_MS = 45_000
-/** 单次运行总时长兜底（对齐解析超时 300s 口径），到点强判失败 */
+/** 单次运行总时长兜底（缺省，对齐解析超时 300s 口径），到点强判失败 */
 export const TOTAL_TIMEOUT_MS = 300_000
+
+/** 任务化看门狗参数：长任务（template_draft 等，非流式长补全 + 多工具循环，实测
+ *  服务端一轮可静默 2-5 分钟）两次事件的间隔与总时长远超问答口径，由页面按任务
+ *  覆盖；缺省保持问答节奏（45s/300s） */
+export interface AgentRunWatchdog {
+  /** 停滞判停时长（毫秒）；缺省 45s */
+  stallMs?: number
+  /** 总时长兜底（毫秒）；缺省 300s */
+  totalMs?: number
+}
 
 export type RunPhase = 'running' | 'succeeded' | 'failed' | 'stopped'
 export type NodeStatus = 'running' | 'done' | 'failed' | 'stopped'
@@ -325,7 +335,9 @@ function settleFromError(
   closeRunning(record, record.phase === 'stopped' ? 'stopped' : 'failed', now)
 }
 
-export function useAgentRun(hooks: AgentRunHooks = {}) {
+export function useAgentRun(hooks: AgentRunHooks = {}, watchdog: AgentRunWatchdog = {}) {
+  const stallMs = watchdog.stallMs ?? STALL_TIMEOUT_MS
+  const totalMs = watchdog.totalMs ?? TOTAL_TIMEOUT_MS
   const running = ref(false)
   const runs = reactive<AgentRunRecord[]>([])
   const activeRun = computed<AgentRunRecord | null>(() => runs[runs.length - 1] ?? null)
@@ -352,7 +364,7 @@ export function useAgentRun(hooks: AgentRunHooks = {}) {
     stallTimer = window.setTimeout(() => {
       stallReason = '生成长时间无响应，已停止等待'
       controller?.abort()
-    }, STALL_TIMEOUT_MS)
+    }, stallMs)
   }
 
   function stop(): void {
@@ -373,7 +385,7 @@ export function useAgentRun(hooks: AgentRunHooks = {}) {
     totalTimer = window.setTimeout(() => {
       stallReason = '生成超时（超过 5 分钟），可重试'
       controller?.abort()
-    }, TOTAL_TIMEOUT_MS)
+    }, totalMs)
     try {
       await streamAgentRun(
         { taskType, input },

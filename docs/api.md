@@ -1,5 +1,6 @@
 # RagDemo 接口文档（W1 - W5）
 
+> 定位：活文档｜对账：2026-10-07｜同步保障：端点总数标记行由 `tests/unit/test_api_contract.py` 守账（§19.4）
 > 依据 `docs/standards.md` §3（API 接口规范）编写，随代码演进（§19.1 文档随代码）。
 > 覆盖 `app/api/` 当前全部路由：auth 5 个、documents 13 个（documents 11 + rebuild 2）、chat 1 个、conversations 4 个、citations 1 个、messages（feedback）1 个、admin 管理端 31 个（问答对 6、评测 8、提问记录与 badcase 4、检索测试 1、概览与健康度 3（含零召回块下钻）、服务健康 1、用户管理 4、审计查询 2、知识缺口报告 2）、healthz 探针 1 个（`GET /healthz`，docker healthcheck 消费，不设业务章节）。
 > **端点总数：64**（本行由 `tests/unit/test_api_contract.py` 从 FastAPI app 实际路由解析校验：新增/删除端点未同步本行即测试红，计数漂移清零，findings I10）。

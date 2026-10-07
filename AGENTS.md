@@ -1,6 +1,8 @@
 # AGENTS.md
 
-面向 AI 编码代理（与新人）的项目入口说明。**规范基线是 [docs/standards.md](docs/standards.md)（v1.7，评审基线，违反 = 不合入）**；本文件只汇总日常高频约定，未覆盖之处以 standards.md 及 [docs/specs/](docs/specs/) 设计文档为准，两者冲突时也不是"二选一"——先在评审中指出矛盾，不许静默择一。
+> 定位：活文档（项目约束入口）｜对账：2026-10-07｜同步保障：当前状态节数字须守账测试背书（standards §19.7）
+
+面向 AI 编码代理（与新人）的项目入口说明。**规范基线是 [docs/standards.md](docs/standards.md)（v1.8，评审基线，违反 = 不合入）**；本文件只汇总日常高频约定，未覆盖之处以 standards.md 及 [docs/specs/](docs/specs/) 设计文档为准，两者冲突时也不是"二选一"——先在评审中指出矛盾，不许静默择一。全库文档地图见 [docs/README.md](docs/README.md)。
 
 ## 项目概览
 
@@ -64,6 +66,14 @@ make up / down  # docker compose 起/停（pg 等）
 - 迁移中每张表、每列、每个枚举值必须加**中文注释**（业务含义与取值范围）。
 - 表名复数小写下划线；主键 `id BIGSERIAL`；`created_at`/`updated_at` 必备；删除一律软删 `is_active`。
 - `.env.example` 每项注明含义与是否部署必填；测试用例标题用中文描述被测行为。
+
+## 文档规范（生成与变更）
+
+- 文档分三档：**活文档**（standards / api / runbook / user-guide / project-brief / AGENTS.md / known-issues——永远代表现状，改代码必须同步对应文档）；**快照**（评审报告/验收状态等时点记录，文件名带日期前缀，写完即冻结，被取代后移入 `docs/archive/`）；**台账**（`.superpowers/sdd/` 与 `.zcode/`，过程流水只增不改，不作为现状依据）——细则见 standards §19.1。
+- 单一真相源：每项信息只有一个"家"，他处只放"指针 + 一句话摘要"，禁止两处维护同一份清单或同一组数字（§19.2）。
+- 会漂移的数字必须由守账测试背书并注明（写法："端点总数 57，由 `tests/unit/test_api_contract.py` 对账"）；无守账的动态数字不写入正文（§19.3）。
+- 文档与注释引用的命令、文件、路径必须真实存在；易腐实现细节（第三方后端名、容量注释）不写死，写"为什么"（§19.5）。
+- 同步义务：接口改 → 同步 api.md 标记行；界面文案改 → 同步 user-guide 与 frontend/src/help/；里程碑收口 → 更新本文件"当前状态"节（唯一允许高频改写的段落，其余段落修改走评审）（§19.6）。
 
 ## 提交
 

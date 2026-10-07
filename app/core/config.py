@@ -15,7 +15,9 @@ class Settings(BaseSettings):
     # （防 OOM 特意调低，见 runbook）下单请求超限即 422——2026-10-02 大文档全量单请求全败根因；
     # BGE tokenizer 中文≈1字1token，1200 留 40% 余量。0=不分批（仅测试用）
     rerank_base_url: str = "http://localhost:8082"  # TEI rerank（bge-reranker-v2-m3）
-    rerank_timeout_s: int = 10
+    rerank_timeout_s: int = 120  # CPU TEI 实测 20 条×190 字 ≈ 110s（推理 ~30s + 排队，
+    # known-issues 开放-1 算力不足）：10s 纪律值在该部署形态下不可达，超时即全军覆没；
+    # 部署机换 GPU 后应收敛回纪律值并复测
     mineru_base_url: str = ""  # 空=pypdf 降级路径
     mineru_timeout_s: int = 300
     convert_base_url: str = ""  # Gotenberg 老格式转换服务（doc/ppt/xls→OOXML）；空=老格式拒收
@@ -54,13 +56,17 @@ class Settings(BaseSettings):
     )
     agent_model_api_key: str = ""  # Agent 模型密钥；留空复用 llm_api_key；严禁提交真实密钥
     agent_model_model: str = ""  # Agent 模型名；留空复用 llm_model
-    agent_model_timeout_s: int = 60  # Agent 模型调用超时（chat 纪律与主通道一致，standards §1.4-5）
+    agent_model_timeout_s: int = 300  # Agent 模型单次调用超时：非流式等全量补全（模板生成
+    # 一轮实测 2-5 分钟），不适用流式 chat 的 60s 首字纪律（standards §1.4-5 的流式口径）；
+    # 超时后由编排层按 5001 收口，前端看门狗（150s 停滞/600s 总）宽于该值
     agent_model_react_fallback: bool = (
         True  # 模型无原生 tool-calling 时启用 ReAct 文本协议兜底解析（app/core/agent_model.py）
     )
     agent_run_stale_minutes: int = (
-        15  # agent 运行幽灵清扫阈值（分钟，A4）：running 且 started_at 超过此时长的
-        # agent_runs 视为进程中断遗留的幽灵行，由定时任务置 failed（error=运行超时被清扫）
+        45  # agent 运行幽灵清扫阈值（分钟，A4）：running 且 started_at 超过此时长的
+        # agent_runs 视为进程中断遗留的幽灵行，由定时任务置 failed（error=运行超时被清扫）。
+        # 须 ≥ 长任务合法时长（agent_model_timeout_s=300s/轮 × 多轮迭代 + 工具重试），
+        # 15min 会把在途的模板生成误杀（2026-10-07 实测教训）
     )
     test_mode: bool = False
 

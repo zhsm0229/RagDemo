@@ -23,7 +23,9 @@ const dept = ref('')
 const count = ref(3)
 const draftEl = ref<HTMLElement | null>(null)
 
-const agent = useAgentRun({ onUpdate: scrollFollow })
+// 长任务看门狗（模板生成为非流式长补全 + 多工具循环，实测服务端一轮可静默 2-5 分钟）：
+// 停滞 240s / 总时长 600s（agent 工具内 CPU rerank 单次实测 ~110s，连查两次余量）
+const agent = useAgentRun({ onUpdate: scrollFollow }, { stallMs: 240_000, totalMs: 600_000 })
 const activeRun = computed<AgentRunRecord | null>(() => agent.activeRun.value)
 const running = computed(() => agent.running.value)
 
@@ -171,6 +173,9 @@ const historySummary = (run: AgentRunRecord): string => {
           <el-button type="primary" :disabled="running" @click="start">开始生成</el-button>
         </span>
       </el-tooltip>
+      <span class="long-task-hint" data-test="long-task-hint"
+        >长任务：全过程约 1-3 分钟，期间页面静默属正常，请勿关闭</span
+      >
       <el-button v-if="running" plain type="warning" @click="agent.stop()">停止</el-button>
       <span class="spacer" />
       <span class="run-status" aria-live="polite" data-test="run-status"
@@ -306,6 +311,10 @@ const historySummary = (run: AgentRunRecord): string => {
 }
 .run-status {
   font-size: 13px;
+  color: var(--el-text-color-secondary);
+}
+.long-task-hint {
+  font-size: 12px;
   color: var(--el-text-color-secondary);
 }
 .history {

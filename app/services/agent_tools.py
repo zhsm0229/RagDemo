@@ -16,19 +16,22 @@ r"""Agent 工具集（ToolProvider 第七接口实现，F-211，工单 #04/#06�
 空手而归，任务以拒答收尾，不输出编造成稿）。
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from app.core.clock import get_clock
 from app.core.config import Settings
 from app.core.errors import ApiError
-from app.core.llm import Embedder, Reranker
+from app.core.llm import Embedder, Reranker, UpstreamError
 from app.core.storage import FileStorage
 from app.core.tools import RunContext, ToolResult, ToolSpec
 from app.db.models import User
 from app.services.draft_review import create_draft
 from app.services.retrieval import rerank_and_fold
 from app.services.vector_store import VectorStore
+
+logger = logging.getLogger(__name__)
 
 _EXCERPT_CHARS: int = (
     500  # 单条命中回传正文字符上限：控制 agent 上下文预算（引用全量走既有 citations 链路）
@@ -100,19 +103,26 @@ class KnowledgeBaseSearchTool:
         }
 
     def invoke(self, args: dict[str, Any], ctx: RunContext) -> ToolResult:
-        """检索一次：dept_ids 强制继承调用者；异常不吞（embed/rerank 故障语义归 agent 循环）。"""
+        """检索一次：dept_ids 强制继承调用者；**纯向量序，不调 rerank**——CPU TEI 精排
+        实测 20 条 OCR 长块稳定超 120s（known-issues 开放-1 算力不足），会把任务拖死；
+        agent few-shot 参照只需向量序 top_n（pgvector 已按余弦降序返回）。GPU TEI 就位后
+        恢复精排（specs/agent-evolution.md §七触发线）。embed 瞬时故障（UpstreamError）
+        降级为 fail 观察喂回模型——检索不可用不应炸掉整个 run。"""
         query = str(args.get("query", "")).strip()
         if not query:
             return ToolResult.fail("query 不能为空")
         settings = self._deps.settings
         top_n = _clamp_top_n(args.get("top_n"), settings.rerank_top_n)
         dept_ids = list(ctx.dept_ids)  # 红线：只认调用者上下文，args 的部门字段一律无视
-        query_vec = self._deps.embedder.embed([query])[0]
-        hits = self._deps.store.search_chunks(
-            ctx.db, query_vec, dept_ids, settings.retriever_top_k, settings.hnsw_ef_search
-        )
-        folded = rerank_and_fold(self._deps.reranker, query, hits, top_n, settings.chunk_dedup_sim)
-        if not folded:
+        try:
+            query_vec = self._deps.embedder.embed([query])[0]
+            hits = self._deps.store.search_chunks(
+                ctx.db, query_vec, dept_ids, settings.retriever_top_k, settings.hnsw_ef_search
+            )
+        except UpstreamError as exc:
+            logger.warning("knowledge_base_search 检索暂时不可用（降级为 fail 观察）: %s", exc)
+            return ToolResult.fail("知识库检索暂时不可用，请稍后重试")
+        if not hits:
             return ToolResult.succeed({"items": [], "note": "知识库中未找到相关内容"})
         items = [
             {
@@ -122,7 +132,7 @@ class KnowledgeBaseSearchTool:
                 "excerpt": hit.content[:_EXCERPT_CHARS],
                 "score": round(hit.similarity, 4),
             }
-            for hit in folded
+            for hit in hits[:top_n]  # store 已按向量余弦降序返回，截前 top_n 即可
         ]
         return ToolResult.succeed({"items": items})
 

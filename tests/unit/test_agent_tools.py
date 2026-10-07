@@ -12,7 +12,7 @@ import dataclasses
 import pytest
 
 from app.core.config import Settings
-from app.core.llm import StubEmbedder, StubReranker
+from app.core.llm import StubEmbedder, StubReranker, UpstreamError
 from app.core.tools import RunContext, ToolProvider, ToolRegistry, ToolSpec
 from app.services.agent_tools import (
     KNOWLEDGE_SEARCH_SPEC,
@@ -42,7 +42,8 @@ def _hit(chunk_id: int, embedding: list[float], content: str) -> DocHit:
 
 
 class RecordingStore:
-    """替身 VectorStore：行为模拟 F-502（dept_id ∈ dept_ids 才可见），并记录每次调用。"""
+    """替身 VectorStore：行为模拟 F-502（dept_id ∈ dept_ids 才可见）并按相似度降序
+    返回（对齐 pgvector ORDER BY embedding <=> query_vec 的真实契约），记录每次调用。"""
 
     def __init__(self, corpus: list[tuple[int, DocHit]]) -> None:
         self._corpus = corpus  # (归属 dept_id, 命中)
@@ -51,7 +52,8 @@ class RecordingStore:
     def search_chunks(self, db, query_vec, dept_ids, top_k, ef_search):
         self.calls.append({"dept_ids": list(dept_ids), "top_k": top_k})
         visible = {dept_id for dept_id in dept_ids}
-        return [hit for owner, hit in self._corpus if owner in visible]
+        hits = [hit for owner, hit in self._corpus if owner in visible]
+        return sorted(hits, key=lambda h: h.similarity, reverse=True)
 
     def match_qa(self, db, query_vec, dept_ids, threshold):
         return None
@@ -173,26 +175,38 @@ def test_运行上下文不可变_防工具改写部门() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_命中按rerank分降序_结构字段齐全() -> None:
-    hits = [(2, _hit(i, _vec(f"客服话题{i}"), f"客服正文{i}")) for i in (1, 2, 3)]
+def test_命中按向量序截取topn_结构字段齐全() -> None:
+    """store 契约 = 按余弦降序返回；工具截前 top_n、score 透传向量相似度。
+    （2026-10-07 起不再调 rerank 精排：CPU TEI 实测 20 条 OCR 长块 >120s，
+    详见 app/services/agent_tools.py invoke docstring 与 agent-evolution §七）"""
+    # 模拟真实 store：按余弦降序排列（标题3 > 标题2 > 标题1）
+    hits = []
+    for i, sim in [(1, 0.10), (2, 0.55), (3, 0.80)]:
+        hit = _hit(i, _vec(f"客服话题{i}"), f"客服正文{i}")
+        hit = dataclasses.replace(hit, similarity=sim)
+        hits.append((2, hit))
     store = RecordingStore(hits)
-    weights = [1.0, 3.0, 2.0]
-    tool = KnowledgeBaseSearchTool(_deps(store, weights))
+    tool = KnowledgeBaseSearchTool(_deps(store))
 
-    result = tool.invoke({"query": "话题"}, _ctx())
+    result = tool.invoke({"query": "话题", "top_n": 2}, _ctx())
 
     items = result.value["items"]
-    assert [item["title"] for item in items] == ["标题2", "标题3", "标题1"]  # rerank 分降序
-    assert items[0]["excerpt"] == "客服正文2"
-    assert items[0]["titlePath"] == "部门_主题2"
+    assert [item["title"] for item in items] == ["标题3", "标题2"]  # 向量序截前 2
+    assert items[0]["excerpt"] == "客服正文3"
+    assert items[0]["titlePath"] == "部门_主题3"
     assert items[0]["page"] == 1
-    scores = [item["score"] for item in items]
-    assert scores == sorted(scores, reverse=True)
-    # items[0]=标题2 权重 3.0：对应 rerank 输入序第 1 位（分数口径=rerank sigmoid，§4.4）
-    expected_top = StubReranker(weights=weights).rerank(
-        "话题", [f"部门_主题{i}\n客服正文{i}" for i in (1, 2, 3)]
-    )[1]
-    assert items[0]["score"] == pytest.approx(round(expected_top, 4))
+    assert [item["score"] for item in items] == [0.8, 0.55]  # score=向量余弦透传
+
+
+def test_top_n钳制在向量序上生效() -> None:
+    hits = [(2, _hit(i, _vec(f"客服话题{i}"), f"客服正文{i}")) for i in (1, 2, 3, 4)]
+    store = RecordingStore(hits)
+    tool = KnowledgeBaseSearchTool(_deps(store, weights=[1.0, 2.0, 3.0, 4.0]))
+
+    result = tool.invoke({"query": "话题", "top_n": 1}, _ctx())
+
+    items = result.value["items"]
+    assert [item["title"] for item in items] == ["标题1"]  # store 序截前 1
 
 
 def test_空命中返回未找到相关内容_拒答语义() -> None:
@@ -202,6 +216,23 @@ def test_空命中返回未找到相关内容_拒答语义() -> None:
 
     assert result.ok is True
     assert result.value == {"items": [], "note": "知识库中未找到相关内容"}
+
+
+def test_embed重排瞬时故障降级为fail观察_不炸运行() -> None:
+    """TEI embed ReadTimeout（实测）：检索不可用应降级为 fail 观察，
+    让 agent 循环继续（模型可重试或如实说明），而不是异常炸掉整个 run。"""
+
+    class BoomEmbedder:
+        def embed(self, texts):
+            raise UpstreamError("tei /embed 传输失败: ReadTimeout: timed out")
+
+    deps = dataclasses.replace(_deps(RecordingStore([])), embedder=BoomEmbedder())
+    tool = KnowledgeBaseSearchTool(deps)
+
+    result = tool.invoke({"query": "漫剧生产流程"}, _ctx())
+
+    assert result.ok is False
+    assert result.error is not None and "暂时不可用" in result.error
 
 
 def test_空query返回失败不触发检索() -> None:

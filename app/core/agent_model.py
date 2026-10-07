@@ -56,10 +56,14 @@ def _react_feedback_call(summary: str) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class ChannelTurn:
-    """上游一次成型回复：文本正文 + 原生 tool_calls（OpenAI 语义的 name/args/id）。"""
+    """上游一次成型回复：文本正文 + 原生 tool_calls（OpenAI 语义的 name/args/id）。
+
+    reasoning：deepseek thinking 模式的 `reasoning_content`——多轮工具调用契约要求
+    它随 assistant 消息回传，丢了下一轮直接 400（2026-10-07 模板生成实证）。"""
 
     content: str = ""
     tool_calls: tuple[dict[str, Any], ...] = ()
+    reasoning: str | None = None
 
 
 class AgentModelChannel(Protocol):
@@ -80,9 +84,15 @@ _ROLE_BY_TYPE = {"system": "system", "human": "user", "ai": "assistant", "tool":
 
 
 def _to_openai_message(message: BaseMessage) -> dict[str, Any]:
-    """BaseMessage → OpenAI 请求体消息：role 映射；ai 带回 tool_calls，tool 带 tool_call_id。"""
+    """BaseMessage → OpenAI 请求体消息：role 映射；ai 带回 tool_calls 与
+    reasoning_content（deepseek thinking 模式多轮工具契约，缺失即 400），
+    tool 带 tool_call_id。"""
     role = _ROLE_BY_TYPE.get(message.type, "user")
     payload: dict[str, Any] = {"role": role, "content": message.content}
+    if message.type == "ai":
+        reasoning = getattr(message, "additional_kwargs", {}).get("reasoning_content")
+        if reasoning:
+            payload["reasoning_content"] = reasoning
     if message.type == "ai" and getattr(message, "tool_calls", None):
         payload["tool_calls"] = [
             {
@@ -160,7 +170,16 @@ class OpenAICompatToolChannel:
                 continue
             if response.status_code == 200:
                 return self._parse_json(response)
-            last_error = UpstreamError(f"agent llm http {response.status_code}")
+            # 4xx/5xx 均带响应体摘录：deepseek 的拒绝原因（上下文超限/消息形状校验）
+            # 只在 body 里，丢了它排障只能靠猜（2026-10-07 模板生成 400 实证）
+            body_excerpt = ""
+            try:
+                body_excerpt = response.text[:300]
+            except Exception as exc:  # noqa: BLE001 —— 读不出 body 不影响错误上抛
+                body_excerpt = f"<响应体不可读: {exc}>"
+            last_error = UpstreamError(
+                f"agent llm http {response.status_code}: {body_excerpt}"
+            )
             if response.status_code < 500:
                 raise last_error  # 4xx：请求本身有误，重试无意义
         assert last_error is not None  # 循环至少执行一次，两次皆败路径必已赋值
@@ -177,7 +196,8 @@ class OpenAICompatToolChannel:
 
 
 def _parse_channel_reply(body: dict[str, Any]) -> ChannelTurn:
-    """choices[0].message → ChannelTurn；形状不符 / arguments 非 JSON 归 UpstreamError。"""
+    """choices[0].message → ChannelTurn；形状不符归 UpstreamError（通道级故障），
+    单个 tool_call 的 arguments 非 JSON 转反馈调用（B1 同款步级语义，模型自我修正）。"""
     choices = body.get("choices")
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
         raise UpstreamError("agent llm 响应缺少 choices[0]")
@@ -194,9 +214,24 @@ def _parse_channel_reply(body: dict[str, Any]) -> ChannelTurn:
             try:
                 args = json.loads(function.get("arguments") or "{}")
             except ValueError as exc:
-                raise UpstreamError(f"agent llm tool arguments 不是合法 JSON: {exc}") from exc
+                # 模型偶发输出非法参数 JSON（实测 deepseek-flash "Expecting ':' delimiter"）：
+                # 与 B1 同款步级语义——转为反馈调用喂回循环让模型自我修正，不终止运行
+                # （2026-10-07 模板生成实测：11 次工具调用后在成稿一步踩中，RUN_ERROR 收场）。
+                calls.append(
+                    _react_feedback_call(
+                        f"工具 {function.get('name', '')} 的参数不是合法 JSON（{exc}），"
+                        "请修正参数格式后重新调用该工具"
+                    )
+                )
+                continue
             if not isinstance(args, dict):
-                raise UpstreamError("agent llm tool arguments 必须是 JSON 对象")
+                calls.append(
+                    _react_feedback_call(
+                        f"工具 {function.get('name', '')} 的参数必须是 JSON 对象，"
+                        "请修正参数格式后重新调用该工具"
+                    )
+                )
+                continue
             entry = {
                 "name": function.get("name", ""),
                 "args": args,
@@ -205,7 +240,12 @@ def _parse_channel_reply(body: dict[str, Any]) -> ChannelTurn:
             }
             calls.append(entry)
     content = message.get("content")
-    return ChannelTurn(content=content if isinstance(content, str) else "", tool_calls=tuple(calls))
+    reasoning = message.get("reasoning_content")
+    return ChannelTurn(
+        content=content if isinstance(content, str) else "",
+        tool_calls=tuple(calls),
+        reasoning=reasoning if isinstance(reasoning, str) else None,
+    )
 
 
 class AgentChatModel(BaseChatModel):
@@ -264,8 +304,18 @@ class AgentChatModel(BaseChatModel):
                 if parsed:
                     content = ""  # 协议行不进正文：工具调用语义由 tool_calls 承载
                     tool_calls = parsed
+        extra: dict[str, Any] = {}
+        if turn.reasoning:
+            # thinking 模式契约：reasoning_content 必须随 assistant 消息回传（否则下一轮 400）
+            extra["reasoning_content"] = turn.reasoning
         return ChatResult(
-            generations=[ChatGeneration(message=AIMessage(content=content, tool_calls=tool_calls))]
+            generations=[
+                ChatGeneration(
+                    message=AIMessage(
+                        content=content, tool_calls=tool_calls, additional_kwargs=extra
+                    )
+                )
+            ]
         )
 
     def _stream(

@@ -11,7 +11,12 @@ import json
 import httpx
 import pytest
 
-from app.core.agent_model import AgentChatModel, ChannelTurn, OpenAICompatToolChannel
+from app.core.agent_model import (
+    AgentChatModel,
+    ChannelTurn,
+    OpenAICompatToolChannel,
+    _parse_channel_reply,
+)
 from app.core.agent_react import REACT_FEEDBACK_TOOL_NAME, ReactParseError, parse_react_tool_calls
 from app.core.llm import UpstreamError
 
@@ -161,6 +166,39 @@ def test_协议调用未绑定工具_解析层严格抛错() -> None:
 def test_协议参数非法JSON_解析层严格抛错() -> None:
     with pytest.raises(ReactParseError, match="合法 JSON"):
         parse_react_tool_calls("<<TOOL:knowledge_base_search|{bad>>", {"knowledge_base_search"})
+
+
+def test_原生tool_calls参数非法JSON_合成反馈调用_不终止运行() -> None:
+    """实测 deepseek-flash 偶发输出非法参数 JSON（2026-10-07 模板生成成稿一步踩中，
+    旧径 UpstreamError → RUN_ERROR"生成服务暂时不可用"）：与 B1 同款步级语义——
+    合成反馈调用让模型自我修正，运行不终止。"""
+    body = {
+        "choices": [
+            {
+                "message": {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_bad",
+                            "type": "function",
+                            "function": {
+                                "name": "save_draft",
+                                "arguments": '{"title": "坏参数", "content": 55',
+                            },
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+
+    turn = _parse_channel_reply(body)
+
+    assert turn.content == ""
+    assert turn.tool_calls[0]["name"] == REACT_FEEDBACK_TOOL_NAME
+    assert "save_draft" in turn.tool_calls[0]["args"]["error"]
+    assert "合法 JSON" in turn.tool_calls[0]["args"]["error"]
+    assert turn.tool_calls[0]["id"].startswith("react_err_")  # 反馈调用自增 id
 
 
 def test_解析失败合成反馈工具调用_不终止运行() -> None:
