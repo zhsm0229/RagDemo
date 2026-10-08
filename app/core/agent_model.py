@@ -177,9 +177,7 @@ class OpenAICompatToolChannel:
                 body_excerpt = response.text[:300]
             except Exception as exc:  # noqa: BLE001 —— 读不出 body 不影响错误上抛
                 body_excerpt = f"<响应体不可读: {exc}>"
-            last_error = UpstreamError(
-                f"agent llm http {response.status_code}: {body_excerpt}"
-            )
+            last_error = UpstreamError(f"agent llm http {response.status_code}: {body_excerpt}")
             if response.status_code < 500:
                 raise last_error  # 4xx：请求本身有误，重试无意义
         assert last_error is not None  # 循环至少执行一次，两次皆败路径必已赋值

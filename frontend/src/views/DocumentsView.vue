@@ -18,13 +18,16 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   approveDraft,
+  backfillDocumentDocTypes,
   confirmDocument,
   listDocuments,
   rejectDraft,
   retryDocument,
+  updateDocumentDocType,
   type DocumentItem,
   type DocumentSourceType,
   type DocumentStatus,
+  type DocType,
   type ReviewStatus,
   docFileUrl,
   deleteDocument,
@@ -32,8 +35,10 @@ import {
 import {
   DEPT_LABELS,
   DEPT_OPTIONS,
+  DOC_TYPE_OPTIONS,
   REVIEW_STATUS_TAGS,
   STATUS_OPTIONS,
+  docTypeLabel,
 } from '@/components/documents/options'
 import DocPreviewDialog from '@/components/documents/DocPreviewDialog.vue'
 import UploadDialog from '@/components/documents/UploadDialog.vue'
@@ -63,6 +68,11 @@ const loading = ref(false)
 const loadError = ref(false)
 /** 草稿审核行级在飞标记（B8）：通过/驳回请求挂起期间禁用按钮防连点重复提交 */
 const actingId = ref<number | null>(null)
+/** 分型保存行级锁（metrics-balance §4.4②，不复用 actingId——与草稿审核互不阻塞）：
+ * 任一行保存挂起期间全部行内下拉禁用，editingTypeId 记录保存中的行 */
+const editingTypeId = ref<number | null>(null)
+/** 分型回填全局锁（§4.4③）：确认弹窗挂起/请求在飞期间吞掉重复点击 */
+const backfilling = ref(false)
 const uploadVisible = ref(false)
 const zipVisible = ref(false)
 const previewVisible = ref(false)
@@ -296,6 +306,49 @@ async function rejectDraftRow(row: DocumentItem): Promise<void> {
   }
 }
 
+/**
+ * 分型修改（metrics-balance §4.4②，MemoryView 范式）：v-model 先行更新 → 后端返回值
+ * 校准 → 失败回滚（client 已统一 toast，本地只恢复行值）。行级锁 editingTypeId：
+ * 保存挂起期间吞掉重复触发；成功不弹 toast（列内即时反馈已足够，失败有全局红提示）。
+ */
+async function onDocTypeChange(row: DocumentItem, value: DocType): Promise<void> {
+  if (editingTypeId.value !== null) return
+  const previous = row.docType
+  row.docType = value
+  editingTypeId.value = row.id
+  try {
+    const data = await updateDocumentDocType(row.id, value)
+    row.docType = data.docType
+  } catch {
+    row.docType = previous
+  } finally {
+    editingTypeId.value = null
+  }
+}
+
+/**
+ * 分型回填（metrics-balance §4.4③）：确认弹窗写明三点（范围为全部启用且就绪文档 /
+ * 覆盖现有分型含手工修正 / 记入审计），backfilling 全局锁；成功按 updated 提示，
+ * 0 变化提示"本次无分型变化"，随后刷新列表取最新分型。
+ */
+async function onBackfillDocType(): Promise<void> {
+  if (backfilling.value) return
+  const action = await ElMessageBox.confirm(
+    '将对全部启用且就绪的文档重算分型：重算结果覆盖现有分型（含手工修正），操作记入审计日志。确认回填？',
+    '分型回填',
+    { type: 'warning', confirmButtonText: '开始回填', cancelButtonText: '取消' },
+  ).catch(() => 'cancel')
+  if (action === 'cancel') return
+  backfilling.value = true
+  try {
+    const data = await backfillDocumentDocTypes()
+    ElMessage.success(data.updated > 0 ? `已重算 ${data.updated} 篇文档分型` : '本次无分型变化')
+    await load()
+  } finally {
+    backfilling.value = false
+  }
+}
+
 function onUploaded(): void {
   uploadVisible.value = false
   page.value = 1
@@ -340,6 +393,7 @@ function onZipImported(): void {
       <el-button @click="resetFilters">重置</el-button>
       <span class="spacer"></span>
       <el-button :loading="loading" @click="refresh">刷新</el-button>
+      <el-button :loading="backfilling" @click="onBackfillDocType">分型回填</el-button>
       <el-button :type="isDraftReview ? 'primary' : 'default'" @click="toggleDraftReview">
         草稿审核
       </el-button>
@@ -421,6 +475,38 @@ function onZipImported(): void {
           >
             {{ row.reviewStatus }}
           </el-tag>
+        </template>
+      </el-table-column>
+      <!-- 分型列（metrics-balance §4.4①②）：el-tag info 展示 + 列内常驻 el-select 五档
+           change 即保存（选中项展示走 #label 槽渲染 el-tag），未知 code 兜底回显原值 -->
+      <el-table-column label="分型" width="110">
+        <template #header>
+          <el-tooltip
+            content="入库自动检测的文档类型（可人工修正），决定检索精排条数档位"
+            placement="top"
+          >
+            <span class="dept-cell">分型</span>
+          </el-tooltip>
+        </template>
+        <template #default="{ row }">
+          <el-select
+            :model-value="row.docType"
+            size="small"
+            :disabled="editingTypeId !== null"
+            :data-test="`doc-type-select-${row.id}`"
+            class="doc-type-select"
+            @change="(value: DocType) => onDocTypeChange(row, value)"
+          >
+            <template #label>
+              <el-tag type="info" size="small">{{ docTypeLabel(row.docType) }}</el-tag>
+            </template>
+            <el-option
+              v-for="o in DOC_TYPE_OPTIONS"
+              :key="o.value"
+              :label="o.label"
+              :value="o.value"
+            />
+          </el-select>
         </template>
       </el-table-column>
       <el-table-column label="责任人" width="100">
@@ -571,6 +657,10 @@ function onZipImported(): void {
 /* 部门列 tooltip 宿主（B12）：span 便于 hover 命中 */
 .dept-cell {
   cursor: default;
+}
+/* 分型下拉占满 110 列内可用宽度（列头 tooltip 同宿主类） */
+.doc-type-select {
+  width: 96px;
 }
 /* 加载失败可重试空态（B11）：整块可点，颜色区分于普通空态 */
 .load-error {

@@ -11,7 +11,8 @@ min_len/max_len 均按正文计，不含 `title_path｜` 前缀。
 
 import pytest
 
-from app.rag.chunker import Block, OutChunk, ParsedDoc, split
+from app.rag.chunker import Block, OutChunk, ParsedDoc, split, split_by_profile, split_clauses
+from app.rag.doc_profile import PROFILE_PARAMS, DocProfile
 
 
 def _sentences(count: int, per: int = 100) -> str:
@@ -174,3 +175,76 @@ def test_page_defaults_to_none_without_page_source() -> None:
     ]
     chunks = split(ParsedDoc(title="员工手册", blocks=blocks))
     assert [chunk.page for chunk in chunks] == [None, None]
+
+
+# ---------- 按型分派（metrics-balance §3.2，工单 04） ----------
+
+
+def test_按型分派_general档与既有split逐字一致() -> None:
+    """防回归：general 档经 split_by_profile 输出与既有 split 完全相等（含独立成节与句切尾并）。"""
+    doc = ParsedDoc(
+        title="员工手册",
+        blocks=[
+            Block(level=1, heading_path=["第1章"], text=_sentences(5)),
+            Block(level=1, heading_path=["第2章"], text=_sentences(5)),
+            Block(level=1, heading_path=["第3章"], text=_sentences(15)),  # 1500 字：句切+尾块并入
+        ],
+    )
+    assert [len(c.content.removeprefix(f"{c.title_path}｜")) for c in split(doc)] == [
+        500,
+        500,
+        800,
+        700,
+    ]
+    assert split_by_profile(doc, PROFILE_PARAMS[DocProfile.GENERAL]) == split(doc)
+
+
+@pytest.mark.parametrize(
+    ("profile", "merged"),
+    [
+        (DocProfile.GENERAL, False),  # min 300：350 字 ≥300 不吸收
+        (DocProfile.OPERATION_MANUAL, True),  # min 400：350 <400 吸收（合并 700 ≤1000）
+        (DocProfile.TABLE_REPORT, False),  # min 300：不吸收
+        (DocProfile.NOTICE, True),  # min 800：350 <800 吸收（合并 700 ≤2000）
+    ],
+)
+def test_按型分派_聚合档min参数生效(profile: DocProfile, merged: bool) -> None:
+    """聚合档 min_len 经 split_by_profile 生效：同级 350 字两节按档位决定是否合并。"""
+    t1, t2 = "甲" * 350, "乙" * 350
+    doc = ParsedDoc(
+        title="样本",
+        blocks=[
+            Block(level=1, heading_path=["一"], text=t1),
+            Block(level=1, heading_path=["二"], text=t2),
+        ],
+    )
+    chunks = split_by_profile(doc, PROFILE_PARAMS[profile])
+    if merged:
+        assert chunks == [OutChunk(content=f"一｜{t1}\n{t2}", title_path="一", position=0)]
+    else:
+        assert chunks == [
+            OutChunk(content=f"一｜{t1}", title_path="一", position=0),
+            OutChunk(content=f"二｜{t2}", title_path="二", position=1),
+        ]
+
+
+def test_按型分派_聚合档max参数生效() -> None:
+    """1800 字单节：notice（max 2000）整节一块不句切；general（max 800）句切为 800+1000。"""
+    text = _sentences(18)
+    doc = ParsedDoc(title="样本", blocks=[Block(level=1, heading_path=["公告"], text=text)])
+    assert split_by_profile(doc, PROFILE_PARAMS[DocProfile.NOTICE]) == [
+        OutChunk(content=f"公告｜{text}", title_path="公告", position=0)
+    ]
+    general = split_by_profile(doc, PROFILE_PARAMS[DocProfile.GENERAL])
+    bodies = [c.content.removeprefix("公告｜") for c in general]
+    assert [len(body) for body in bodies] == [800, 1000]  # 尾块 1000 ≥300 不回并
+
+
+def test_按型分派_条款档走条款边界切分() -> None:
+    """policy_clause 档不走标题聚合：两个完整条款各自成块（聚合路径会把 300 字正文并作一块）。"""
+    c1 = "第一条 " + "甲" * 145 + "。"  # 149 字
+    c2 = "第二条 " + "乙" * 145 + "。"
+    doc = ParsedDoc(title="制度", blocks=[Block(level=1, heading_path=["总则"], text=c1 + c2)])
+    params = PROFILE_PARAMS[DocProfile.POLICY_CLAUSE]
+    assert split_by_profile(doc, params) == split_clauses(doc, params)
+    assert [c.content for c in split_by_profile(doc, params)] == [f"总则｜{c1}", f"总则｜{c2}"]

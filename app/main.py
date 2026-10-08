@@ -216,6 +216,9 @@ def create_app() -> FastAPI:
     # documents 域按域拆三个子 router（行数红线 §1.4，同 prefix=/documents）：入库/治理/回显
     app.include_router(documents.router, prefix="/api")
     app.include_router(document_admin.router, prefix="/api")
+    app.include_router(
+        document_admin.admin_router, prefix="/api"
+    )  # 分型域 /api/admin/documents/*（metrics-balance 工单 01，spec §3.4 钉路径）
     app.include_router(document_files.router, prefix="/api")
     app.include_router(document_rebuild.router, prefix="/api")
     app.include_router(admin_qa_pairs.router, prefix="/api")

@@ -1,5 +1,5 @@
 r"""文档治理路由（自 documents.py 按域拆出，行数红线 §1.4）：列表 / 版本历史 / 重试 /
-确认激活 / 删除 / 草稿审核，业务全部委托 services。
+确认激活 / 删除 / 草稿审核 / 分型修正与回填，业务全部委托 services。
 
 列表（admin-only）：dept/status/keyword/sourceType/reviewStatus 过滤 + 分页
 （pageSize 1-100 默认 20，§22.1），created_at 降序（同刻以 id 降序兜底），响应键名全
@@ -11,6 +11,9 @@ services/draft_review 状态机——通过后触发既有解析入库管道（�
 "文档不存在"）。状态变化成功响应前整清问答精确缓存
 （request.app.state.chat_deps.cache.clear()，W3 Task 1）：文档状态变化改变可检索
 事实，陈旧答案不能等 TTL 自然过期（W2 移交②；驳回不改变可检索事实，不整清）。
+分型域（metrics-balance 工单 01）走独立 admin_router（/api/admin/documents，spec §3.4
+钉路径）：PATCH /doc-type 仅此一字段、POST /backfill-doc-type 存量全量重算——分型只
+影响查询期 top_n 档位与报告分组、不改可检索事实，故均不清问答缓存（§3.4 落锤）。
 """
 
 from typing import Annotated
@@ -27,11 +30,14 @@ from app.db.models import Document
 from app.services import draft_review
 from app.services import ingest as ingest_service
 from app.services.departments import resolve_dept_id
+from app.services.doc_type import backfill_doc_types, set_doc_type
 from app.services.document_views import list_documents as list_document_rows
 from app.services.document_views import list_versions
 from app.services.ingest import process_document
 
 router = APIRouter(prefix="/documents", tags=["documents"])
+# 分型域独立 router：spec §3.4 钉路径 /api/admin/documents/*，与治理域 /api/documents/* 并存
+admin_router = APIRouter(prefix="/admin/documents", tags=["documents"])
 
 _ALLOWED_STATUS: tuple[str, ...] = ("pending", "parsing", "ready", "failed")  # 与 DDL CHECK 同源
 _ALLOWED_SOURCE_TYPE: tuple[str, ...] = ("upload", "draft")  # 与 0007 迁移 CHECK 同源
@@ -65,6 +71,7 @@ def _doc_payload(doc: Document, dept_code: str) -> dict:
         "reviewStatus": doc.review_status,
         "rejectReason": doc.reject_reason,
         "isActive": doc.is_active,
+        "docType": doc.doc_type,
         "uploadedBy": doc.uploaded_by,
         "createdAt": doc.created_at.isoformat(),
         "updatedAt": doc.updated_at.isoformat(),
@@ -75,6 +82,12 @@ class DraftRejectRequest(BaseModel):
     """驳回请求体：原因必填（≤500 字，审计与列表悬停展示用）。"""
 
     reason: str = Field(min_length=1, max_length=500)
+
+
+class DocTypeUpdateRequest(BaseModel):
+    """分型修正请求体（metrics-balance §3.4 落锤：现无文档字段编辑端点，仅此一字段）。"""
+
+    docType: str
 
 
 def _check_status(status: str | None) -> None:
@@ -238,3 +251,25 @@ def reject_draft(
             "rejectReason": doc.reject_reason,
         },
     }
+
+
+@admin_router.patch("/{doc_id}/doc-type")
+def update_doc_type(
+    doc_id: int, payload: DocTypeUpdateRequest, user: AdminUser, db: DbSession
+) -> dict:
+    """人工修正分型（metrics-balance §3.4，admin-only）：仅此一字段，校验/审计/提交在
+    services/doc_type（枚举外 422、寻址失败 404"文档不存在"）。不清问答精确缓存：
+    docType 只影响查询期 top_n 档位与报告分组，不改可检索事实（§3.4 落锤）；编辑不限
+    文档状态（傻瓜式，改错可改回），审计 document.set_doctype 留痕。"""
+    doc = set_doc_type(db, get_clock(), doc_id, payload.docType, actor_user_id=user.id)
+    return {"code": 0, "message": "ok", "data": {"id": doc.id, "docType": doc.doc_type}}
+
+
+@admin_router.post("/backfill-doc-type")
+def backfill_doc_type(user: AdminUser, db: DbSession) -> dict:
+    """存量分型回填（metrics-balance §3.4，admin-only）：对全部 is_active 且 ready 文档
+    从 chunks 重算分型（前缀剥离适配器在 services/doc_type，与 ingest 期口径一致），
+    覆盖现有值（含手工修正——前端确认文案必须写明）；返回 {updated, byType}，审计
+    document.backfill_doctype。不清问答缓存（同 PATCH：不改可检索事实）。"""
+    result = backfill_doc_types(db, get_clock(), actor_user_id=user.id)
+    return {"code": 0, "message": "ok", "data": result}

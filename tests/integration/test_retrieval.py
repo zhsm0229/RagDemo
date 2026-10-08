@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.core.llm import StubEmbedder, StubReranker, sigmoid
 from app.db.models import Chunk, Department, Document, QaPair, User
+from app.rag.doc_profile import resolve_top_n
 from app.services.retrieval import (
     _chunk_search_statement,
     match_qa,
@@ -51,6 +52,7 @@ def _add_document(
     *,
     status: str = "ready",
     is_active: bool = True,
+    doc_type: str = "general",
 ) -> Document:
     doc = Document(
         title=title,
@@ -64,6 +66,7 @@ def _add_document(
         owner_name="制度责任人",
         status=status,
         is_active=is_active,
+        doc_type=doc_type,
         uploaded_by=admin_id,
     )
     session.add(doc)
@@ -343,6 +346,46 @@ def test_doc_hit_fields_roundtrip_from_seed(session: Session) -> None:
     stored = session.scalars(select(Chunk.embedding).where(Chunk.id == chunk.id)).one()
     assert isinstance(stored, str)  # psycopg 未注册 pgvector 适配：vector 列读回为文本
     assert hit.embedding == pytest.approx(embedder.embed([content])[0], rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# ⑥ 查询期 top_n 按型档（metrics-balance §3.2/§5）：doc_type 自 documents 透出，
+#    notice 档 3 条；int 通路同输入对照（零回归背书）
+# ---------------------------------------------------------------------------
+
+
+def test_top_n_by_doc_type_notice_keeps_three_and_int_path_unchanged(session: Session) -> None:
+    """notice 型文档 5 个候选：doc_type 从 pg 列经 search_chunks 读回 → resolve_top_n=3
+    截取前 3 名；同输入传 int 5 照旧——锁 int 通路与按型通路分叉可见。"""
+    embedder = StubEmbedder()
+    ids = _dept_ids(session)
+    doc = _add_document(
+        session, ids["service"], _admin_id(session), "客服_通知样本", doc_type="notice"
+    )
+    chunks = [
+        _add_chunk(session, doc, f"通知候选正文{i}", embedder, position=i) for i in range(1, 6)
+    ]
+
+    hits = search_chunks(
+        session,
+        embedder.embed(["通知查询"])[0],
+        [ids["service"], ids["all"]],
+        top_k=20,
+        ef_search=40,
+    )
+    assert {hit.chunk_id for hit in hits} == {chunk.id for chunk in chunks}  # 5 候选全召回
+    assert {hit.doc_type for hit in hits} == {"notice"}  # 分型自 documents 列透出
+
+    weights = [5.0, 4.0, 3.0, 2.0, 1.0]  # 按召回序对位注入且互异：召回序即 ranked 序
+    by_type = rerank_and_fold(
+        StubReranker(weights=weights), "改写后问题", hits, top_n=resolve_top_n, dedup_sim=0.98
+    )
+    fixed = rerank_and_fold(
+        StubReranker(weights=weights), "改写后问题", hits, top_n=5, dedup_sim=0.98
+    )
+
+    assert [hit.chunk_id for hit in by_type] == [hit.chunk_id for hit in hits[:3]]  # 通知档 3 条
+    assert [hit.chunk_id for hit in fixed] == [hit.chunk_id for hit in hits]  # int 5 条照旧
 
 
 # ---------------------------------------------------------------------------

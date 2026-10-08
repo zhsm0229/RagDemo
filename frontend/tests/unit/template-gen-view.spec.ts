@@ -51,6 +51,7 @@ function docItem(overrides: Partial<DocumentItem> = {}): DocumentItem {
     sourceType: 'upload',
     reviewStatus: null,
     rejectReason: null,
+    docType: 'general',
     isActive: true,
     uploadedBy: 7,
     createdAt: '2026-10-01T10:00:00',

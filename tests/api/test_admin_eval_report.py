@@ -14,6 +14,7 @@ factual/multi_hop 题 autoJudgment=pending、cross_reject 题 autoJudgment=corre
 import，不造第四份）。
 """
 
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -27,7 +28,7 @@ from app.core.clock import FakeClock
 from app.core.config import Settings
 from app.core.errors import ERR_EVAL_STATE, ERR_FORBIDDEN, ERR_NOT_FOUND, ERR_PARAM_INVALID
 from app.core.llm import StubEmbedder, StubLLMProvider
-from app.db.models import AuditLog, Department, EvalQuestion, EvalRun, User
+from app.db.models import AuditLog, Department, Document, EvalQuestion, EvalRun, User
 from app.services import eval_engine, eval_service
 from app.services.chat import ChatDeps
 from app.services.chat_cache import DailyCounter, ExactCache, HitCounter
@@ -48,9 +49,21 @@ def _admin_id(session: Session) -> int:
     return session.scalars(select(User.id).where(User.username == "evaladmin")).one()
 
 
-def _add_question(session: Session, dept_id: int, question: str, expected: str, qtype: str) -> int:
+def _add_question(
+    session: Session,
+    dept_id: int,
+    question: str,
+    expected: str,
+    qtype: str,
+    source_doc_id: int | None = None,
+) -> int:
     eq = EvalQuestion(
-        dept_id=dept_id, question=question, expected_answer=expected, source_ref=None, qtype=qtype
+        dept_id=dept_id,
+        question=question,
+        expected_answer=expected,
+        source_ref=None,
+        source_doc_id=source_doc_id,
+        qtype=qtype,
     )
     session.add(eq)
     session.flush()
@@ -225,7 +238,15 @@ def test_report分组与手工计算一致_人工判优先于auto(client, sessio
     run_id, qids = _grouped_run(client, session)
 
     data = client.get(f"/api/admin/eval-runs/{run_id}/report").json()["data"]
-    assert set(data.keys()) == {"config", "status", "totals", "byDept", "byQtype"}
+    assert set(data.keys()) == {
+        "config",
+        "status",
+        "totals",
+        "byDept",
+        "byQtype",
+        "fourMetrics",  # metrics-balance 工单 07 计划内演进（spec §4.4/§6）
+        "byDocType",
+    }
     assert data["status"] == "done"
     assert data["totals"] == {"total": 5, "correct": 2.5, "accuracy": 0.5, "pendingCount": 0}
     assert data["byDept"] == [
@@ -246,6 +267,102 @@ def test_report分组与手工计算一致_人工判优先于auto(client, sessio
     judged = _items_of(session, run_id)
     assert judged[qids[4]]["autoJudgment"] == "correct"  # auto 值不被改写
     assert judged[qids[4]]["judgment"] == "wrong"  # 人工判并列落 detail，报告合并时优先
+
+
+# ---------------------------------------------------------------------------
+# ③′ 报告端点透出 fourMetrics/byDocType（metrics-balance 工单 07，spec §4.4）
+# ---------------------------------------------------------------------------
+
+_JUDGE_NO_CTX = '{"context_relevant": [], "relevancy": 1, "correctness": "correct"}'
+
+
+def _add_document(
+    session: Session, dept_id: int, admin_id: int, title: str, doc_type: str
+) -> Document:
+    """直插就绪文档（形态同 tests/integration/test_eval_engine._add_document），分型可指定。"""
+    doc = Document(
+        title=title,
+        dept_id=dept_id,
+        original_filename=f"{title}.docx",
+        file_path=f"seed/{title}.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=16,
+        content_hash=f"report-{title}",
+        effective_date=date(2026, 9, 1),
+        owner_name="制度责任人",
+        status="ready",
+        is_active=True,
+        doc_type=doc_type,
+        uploaded_by=admin_id,
+    )
+    session.add(doc)
+    session.flush()
+    return doc
+
+
+def test_report透出fourMetrics与byDocType读回(client, session):
+    """③′ 四指标（null 排除集均分）与分型分组端到端读回：judge 三判合法（全题拒答、
+    0 资料块）→ relevancy/correctness 预填计分；recall 语境空转记 0（source 已标）；
+    unassigned（拒答题无来源）只显题数、四指标 null。"""
+    admin_login(client, session)
+    admin_id = _admin_id(session)
+    depts = _dept_ids(session)
+    doc1 = _add_document(session, depts["hr"], admin_id, "HR_制度语料", "general")
+    doc2 = _add_document(session, depts["hr"], admin_id, "HR_通知语料", "notice")
+    run_id = eval_service.create_eval_run(session, admin_id, "四指标报告", depts["hr"])
+    _add_question(session, depts["service"], "客服事实题一", "答案一", "factual", doc1.id)
+    _add_question(session, depts["service"], "客服事实题二", "答案二", "factual", doc2.id)
+    _add_question(session, depts["service"], "人力薪酬题", "[拒答]", "cross_reject")
+    factory = sessionmaker(bind=session.connection(), expire_on_commit=False)
+    eval_engine.run_eval_run(
+        run_id,
+        _make_deps(),
+        depts["hr"],
+        session_factory=factory,
+        judge_llm=StubLLMProvider(chunks=(_JUDGE_NO_CTX,)),
+    )
+    session.expire_all()
+
+    data = client.get(f"/api/admin/eval-runs/{run_id}/report").json()["data"]
+
+    assert data["fourMetrics"] == {
+        "contextRecall": {"value": 0.0, "evaluatedCount": 2},  # 拒答空转：出处不在空 context
+        "contextPrecision": {"value": None, "evaluatedCount": 0},  # 无 chunk context 可评
+        "answerRelevancy": {"value": 1.0, "evaluatedCount": 2},
+        "answerCorrectness": {"value": 1.0, "evaluatedCount": 2},  # judge 预填，拒答类排除
+    }
+    assert data["byDocType"] == [
+        {
+            "docType": "general",
+            "questionCount": 1,
+            "contextRecall": 0.0,
+            "contextPrecision": None,
+            "answerRelevancy": 1.0,
+            "answerCorrectness": 1.0,
+        },
+        {
+            "docType": "notice",
+            "questionCount": 1,
+            "contextRecall": 0.0,
+            "contextPrecision": None,
+            "answerRelevancy": 1.0,
+            "answerCorrectness": 1.0,
+        },
+        {
+            "docType": "unassigned",
+            "questionCount": 1,
+            "contextRecall": None,
+            "contextPrecision": None,
+            "answerRelevancy": None,
+            "answerCorrectness": None,
+        },
+    ]
+    # 既有字段零变化：judge 预填 correct 并入既有 accuracy 口径（3 题全对）
+    assert data["totals"] == {"total": 3, "correct": 3.0, "accuracy": 1.0, "pendingCount": 0}
+    assert data["byQtype"] == [
+        {"qtype": "cross_reject", "total": 1, "accuracy": 1.0},
+        {"qtype": "factual", "total": 2, "accuracy": 1.0},
+    ]
 
 
 # ---------------------------------------------------------------------------

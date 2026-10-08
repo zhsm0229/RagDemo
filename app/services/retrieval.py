@@ -22,6 +22,7 @@ r"""检索服务（Task 5，问答链路地基）：QA 匹配、向量召回、�
 """
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -60,6 +61,8 @@ class DocHit:
     口径）；search_chunks 召回阶段暂存召回余弦相似度（仅候选排序，不供阈值判定）。
     embedding 供折叠两两比较（psycopg 无 pgvector 适配时列读回为 vector 文本，
     经 _parse_embedding 还原为 float 列表）。
+    doc_type：所属文档分型 code（documents.doc_type，metrics-balance §3.2 查询期
+    参数化与评测 trace 的地基）；测试等手工构造处缺省 general。
     """
 
     chunk_id: int
@@ -70,6 +73,7 @@ class DocHit:
     content: str
     similarity: float
     embedding: list[float]
+    doc_type: str = "general"
 
 
 def match_qa(
@@ -106,7 +110,8 @@ def search_chunks(
     """向量召回：SET LOCAL hnsw.ef_search 后按余弦距离升序取 top_k。
 
     语句见 _chunk_search_statement（部门隔离 + 强制 JOIN documents）。召回阶段
-    DocHit.similarity 暂存 embedding 余弦相似度，重排后由 rerank sigmoid 分覆写。
+    DocHit.similarity 暂存 embedding 余弦相似度，重排后由 rerank sigmoid 分覆写；
+    doc_type 自 documents 透出（评测 trace 记录候选分型，metrics-balance §4.2）。
     """
     _set_ef_search(db, ef_search)
     rows = db.execute(_chunk_search_statement(query_vec, dept_ids, top_k)).all()
@@ -115,13 +120,14 @@ def search_chunks(
             chunk_id=chunk_id,
             document_id=document_id,
             title=title,
+            doc_type=doc_type,
             page_no=page_no,
             title_path=title_path,
             content=content,
             similarity=cosine_to_similarity(float(distance)),
             embedding=_parse_embedding(embedding),
         )
-        for chunk_id, document_id, title, page_no, title_path, content, distance, embedding in rows
+        for chunk_id, document_id, title, doc_type, page_no, title_path, content, distance, embedding in rows
     ]
 
 
@@ -129,10 +135,11 @@ def rerank_and_fold(
     reranker: Reranker,
     query: str,
     hits: list[DocHit],
-    top_n: int,
+    top_n: int | Callable[[list[DocHit]], int],
     dedup_sim: float,
     *,
     return_folded: bool = False,
+    ranked_out: list[tuple[DocHit, float]] | None = None,
 ) -> list[DocHit] | tuple[list[DocHit], list[DocHit]]:
     """重排 + 折叠（F-1003）：top_n 内两两去重，返回 rerank 分降序保留列表。
 
@@ -141,18 +148,30 @@ def rerank_and_fold(
     相似度 ≥ dedup_sim 则丢弃当前项。DocHit.similarity 在此覆写为 rerank sigmoid 分
     （拒答阈值口径，standards §4.4）；空候选短路，不发起 rerank 调用。
 
+    top_n（metrics-balance §3.2 查询期参数化）：int 为固定条数（既有行为，逐字不变）；
+    可调用形态 ``Callable[[list[DocHit]], int]`` 在 **rerank 排序完成后**以求值——入参
+    为分降序 ranked 命中序列（top1 即最高分命中），档位由 top1 命中型决定（生产接线
+    为 doc_profile.resolve_top_n）；空候选短路发生在求值之前。
+
     return_folded=False（缺省，问答编排路径）：返回保留列表，签名与语义同 Task 5；
     True（管理端检索测试 RET-03/04）：返回 (保留列表, 折叠丢弃列表)——进 top_n 但被
     近重复折叠的块带 rerank 分一并交回，供调参视角完整展示（问答编排不受影响）。
+
+    ranked_out（metrics-balance §4.2 接线缝）：非 None 时把全量 ranked
+    (DocHit 已覆写 rerank 分, rerank 分) 按分降序 append 进调用方列表——top_n 折叠
+    之外候选分的唯一获取点（评测 trace 用）；主问答路径不传，行为零改动。
     """
     if not hits:
         return ([], []) if return_folded else []
     docs = [f"{hit.title_path}\n{hit.content}" for hit in hits]
     scores = reranker.rerank(query, docs)
     ranked = sorted(zip(hits, scores, strict=True), key=lambda pair: pair[1], reverse=True)
+    if ranked_out is not None:
+        ranked_out.extend((replace(hit, similarity=score), score) for hit, score in ranked)
+    keep_n = top_n([hit for hit, _ in ranked]) if callable(top_n) else top_n
     kept: list[DocHit] = []
     folded_out: list[DocHit] = []
-    for hit, score in ranked[:top_n]:
+    for hit, score in ranked[:keep_n]:
         if any(_cosine(hit.embedding, kept_hit.embedding) >= dedup_sim for kept_hit in kept):
             folded_out.append(replace(hit, similarity=score))  # 与高分已保留项近重复：折叠丢弃
             continue
@@ -169,7 +188,7 @@ def _chunk_search_statement(
 
     强制 JOIN documents（W2 移交项①）：归档（is_active=false）与未就绪
     （status != 'ready'）文档的 chunk 一律不可见；SELECT 显式取 Chunk.embedding
-    供折叠阶段两两余弦比较。
+    供折叠阶段两两余弦比较，Document.doc_type 供评测 trace 记录候选分型。
     """
     distance = Chunk.embedding.cosine_distance(query_vec)
     return (
@@ -177,6 +196,7 @@ def _chunk_search_statement(
             Chunk.id,
             Chunk.document_id,
             Document.title,
+            Document.doc_type,  # 分型 code（metrics-balance §3.2/§4.2）
             Chunk.page_no,
             Chunk.title_path,
             Chunk.content,

@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    String,
     Text,
     UniqueConstraint,
     text,
@@ -36,6 +37,12 @@ class Document(Base):
         CheckConstraint(
             "review_status IN ('待审核','已通过','已驳回')",
             name="documents_review_status_check",
+        ),
+        # 0010（metrics-balance 工单 01）：五档 code 与 app/rag/doc_profile.DocProfile 同源；
+        # comment 与迁移逐字一致（autogenerate 零差异守卫依赖，同 qa_pairs.is_active 先例）
+        CheckConstraint(
+            "doc_type IN ('policy_clause','table_report','notice','operation_manual','general')",
+            name="documents_doc_type_check",
         ),
         UniqueConstraint("dept_id", "title", "version", name="uq_doc_title_dept_ver"),
         # 单一生效版本数据库级强制：同部门同主题仅一个 is_active 版本（§11.6）
@@ -88,6 +95,16 @@ class Document(Base):
     reject_reason: Mapped[str | None] = mapped_column(
         Text,
         comment="驳回原因（中文，审核人填写），仅 review_status='已驳回' 有值",
+    )
+    # 文档分型（metrics-balance 工单 01）：入库自动检测，服务端 clamp 五档 code，
+    # PATCH /doc-type 可人工修正；中文文案映射在前端（spec §3.3 现房规）
+    doc_type: Mapped[str] = mapped_column(
+        String(32),
+        server_default=text("'general'"),
+        comment=(
+            "文档分型：入库自动检测五档（policy_clause=制度条款/table_report=表格报表/"
+            "notice=通知公告/operation_manual=操作手册/general=通用），可人工修正"
+        ),
     )
     is_active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     deleted_at: Mapped[datetime | None] = mapped_column(_ts())  # 软删时间

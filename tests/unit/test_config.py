@@ -23,7 +23,8 @@ def test_w2_qa_chain_defaults(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", "x" * 32)
     s = Settings(_env_file=None)
     assert s.rerank_base_url == "http://localhost:8082"
-    assert s.rerank_timeout_s == 10
+    # 120：CPU TEI 实测口径（20 条 OCR 长块稳定超 10s，模板生成 400 实证后上调；metrics-balance 前波变更，断言随默认值演进）
+    assert s.rerank_timeout_s == 120
     assert s.llm_base_url == ""
     assert s.llm_api_key == ""
     assert s.llm_model == ""

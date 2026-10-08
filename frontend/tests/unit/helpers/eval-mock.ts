@@ -11,6 +11,8 @@ import { vi } from 'vitest'
 import type {
   EvalImportErrorRow,
   EvalReport,
+  EvalReportDocTypeGroup,
+  EvalReportFourMetrics,
   EvalRunConfig,
   EvalRunDetailItem,
   EvalRunItem,
@@ -104,6 +106,7 @@ export function doneRun(overrides: Partial<EvalRunItem> = {}): MockRun {
       topN: 5,
       temperature: 0.3,
       manifestVersion: 'm7',
+      judgePromptVersion: 'v1',
     },
     detail: {
       items: [
@@ -115,6 +118,38 @@ export function doneRun(overrides: Partial<EvalRunItem> = {}): MockRun {
   }
   backend.runs.unshift(run)
   return run
+}
+
+/** 四指标 fixture：recall 双题均分 0.85、precision 单题、relevancy 双题、correctness 单题 */
+export function fourMetricsFixture(): EvalReportFourMetrics {
+  return {
+    contextRecall: { value: 0.85, evaluatedCount: 2 },
+    contextPrecision: { value: 0.6, evaluatedCount: 1 },
+    answerRelevancy: { value: 0.75, evaluatedCount: 2 },
+    answerCorrectness: { value: null, evaluatedCount: 0 },
+  }
+}
+
+/** 分型分组 fixture：general 有值组 + unassigned 只显题数组 */
+export function docTypeGroupsFixture(): EvalReportDocTypeGroup[] {
+  return [
+    {
+      docType: 'general',
+      questionCount: 2,
+      contextRecall: 0.85,
+      contextPrecision: null,
+      answerRelevancy: 0.75,
+      answerCorrectness: null,
+    },
+    {
+      docType: 'unassigned',
+      questionCount: 1,
+      contextRecall: null,
+      contextPrecision: null,
+      answerRelevancy: null,
+      answerCorrectness: null,
+    },
+  ]
 }
 
 /** 造一条 running 跑分：detail 仅 items（无 pendingCount 键，轮询容错契约） */
@@ -266,6 +301,13 @@ export async function routeFetch(url: string, init: RequestInit = {}): Promise<R
           },
           byDept: [],
           byQtype: [],
+          fourMetrics: {
+            contextRecall: { value: null, evaluatedCount: 0 },
+            contextPrecision: { value: null, evaluatedCount: 0 },
+            answerRelevancy: { value: null, evaluatedCount: 0 },
+            answerCorrectness: { value: null, evaluatedCount: 0 },
+          },
+          byDocType: [],
         },
       )
     }

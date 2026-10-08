@@ -34,9 +34,10 @@ from app.services.retrieval import search_chunks
 from tests.conftest import login_as
 
 _DRAFT_TITLE = "HR_考勤制度模板"
-# 草稿正文：无真实人名/电话/证件号（敏感扫描在审核后的入库管道执行，命中会落 failed）
+# 草稿正文：无真实人名/电话/证件号（敏感扫描在审核后的入库管道执行，命中会落 failed）；
+# 不含"第X条"字样：条款分型会切成碎条多块（<120 并入下条），破坏单块命中断言
 _DRAFT_CONTENT = "\n".join(
-    f"考勤制度模板第{i}条 说明文字{i}：本条为模板示例，供起草人参照改写后提交审核。"
+    f"考勤制度模板要点{i} 说明文字{i}：本段为模板示例，供起草人参照改写后提交审核。"
     for i in range(1, 11)
 )
 _FINAL_TEXT = "已生成草稿《HR_考勤制度模板》并提交审核，请等待管理员审核通过。"

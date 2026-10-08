@@ -2,9 +2,9 @@
 
 > 定位：活文档｜对账：2026-10-07｜同步保障：端点总数标记行由 `tests/unit/test_api_contract.py` 守账（§19.4）
 > 依据 `docs/standards.md` §3（API 接口规范）编写，随代码演进（§19.1 文档随代码）。
-> 覆盖 `app/api/` 当前全部路由：auth 5 个、documents 13 个（documents 11 + rebuild 2）、chat 1 个、conversations 4 个、citations 1 个、messages（feedback）1 个、admin 管理端 31 个（问答对 6、评测 8、提问记录与 badcase 4、检索测试 1、概览与健康度 3（含零召回块下钻）、服务健康 1、用户管理 4、审计查询 2、知识缺口报告 2）、healthz 探针 1 个（`GET /healthz`，docker healthcheck 消费，不设业务章节）。
-> **端点总数：64**（本行由 `tests/unit/test_api_contract.py` 从 FastAPI app 实际路由解析校验：新增/删除端点未同步本行即测试红，计数漂移清零，findings I10）。
-> 最后更新：W5 Task 5 台账翻转（计数 44→47（W5）→48：2026-10-02 新增服务健康卡 1 端点（§4.5.4）；W5 新增知识缺口报告 2 端点，见 §4.9；零召回块下钻 `GET /api/admin/zero-recall-chunks` 1 端点，见 §4.5.3；§4.4.1 docs 项补 hitCount/lastHitAt 历史召回统计两键；2026-10-05 新增文档在线预览 1 端点 §2.10d，chat 引用 citation 增 docId 键 §3.1；2026-10-06 文档契约对账：头部计数改为"端点总数：56"标记行并交契约测试守护（I10）、§2.10c 删除成功响应体更正为 `{id, deleted: true}`（实现为准，I9）、§1.2 补"响应体以实现为准"统一注记；2026-10-06 jti 登出黑名单落地（findings I4）：新增 `POST /api/auth/logout` 1 端点 §2.4a，auth 4→5、总数 56→57；2026-10-06 草稿审核流（agent-evolution #05）：新增 `POST /api/documents/{id}/draft/approve` §2.10e 与 `/draft/reject` §2.10f 共 2 端点，documents 11→13、总数 57→59；2026-10-06 计数对齐实现现状 64：其余增量（memories ×4、agent runs ×1）由并行车道（记忆管理/agent 轨迹）随各自工单补章节登记）；2026-10-06 模板生成首任务（agent-evolution #06）：§5.1 taskType 白名单放开 `template_draft`、补 `save_draft` 工具与 `agent_steps` 逐步轨迹落库说明（无新增端点，总数不变）。
+> 覆盖 `app/api/` 当前全部路由：auth 5 个、documents 13 个（documents 11 + rebuild 2）、文档分型 2 个（§2.10g/h）、chat 1 个、conversations 4 个、citations 1 个、messages（feedback）1 个、admin 管理端 31 个（问答对 6、评测 8、提问记录与 badcase 4、检索测试 1、概览与健康度 3（含零召回块下钻）、服务健康 1、用户管理 4、审计查询 2、知识缺口报告 2）、healthz 探针 1 个（`GET /healthz`，docker healthcheck 消费，不设业务章节）。
+> **端点总数：66**（本行由 `tests/unit/test_api_contract.py` 从 FastAPI app 实际路由解析校验：新增/删除端点未同步本行即测试红，计数漂移清零，findings I10）。
+> 最后更新：W5 Task 5 台账翻转（计数 44→47（W5）→48：2026-10-02 新增服务健康卡 1 端点（§4.5.4）；W5 新增知识缺口报告 2 端点，见 §4.9；零召回块下钻 `GET /api/admin/zero-recall-chunks` 1 端点，见 §4.5.3；§4.4.1 docs 项补 hitCount/lastHitAt 历史召回统计两键；2026-10-05 新增文档在线预览 1 端点 §2.10d，chat 引用 citation 增 docId 键 §3.1；2026-10-06 文档契约对账：头部计数改为"端点总数：56"标记行并交契约测试守护（I10）、§2.10c 删除成功响应体更正为 `{id, deleted: true}`（实现为准，I9）、§1.2 补"响应体以实现为准"统一注记；2026-10-06 jti 登出黑名单落地（findings I4）：新增 `POST /api/auth/logout` 1 端点 §2.4a，auth 4→5、总数 56→57；2026-10-06 草稿审核流（agent-evolution #05）：新增 `POST /api/documents/{id}/draft/approve` §2.10e 与 `/draft/reject` §2.10f 共 2 端点，documents 11→13、总数 57→59；2026-10-06 计数对齐实现现状 64：其余增量（memories ×4、agent runs ×1）由并行车道（记忆管理/agent 轨迹）随各自工单补章节登记）；2026-10-06 模板生成首任务（agent-evolution #06）：§5.1 taskType 白名单放开 `template_draft`、补 `save_draft` 工具与 `agent_steps` 逐步轨迹落库说明（无新增端点，总数不变）；2026-10-06 文档分型闭环（metrics-balance 工单 01）：新增 `PATCH /api/admin/documents/{id}/doc-type` §2.10g 与 `POST /api/admin/documents/backfill-doc-type` §2.10h 共 2 端点，文档列表项补 `docType` 键（§2.6），总数 64→66。
 
 ## 1. 通用约定
 
@@ -253,6 +253,26 @@ POST SSE 须用 fetch + ReadableStream 消费（无 EventSource 自动重连）�
 | 成功响应 | `200`，`data: {id, reviewStatus, rejectReason}` |
 | 错误分支 | `404/3003`（不存在，I13 统一）；`422/1003` 非 draft 来源 / 非 待审核 状态 / 驳回原因为空 |
 
+### 2.10g PATCH /api/admin/documents/{id}/doc-type — 文档分型人工修正（metrics-balance 工单 01，2026-10-06）
+
+| 项 | 说明 |
+|----|------|
+| 权限 | 仅 admin（AdminUser）；member `403/2004`，未登录 `401/2003` |
+| 背景 | 文档自动分型（metrics-balance §3）：入库管道分块前按结构信号检测五档（policy_clause=制度条款 / table_report=表格报表 / notice=通知公告 / operation_manual=操作手册 / general=通用兜底），随 `documents.doc_type` 落库（迁移 0010，VARCHAR(32) DEFAULT 'general' + 具名 CHECK `documents_doc_type_check`）；检测纯函数在 `app/rag/doc_profile`，golden 镜像独立重算（spec §6） |
+| 请求体 | `{"docType": str}`——仅此一字段（现无其他文档字段编辑端点）；取值限五档 code，枚举外 `422/1003`（"分型取值无效：…"） |
+| 语义 | 覆写 doc_type 并审计 `document.set_doctype`（detail 记 before/after docType）；**编辑不限文档状态**（傻瓜式，改错可改回）；**不清问答精确缓存**（落锤 §3.4：docType 只影响查询期 top_n 档位与报告分组，不改可检索事实） |
+| 成功响应 | `200`，`data: {id, docType}` |
+| 错误分支 | `404/3003`（不存在，I13 统一）；`422/1003` 枚举外取值 |
+
+### 2.10h POST /api/admin/documents/backfill-doc-type — 存量文档分型回填（metrics-balance 工单 01，2026-10-06）
+
+| 项 | 说明 |
+|----|------|
+| 权限 | 仅 admin（AdminUser）；member `403/2004`，未登录 `401/2003` |
+| 语义 | 对全部 **is_active 且 ready** 文档从 chunks 重算分型（检测输入由 chunks 剥离 `title_path｜` 前缀重组，与入库期口径逐字一致——services/doc_type 适配器）；**覆盖现有值（含手工修正）**；ingest 进行中未 ready 的文档天然不参与；**不清问答缓存**（同 2.10g）；审计 `document.backfill_doctype`（detail 记 updated/byType） |
+| 成功响应 | `200`，`data: {updated, byType}`——updated=分型发生变化的文档数；byType=其中按新分型的计数分布（如 `{"policy_clause": 3}`；无变化时 `{"updated": 0, "byType": {}}`） |
+| 错误分支 | `403/2004`（member）；无业务性 4xx（空集即 0 变化） |
+
 ### 2.10 POST /api/documents/metadata-suggest — 上传元数据自动建议（W4 后端追加，F-1008）
 
 | 项 | 说明 |
@@ -478,9 +498,9 @@ SSE 事件 DTO 字段表（**逐字引自 standards §3 第 6 条**）：
 
 | 项 | 说明 |
 |----|------|
-| 成功响应 | `200`，`data` = 4.2.4 列表项字段 + `config` + `detail`；`config` 为收口时 9 字段快照（model / promptVersion / qaThreshold / refuseThreshold / efSearch / topK / topN / temperature / manifestVersion，锁定阈值与模型防跨跑对比被污染；running 期为 null） |
-| detail 结构 | `{items: [逐题], pendingCount: n}`。逐题字段：`questionId, deptId, qtype, expected, answerType, answer, citations, autoJudgment, error`——autoJudgment ∈ correct / wrong / pending；error 仅单题失败时非 null（user 消息留痕、不落 assistant 行）；人工录分后逐题追加 `judgment` 字段。`pendingCount` = 人工与 auto 均未判（最终判定 pending）的题数。running 期逐题 commit 仅含 `items`；failed 态无 `pendingCount` 键（前端轮询需容忍键缺失） |
-| 自动判分口径 | 拒答类（期望答案 `[拒答]` 或题型 cross_reject）按回答是否逐字等于固定拒答话术"知识库中未找到相关内容"自动判 correct / wrong；其余题型 autoJudgment=pending 留人工评判（判定协议第 3 条） |
+| 成功响应 | `200`，`data` = 4.2.4 列表项字段 + `config` + `detail`；`config` 为收口时 10 字段快照（model / promptVersion / qaThreshold / refuseThreshold / efSearch / topK / topN / temperature / manifestVersion / judgePromptVersion，锁定阈值、模型与提示词版本防跨跑对比被污染；running 期为 null） |
+| detail 结构 | `{items: [逐题], pendingCount: n}`。逐题字段：`questionId, deptId, qtype, expected, sourceDocId, answerType, answer, citations, retrieval, metrics, autoJudgment, judgeError, error`——autoJudgment ∈ correct / wrong / pending；`sourceDocId` 为题目来源文档 id（拒答类/存量旧题 null，报告 byDocType 分组键）；`retrieval = {contextChunkIds, topKCandidates}` 为检索中间产物（拒答题 contextChunkIds 恒空、候选照记；缓存命中题候选空）；`metrics = {recall, citationsOk, contextPrecision, relevancy, correctness}` 四指标逐题值（拒答题/失败题 metrics=null，judge 失败时三判折算三键 null、机检两键照算）；`judgeError` 仅 judge 三判失败时非 null（整题 pending，绝不部分采纳）；error 仅单题生成失败时非 null（user 消息留痕、不落 assistant 行）；人工录分后逐题追加 `judgment` 字段。`pendingCount` = 人工与 auto 均未判（最终判定 pending）的题数。running 期逐题 commit 仅含 `items`；failed 态无 `pendingCount` 键（前端轮询需容忍键缺失） |
+| 自动判分口径 | 拒答类（期望答案 `[拒答]` 或题型 cross_reject）按回答是否逐字等于固定拒答话术"知识库中未找到相关内容"自动判 correct / wrong，不调 LLM judge（metrics=null）；其余题型跑分后由 judge 三判合一次调用（temperature=0 评测专用实例）预填 correctness 三档，judge 输出任一字段非法 → 整题 pending + judgeError；人工评判以 judgment 覆写合并（判定协议第 1/3 条，metrics-balance §2/§4.3） |
 | 错误分支 | `404/3003` 评测任务不存在 |
 
 #### 4.2.6 POST /api/admin/eval-runs/{id}/judgments — 人工评判录分
@@ -496,7 +516,9 @@ SSE 事件 DTO 字段表（**逐字引自 standards §3 第 6 条**）：
 
 | 项 | 说明 |
 |----|------|
-| 成功响应 | `200`，`data: {config, status, totals, byDept, byQtype}`：`totals: {total, correct, accuracy, pendingCount}`（从 detail 明细聚合而非直读列，与录分口径自洽）；`byDept: [{deptCode, total, accuracy}]`（按题面部门，字典序）；`byQtype: [{qtype, total, accuracy}]`（字典序）；组内 accuracy = 组内加权 correct / 组内 total。running / failed 也可出报告（部分明细 + 真实状态，不做状态闸） |
+| 成功响应 | `200`，`data: {config, status, totals, byDept, byQtype, fourMetrics, byDocType}`：`totals: {total, correct, accuracy, pendingCount}`（从 detail 明细聚合而非直读列，与录分口径自洽）；`byDept: [{deptCode, total, accuracy}]`（按题面部门，字典序）；`byQtype: [{qtype, total, accuracy}]`（字典序）；组内 accuracy = 组内加权 correct / 组内 total。running / failed 也可出报告（部分明细 + 真实状态，不做状态闸） |
+| fourMetrics | `{contextRecall, contextPrecision, answerRelevancy, answerCorrectness}`（metrics-balance §2/§4.4，顺序冻结），每项 `{value: number\|null, evaluatedCount}`：null 排除集均分，evaluatedCount=参算题数。口径：recall=期望出处文档是否进入 context（机检，拒答类与 source_doc_id 空的存量旧题记 null）；precision=context 逐块含作答所需信息的排名加权 `Σ rel_i/i ÷ Σ 1/i`（LLM judge）；relevancy=回答切题度三档 1/0.5/0（LLM judge）；correctness 走 final_judgment 合并口径（judge 预填 autoJudgment、人工评判优先，pending 与拒答类不计） |
+| byDocType | `[{docType, questionCount, contextRecall, contextPrecision, answerRelevancy, answerCorrectness}]`（docType 字典序）：分组键=题目 source_doc_id 指向文档的分型，组内四指标同口径集均分；source_doc_id 为 NULL 的题入 `docType="unassigned"`（未标注）组——只显 questionCount、四指标为 null，但其 relevancy/precision/correctness 仍计入全局 fourMetrics（recall null 自然排除） |
 | 错误分支 | `404/3003` 任务不存在 |
 
 #### 4.2.8 POST /api/admin/eval-runs/{id}/threshold-scan — 阈值扫描向导（F-1012 简化版）

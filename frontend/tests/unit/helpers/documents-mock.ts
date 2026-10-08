@@ -7,7 +7,12 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import { expect, vi } from 'vitest'
-import { type DocumentItem, type DocumentStatus, type ZipImportSummary } from '@/api/documents'
+import {
+  type DocType,
+  type DocumentItem,
+  type DocumentStatus,
+  type ZipImportSummary,
+} from '@/api/documents'
 import DocumentsView from '@/views/DocumentsView.vue'
 
 export const fetchMock = vi.fn()
@@ -27,6 +32,18 @@ export const backend = {
   draftRejectCalls: [] as { id: number; reason: string }[],
   /** GET /api/documents/{id}/preview 已被调用（预览弹窗加载） */
   previewCalls: [] as number[],
+  /** PATCH /api/admin/documents/{id}/doc-type 调用记录（metrics-balance 工单 01） */
+  docTypeCalls: [] as { id: number; docType: DocType }[],
+  /** 置位后 PATCH doc-type 返回 422/1003（失败回滚用例） */
+  docTypeError: false,
+  /** 置位后 PATCH doc-type 永不 resolve（行级锁用例） */
+  holdDocType: false,
+  /** POST /api/admin/documents/backfill-doc-type 调用次数与应答 */
+  backfillCalls: 0,
+  backfillResult: { updated: 0, byType: {} } as {
+    updated: number
+    byType: Partial<Record<DocType, number>>
+  },
   nextDocId: 100,
 }
 
@@ -41,6 +58,11 @@ export function resetBackend(): void {
   backend.draftApproveCalls = []
   backend.draftRejectCalls = []
   backend.previewCalls = []
+  backend.docTypeCalls = []
+  backend.docTypeError = false
+  backend.holdDocType = false
+  backend.backfillCalls = 0
+  backend.backfillResult = { updated: 0, byType: {} }
   backend.nextDocId = 100
 }
 
@@ -67,6 +89,7 @@ export function docItem(overrides: Partial<DocumentItem> = {}): DocumentItem {
     sourceType: 'upload',
     reviewStatus: null,
     rejectReason: null,
+    docType: 'general',
     isActive: true,
     uploadedBy: 1,
     createdAt: T0,
@@ -163,6 +186,30 @@ export async function routeFetch(url: string, init: RequestInit = {}): Promise<R
       doc.rejectReason = reason
     }
     return okEnvelope({ id, reviewStatus: '已驳回', rejectReason: reason })
+  }
+  // 文档分型（metrics-balance 工单 01）：PATCH 记录并同步翻转行内 docType；
+  // holdDocType 置位时永不 resolve（行级锁用例），docTypeError 置位回 422/1003
+  const docType = /^\/api\/admin\/documents\/(\d+)\/doc-type$/.exec(url)
+  if (docType !== null && method === 'PATCH') {
+    const id = Number(docType[1])
+    const rawBody = init.body as unknown
+    const parsed = typeof rawBody === 'string' ? (JSON.parse(rawBody) as { docType?: unknown }) : {}
+    const value = String(parsed.docType ?? '') as DocType
+    backend.docTypeCalls.push({ id, docType: value })
+    if (backend.holdDocType) return new Promise<Response>(() => {})
+    if (backend.docTypeError) {
+      return makeResponse(422, 'application/json', {
+        code: 1003,
+        message: `分型取值无效：${value}`,
+      })
+    }
+    const target = backend.docs.find((d) => d.id === id)
+    if (target) target.docType = value
+    return okEnvelope({ id, docType: value })
+  }
+  if (url === '/api/admin/documents/backfill-doc-type' && method === 'POST') {
+    backend.backfillCalls += 1
+    return okEnvelope(backend.backfillResult)
   }
   // 预览/原文件字节流：Blob 变体（DocPreviewDialog 走 fetch→res.blob()）
   const preview = /^\/api\/documents\/(\d+)\/(preview|file)$/.exec(url)

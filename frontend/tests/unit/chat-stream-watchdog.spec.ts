@@ -127,20 +127,20 @@ describe('问答流看门狗（A8）', () => {
     expect(lastAssistant(chat.messagesOf(null)).status).toBe('done')
   })
 
-  it('300s 总时长兜底：事件持续喂狗（每 40s 一段）仍会在 300s 被强判超时', async () => {
+  it('420s 总时长兜底：事件持续喂狗（每 40s 一段）仍会在 420s 被强判超时', async () => {
     const chat = useChatStream()
     void chat.send('长任务', null)
     await flushPromises()
     const stream = openStreams[0]!
 
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; i < 10; i++) {
       stream.onEvent(token(`第${i}段`))
-      await vi.advanceTimersByTimeAsync(40_000) // 累计 280s，停滞未触发
+      await vi.advanceTimersByTimeAsync(40_000) // 累计 400s，停滞未触发（喂狗线 240s）
     }
     expect(lastAssistant(chat.messagesOf(null)).status).toBe('streaming')
 
-    stream.onEvent(token('第7段')) // 280s 再喂一次：末次停滞线 325s，落在总兜底之后
-    await vi.advanceTimersByTimeAsync(20_000) // 越过 300s 总兜底
+    stream.onEvent(token('第10段')) // 400s 再喂一次：末次停滞线 640s，落在总兜底之后
+    await vi.advanceTimersByTimeAsync(30_000) // 越过 420s 总兜底（CPU TEI 实测口径，TOTAL_TIMEOUT_MS）
     await flushPromises()
     const assistant = lastAssistant(chat.messagesOf(null))
     expect(assistant.status).toBe('failed')

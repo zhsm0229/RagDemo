@@ -2,7 +2,7 @@
 
 > 定位：活文档（项目约束入口）｜对账：2026-10-07｜同步保障：当前状态节数字须守账测试背书（standards §19.7）
 
-面向 AI 编码代理（与新人）的项目入口说明。**规范基线是 [docs/standards.md](docs/standards.md)（v1.8，评审基线，违反 = 不合入）**；本文件只汇总日常高频约定，未覆盖之处以 standards.md 及 [docs/specs/](docs/specs/) 设计文档为准，两者冲突时也不是"二选一"——先在评审中指出矛盾，不许静默择一。全库文档地图见 [docs/README.md](docs/README.md)。
+面向 AI 编码代理（与新人）的项目入口说明。**规范基线是 [docs/standards.md](docs/standards.md)（v1.8，评审基线，违反 = 不合入）**；本文件只汇总日常高频约定，未覆盖之处以 standards.md 及 [docs/specs/](docs/specs/) 设计文档为准，两者冲突时也不是"二选一"——先在评审中指出矛盾，不许静默择一。全库文档地图见 [docs/README.md](docs/README.md)。**团队协作的实操手册（领卡/修 bug/评审/迁移/发布/迭代，场景式可照抄）见 [docs/playbook.md](docs/playbook.md)。**
 
 ## 项目概览
 

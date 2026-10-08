@@ -46,6 +46,7 @@ EXPECTED_COLUMNS: dict[str, list[str]] = {
         "source_type",
         "review_status",
         "reject_reason",
+        "doc_type",  # 0010（metrics-balance 工单 01）：五档分型 code
         "is_active",
         "deleted_at",
         "uploaded_by",
@@ -117,6 +118,7 @@ EXPECTED_COLUMNS: dict[str, list[str]] = {
         "is_active",
         "created_at",
         "updated_at",
+        "source_doc_id",  # 0011（metrics-balance 工单 02）：期望出处解析出的文档 id，拒答类/存量题为空
     ],
     "eval_runs": [
         "id",
@@ -333,6 +335,36 @@ def test_documents_draft_columns_and_checks(session):
         )
     ).scalar()
     assert "'upload'" in (dflt or "")
+
+
+def test_documents_doc_type_check_default_and_comment(session):
+    """0010（metrics-balance 工单 01）：doc_type VARCHAR(32) NOT NULL DEFAULT 'general'
+    + 具名 CHECK 五档在案 + 列级中文注释（与 ORM comment 逐字一致，零差异守卫依赖）。"""
+    names = _constraint_names(session, "documents")
+    assert "documents_doc_type_check" in names
+    defn = session.execute(
+        text(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conrelid='documents'::regclass AND conname='documents_doc_type_check'"
+        )
+    ).scalar()
+    for code in ("policy_clause", "table_report", "notice", "operation_manual", "general"):
+        assert code in (defn or "")
+    row = session.execute(
+        text(
+            "SELECT c.column_default, c.is_nullable, c.udt_name, c.character_maximum_length, "
+            "col_description('documents'::regclass, a.attnum) "
+            "FROM information_schema.columns c "
+            "JOIN pg_attribute a ON a.attrelid = 'documents'::regclass "
+            " AND a.attname = c.column_name "
+            "WHERE c.table_name='documents' AND c.column_name='doc_type'"
+        )
+    ).one()
+    column_default, nullable, udt, max_length, comment = row
+    assert column_default == "'general'::character varying"
+    assert nullable == "NO"
+    assert udt == "varchar" and max_length == 32
+    assert (comment or "").startswith("文档分型：入库自动检测五档")
 
 
 def test_chunks_hnsw_index_and_partial_dept_index(session):

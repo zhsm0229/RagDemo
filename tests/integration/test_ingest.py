@@ -54,8 +54,17 @@ def _tool(name: str) -> ModuleType:
 
 
 def _filler(tag: str, lines: int) -> str:
-    """长正文构造：每行唯一（含序号，避开页眉/页码清洗规则），行数×约27字。"""
-    return "\n".join(f"{tag}第{i}条 内容说明{i}：适用于全体员工并遵照执行。" for i in range(lines))
+    """长正文构造：每行唯一（含序号，避开页眉/页码清洗规则），行数×约34字；不含"第X条"
+    字样——条款分型由专属用例覆盖，存量用例维持 general 档基线（两节 ≥1500 字过信号3）。"""
+    return "\n".join(
+        f"{tag}要点{i}：适用于全体员工并遵照执行，具体细则参见配套操作指引全文。"
+        for i in range(lines)
+    )
+
+
+def _clause_text(no: int, sentences: int, per: int = 36) -> str:
+    """单条制度条款：条号开头、句号收尾（len = 4 + sentences×per；4 句 = 148 字 ≥120 碎条线）。"""
+    return f"第{no}条 " + "".join("款" * (per - 1) + "。" for _ in range(sentences))
 
 
 def _docx_bytes(headings: list[tuple[str, list[str]]]) -> bytes:
@@ -186,10 +195,11 @@ def _chunks(session: Session, doc_id: int) -> list[Chunk]:
 
 
 def test_upload_ready_writes_chunks_and_audits(session: Session, tmp_path) -> None:
-    """正常 docx 入库：ready；chunks 逐块等于分块器输出（含 title_path 前缀）；审计 upload/ready。"""
+    """正常 docx 入库（general 档基线）：ready；chunks 逐块等于分块器输出（含 title_path 前缀）；
+    doc_type=general 落库；审计 upload/ready。"""
     storage = LocalFileStorage(tmp_path)
     content = _docx_bytes(
-        [("第一章 总则", [_filler("总则", 18)]), ("第二章 考勤", [_filler("考勤", 18)])]
+        [("第一章 总则", [_filler("总则", 24)]), ("第二章 考勤", [_filler("考勤", 24)])]
     )
     filename = " handbook_20260901.docx".strip()
     doc = _upload(
@@ -205,6 +215,7 @@ def test_upload_ready_writes_chunks_and_audits(session: Session, tmp_path) -> No
     assert doc.is_active is True
     assert doc.parse_engine == "docx"
     assert doc.parse_error is None
+    assert doc.doc_type == "general"  # 两节共 ~1650 字、无条款/表格信号：兜底档
     expected = split(DocxParser().parse(filename, content))  # 分块器输出为期望基线
     assert len(expected) == 2
     rows = _chunks(session, doc.id)
@@ -229,6 +240,38 @@ def test_upload_ready_writes_chunks_and_audits(session: Session, tmp_path) -> No
         "document.upload",
         "document.ready",
     ]
+
+
+def test_policy_document_chunked_by_clause_and_doc_type_persisted(
+    session: Session, tmp_path
+) -> None:
+    """制度条款文档入库（policy_clause 档）：doc_type 落库读回；分块整条成块不拦腰断——
+    前 4 条各自成块逐字等于完整条款（含段间换行），碎条尾条（<120）并入前条，标题路径取所在节。"""
+    storage = LocalFileStorage(tmp_path)
+    clauses = [_clause_text(i, 4) for i in range(1, 6)]  # 各 148 字：整条成块
+    fragment = _clause_text(6, 1)  # 40 字 <120：尾块并入前条
+    doc = _upload(
+        session,
+        storage,
+        _meta(_dept_id(session), "客服_考勤制度_20260901"),
+        _docx_bytes([("第一章 总则", [*clauses, fragment])]),
+        "policy.docx",
+        DOCX_MIME,
+    )
+
+    assert doc.status == "ready"
+    assert doc.doc_type == "policy_clause"  # 六处条款编号 ≥5：分型落库读回
+    rows = _chunks(session, doc.id)
+    bodies = [
+        *(clause + "\n" for clause in clauses[:4]),  # 段界换行随段保留（零丢字口径）
+        clauses[4] + "\n" + fragment,  # 尾块碎条并入：同块相邻直连逐字无损
+    ]
+    assert [row.position for row in rows] == [0, 1, 2, 3, 4]
+    for row, body in zip(rows, bodies, strict=True):
+        assert row.content == f"第一章 总则｜{body}"  # 整条逐字（含并入），绝不拦腰截断
+        assert row.title_path == "第一章 总则"
+        assert row.content_chars == len(row.content)
+        assert row.dept_id == doc.dept_id
 
 
 def test_missing_metadata_rejected(session: Session, tmp_path) -> None:
@@ -516,7 +559,7 @@ def test_corrupt_docx_failed_with_chinese_parser_reason(session: Session, tmp_pa
 def test_pdf_without_mineru_uses_pypdf_engine(session: Session, tmp_path) -> None:
     """降级（配置路径）：mineru_base_url="" 时 pdf 走 pypdf，parse_engine="pypdf" 且非降级标注。"""
     storage = LocalFileStorage(tmp_path)
-    text = "Section one policy overview with enough content for red line. " * 10
+    text = "Section one policy overview with enough content for red line. " * 16  # 每页 ~992 字
     doc = _upload(
         session,
         storage,
@@ -529,7 +572,7 @@ def test_pdf_without_mineru_uses_pypdf_engine(session: Session, tmp_path) -> Non
     assert doc.parse_engine == "pypdf"
     assert doc.parse_error is None  # 配置缺省路径不是故障降级，不打降级标注
     rows = _chunks(session, doc.id)
-    assert len(rows) == 2  # 两页共约 1260 字 > max_len 800：按句切为两块
+    assert len(rows) == 2  # 两页各 ~992 字 ≥notice min 800：每页独立成块（句切尾块并回不混页）
     assert [row.position for row in rows] == [0, 1]
     assert [row.page_no for row in rows] == [1, 2]  # 页码入库：块所在页（1 起）回填 page_no
     for row in rows:  # PDF 无标题层级：title_path 取文件名主干
@@ -570,7 +613,7 @@ def test_pdf_header_line_aggregated_across_page_blocks(session: Session, tmp_pat
     unique_short = "Unique short line ok"  # 20 字：全文仅出现 1 次，聚合后仍不得误删
     body = "Section policy overview with enough content for red line."
     pages = [
-        [header, *(f"{body} page {page} item {item}" for item in range(6))] for page in range(1, 4)
+        [header, *(f"{body} page {page} item {item}" for item in range(12))] for page in range(1, 4)
     ]
     pages[0].insert(1, unique_short)
     content = _pdf_bytes_lines(pages)
@@ -745,7 +788,7 @@ def test_embed_failure_retry_idempotent(session: Session, tmp_path) -> None:
     """失败重试幂等：embed 注入失败→failed；预置残留块后重试→ready 且先删后插无重复。"""
     storage = LocalFileStorage(tmp_path)
     content = _docx_bytes(
-        [("第一章 总则", [_filler("总则", 18)]), ("第二章 考勤", [_filler("考勤", 18)])]
+        [("第一章 总则", [_filler("总则", 24)]), ("第二章 考勤", [_filler("考勤", 24)])]
     )
     doc = create_document(
         session,
@@ -805,7 +848,7 @@ def test_unexpected_error_maps_to_failed(session: Session, tmp_path, monkeypatch
     def boom(*args, **kwargs):
         raise RuntimeError("internal detail")
 
-    monkeypatch.setattr("app.services.ingest_pipeline.split", boom)
+    monkeypatch.setattr("app.services.ingest_pipeline.split_by_profile", boom)
     process_document(session, _make_deps(storage), doc.id)
 
     assert doc.status == "failed"

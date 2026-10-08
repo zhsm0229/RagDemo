@@ -28,9 +28,11 @@ import {
   backend,
   detailCalls,
   detailItem,
+  docTypeGroupsFixture,
   doneRun,
   fetchMock,
   flushAll,
+  fourMetricsFixture,
   listCalls,
   makeFile,
   makeResponse,
@@ -185,6 +187,7 @@ describe('详情抽屉（轮询容错/逐题/录分）', () => {
       topN: 5,
       temperature: 0.3,
       manifestVersion: 'm7',
+      judgePromptVersion: 'v1',
     }
     backend.runs[0]!.detail = {
       items: [detailItem({ questionId: 1, autoJudgment: 'correct' })],
@@ -254,7 +257,7 @@ describe('详情抽屉（轮询容错/逐题/录分）', () => {
 })
 
 describe('报告与阈值扫描', () => {
-  it('报告渲染：totals 四键卡 + byDept/byQtype 两表；running 态注明部分口径', async () => {
+  it('报告渲染：totals 四键卡 + byDept/byQtype 两表 + 按文档分型四指标卡与分型表；running 态注明部分口径', async () => {
     doneRun()
     backend.report = {
       config: null,
@@ -265,6 +268,8 @@ describe('报告与阈值扫描', () => {
         { deptCode: 'all', total: 2, accuracy: 0.5 },
       ],
       byQtype: [{ qtype: 'factual', total: 10, accuracy: 0.8 }],
+      fourMetrics: fourMetricsFixture(),
+      byDocType: docTypeGroupsFixture(),
     }
     const wrapper = await mountEval()
     const drawer = await openDrawer(wrapper)
@@ -275,7 +280,56 @@ describe('报告与阈值扫描', () => {
     expect(drawer.text()).toContain('87.5%')
     expect(drawer.text()).toContain('事实型')
     expect(drawer.find('[data-test="report-partial-note"]').exists()).toBe(false)
-    void drawer
+
+    // 按文档分型小节（spec §4.4 ④）：四指标卡顺序冻结、null 显 '—'、底部参算题数
+    expect(drawer.find('[data-test="doc-type-title"]').text()).toBe('按文档分型')
+    const cards = drawer.findAll('[data-test="doc-type-metrics"] .total-card')
+    expect(cards).toHaveLength(4)
+    expect(cards[0]!.text()).toContain('85.0%')
+    expect(cards[0]!.text()).toContain('参算 2 题')
+    expect(cards[1]!.text()).toContain('60.0%')
+    expect(cards[2]!.text()).toContain('75.0%')
+    expect(cards[3]!.find('.num').text()).toBe('—') // null 显 '—'
+    expect(cards[3]!.text()).toContain('参算 0 题')
+
+    // byDocType 单表（spec §4.4 ⑤）：分型中文 + unassigned 行四指标全 '—'
+    const rows = drawer.findAll('[data-test="doc-type-table"] .el-table__row')
+    expect(rows).toHaveLength(2)
+    expect(rows[0]!.text()).toContain('通用')
+    expect(rows[0]!.text()).toContain('85.0%')
+    expect(rows[1]!.text()).toContain('未标注')
+    expect(rows[1]!.text()).toContain('—')
+    void wrapper
+  })
+
+  it('byDocType 空数组渲染 el-empty 空态（spec §4.4 ⑥）；四指标整卡 tooltip 注明拒答类口径', async () => {
+    doneRun()
+    backend.report = {
+      config: null,
+      status: 'done',
+      totals: { total: 2, correct: 2, accuracy: 1, pendingCount: 0 },
+      byDept: [],
+      byQtype: [],
+      fourMetrics: {
+        contextRecall: { value: null, evaluatedCount: 0 },
+        contextPrecision: { value: null, evaluatedCount: 0 },
+        answerRelevancy: { value: null, evaluatedCount: 0 },
+        answerCorrectness: { value: null, evaluatedCount: 0 },
+      },
+      byDocType: [],
+    }
+    const wrapper = await mountEval()
+    const drawer = await openDrawer(wrapper)
+    expect(drawer.find('[data-test="doc-type-empty"]').exists()).toBe(true)
+    expect(drawer.text()).toContain('本跑分暂无文档分型数据')
+    expect(drawer.find('[data-test="doc-type-table"]').exists()).toBe(false)
+    // 整卡 tooltip（拒答类题目记 null 不计入）：直接断言 ElTooltip content prop——
+    // hover/popper 渲染在双 worker 并发下 rAF 偶发不落 DOM（全量跑偶红、单跑恒绿），不走浮层
+    const tooltips = drawer.findAllComponents({ name: 'ElTooltip' })
+    expect(
+      tooltips.some((tip) => tip.props('content') === '拒答类题目记 null 不计入'),
+    ).toBe(true)
+    void wrapper
   })
 
   it('阈值扫描入口已解禁（合并门禁 T13 #44）：按钮可点，点击即发起扫描请求', async () => {

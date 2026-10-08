@@ -63,6 +63,7 @@ def commit_ready(
     doc.parse_progress = None
     doc.parse_error_detail = None
     doc.simhash = to_signed64(outcome.simhash)
+    doc.doc_type = outcome.doc_type  # 分型随收口落库（metrics-balance §3.4；重试=重检覆盖）
     doc.updated_at = deps.clock.now()
     doc.is_active = not (outcome.sensitive_hits or outcome.near_dup)  # 命中→待确认
     detail = {

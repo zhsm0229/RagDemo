@@ -11,16 +11,15 @@ r"""评测题库业务：Excel 整批导入（F-601）、跑分任务创建（F-
 题型空缺省 factual 与 DB server_default 同源）——任何一行不合格即 XlsxBatchError
 全量报错、零入库；全部合格才单事务入库 + 审计（record_audit 只 flush，commit 归
 本函数）。评测题纯文本存库（eval_questions 无 embedding 列），导入不触 embedder；
-表无批次号列，成功只回 {imported}。
+表无批次号列，成功只回 {imported}。来源列校验与同部门文档匹配独立在
+services/eval_source_ref.py（行数红线 §1.4 拆分，同 eval_template 先例）。
 
 部门裁决（F-401 傻瓜式原则同源）：模板部门列收中文枚举名（客服/人力/全员），服务
 层映射 code（service/hr/all）后查 departments 解析 id——对接人填 Excel 用中文名，
 非法值行级错误"部门须为：客服/人力/全员"。
 
-拒答类双向归一（features F-601 / 验收判定协议第 3 条，静默处理不留审计痕）：
-1. 期望答案为 `[拒答]` → qtype 归一为 cross_reject（哪怕原填 factual）；
-2. qtype=cross_reject 而期望答案非 `[拒答]` → 期望答案归一为 `[拒答]`。
-跑分引擎（Task 6）据 `expected_answer == '[拒答]'` 单一条件识别拒答题自动判。
+拒答类双向归一（判定协议第 3 条，静默处理）：`[拒答]`→cross_reject、
+cross_reject→`[拒答]`；跑分引擎据 `expected_answer == '[拒答]'` 单一条件识别拒答题。
 """
 
 from decimal import Decimal
@@ -32,6 +31,7 @@ from app.core.clock import Clock, get_clock
 from app.core.errors import ERR_EVAL_STATE, ERR_NOT_FOUND, ERR_PARAM_INVALID, ApiError
 from app.db.models import Department, EvalQuestion, EvalRun
 from app.services.audit import record_audit
+from app.services.eval_source_ref import load_active_docs_by_dept, validate_source_refs
 from app.services.eval_template import (  # 模板自本文件拆出（行数红线 §1.4），转出再导出
     REJECT_MARK,
     TEMPLATE_HEADERS,
@@ -67,7 +67,7 @@ def import_eval_questions(
     *,
     clock: Clock | None = None,
 ) -> dict:
-    """整批导入：结构校验 → 行级校验（任一错误零入库）→ 拒答归一 → 单事务入库 + 审计。
+    """整批导入：结构校验 → 行级校验 → 部门解析 → 来源匹配校验（任一错误零入库）→ 归一入库 + 审计。
 
     返回 {"imported": 行数}；行级/结构级错误抛 XlsxBatchError，部门未播种抛
     ApiError，由 API 层分别转 422。评测题不向量化（纯文本存库）。
@@ -77,17 +77,22 @@ def import_eval_questions(
     )
     errors = _row_errors(rows)
     if errors:
-        raise XlsxBatchError(errors)
+        raise XlsxBatchError(errors)  # 先拒基础行级错误：部门解析/来源匹配无从谈起
     dept_ids = _resolve_depts(db, {row["部门"] for _, row in rows})
+    docs_by_dept = load_active_docs_by_dept(db, set(dept_ids.values()))
+    norm_pairs = [_normalize_reject(row["题型"], row["期望答案"]) for _, row in rows]
+    ref_errors, source_doc_ids = validate_source_refs(rows, norm_pairs, dept_ids, docs_by_dept)
+    if ref_errors:
+        raise XlsxBatchError(ref_errors)
     effective_clock = clock if clock is not None else get_clock()
-    for _, row in rows:
-        qtype, expected = _normalize_reject(row["题型"], row["期望答案"])
+    for (_, row), (qtype, expected), source_doc_id in zip(rows, norm_pairs, source_doc_ids):
         db.add(
             EvalQuestion(
                 dept_id=dept_ids[row["部门"]],
                 question=row["问题"],
                 expected_answer=expected,
                 source_ref=row["来源"] or None,  # 来源列可空：空串落 NULL 而非空文本
+                source_doc_id=source_doc_id,  # 拒答类豁免落 NULL（spec §4.1），匹配口径在 eval_source_ref
                 qtype=qtype,
             )
         )

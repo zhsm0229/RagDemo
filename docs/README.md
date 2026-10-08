@@ -14,6 +14,7 @@
 |---|---|---|
 | 项目是什么、决策依据 | [project-brief.md](project-brief.md) | 活 |
 | 开发规矩（宪法，违反 = 不合入） | [standards.md](standards.md) | 活 |
+| 团队实操手册（领卡/修 bug/评审/迁移/发布/迭代，场景式） | [playbook.md](playbook.md) | 活 |
 | AI 代理 / 新人的入口约束 | [../AGENTS.md](../AGENTS.md) | 活 |
 | 接口契约（端点总数由契约测试守账） | [api.md](api.md) | 活 |
 | 部署与运维操作 | [runbook.md](runbook.md) + [../deploy/](../deploy/) 脚本 | 活 |

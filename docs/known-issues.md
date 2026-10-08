@@ -42,6 +42,10 @@ SSE 问答/生成链路的服务端流式调用不做进程内重试：**重试�
 ### 开放-9：50MB 解析性能与 20 并发压测
 待真实语料与部署机（本机跳过）。
 
+### 开放-10：metrics-balance 部署机硬项（2026-10-08 落地波）
+四指标评测与文档自动分型已落地（specs/metrics-balance.md；工单台账 `.scratch/metrics-balance/progress.md`），以下挂部署/环境条件：
+①**真实基线 run 未跑**——本地 ragdemo-app 为烘焙旧镜像且 dev 库停 alembic 0009，解阻三步（重建 app 镜像→`alembic upgrade head`→对已入库 77 题题库发"基线-四指标-v1"）；②**§17.3 双轮对比未跑**——top_n 按型档代码已落地（topNMode 快照辨识），两轮执行手册见 `.scratch/metrics-balance/compare-runbook.md`；③**阈值未冻结**——spec §7 初值（0.85/0.60/0.80/0.80）待真实分布校准，冻结由用户拍板；④**judge 一致率观察**——LLM judge（DeepSeek temperature=0）首跑后按人工抽检 20% 核一致率，judgeError 率过高需评审裁决是否放宽严格口径（工单 05 遗留）；⑤agent 检索仍纯向量序（触发线：GPU TEI 后恢复精排）。
+
 ## 二、登记裁决（待决策）
 
 | # | 事项 | 选项 |

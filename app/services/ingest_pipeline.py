@@ -1,10 +1,13 @@
-r"""F1 异步段只读分析管线：解析→质量红线→逐块清洗→乱码/敏感/simhash→分块→批量 embed。
+r"""F1 异步段只读分析管线：解析→质量红线→逐块清洗→乱码/敏感/simhash→分型→分块→批量 embed。
 
 本模块不做任何事务写库（不变量，供入库状态机 ingest.py 在失败路径直接覆写状态）；
-产出 PipelineOutcome（块+向量+降级标注+待确认判定）后由状态机单事务收口。红线分母
-为清洗前全文（standards §10.3）；simhash64 与库列 BIGINT 的符号互转在本模块收口；
-图片 OCR 段与 F-1017 降级标注拼接拆至 ingest_images.py。进度上报：analyze_document
-接受可选 progress 回调（阶段, 0-100），由 ingest 层注入落库——本模块只调用不落库。
+产出 PipelineOutcome（块+向量+降级标注+待确认判定+分型）后由状态机单事务收口。
+红线分母为清洗前全文（standards §10.3）；simhash64 与库列 BIGINT 的符号互转在本模块
+收口；图片 OCR 段与 F-1017 降级标注拼接拆至 ingest_images.py；向量化段拆至
+ingest_embed.py（均行数红线 §1.4）。进度上报：analyze_document 接受可选 progress
+回调（阶段, 0-100），由 ingest 层注入落库——本模块只调用不落库。
+分型（metrics-balance 工单 01）：清洗后、分块前按结构信号检测五档（§3.1），按档位
+取切分参数；doc_type 随 PipelineOutcome 交收口段落 documents。
 """
 
 import logging
@@ -25,8 +28,9 @@ from app.core.errors import ERR_PARSE_FAILED, ApiError
 from app.core.llm import Embedder, UpstreamError
 from app.core.storage import FileStorage
 from app.db.models import Document
-from app.rag.chunker import OutChunk, ParsedDoc, split
+from app.rag.chunker import OutChunk, ParsedDoc, split_by_profile
 from app.rag.clean import RAW_CHARS, clean_text, repeated_short_lines
+from app.rag.doc_profile import PROFILE_PARAMS, DocProfile, detect_from_text
 from app.rag.parser import PdfFallbackParser, get_parser
 from app.rag.precheck import (
     GARBLE_THRESHOLD,
@@ -36,6 +40,7 @@ from app.rag.precheck import (
     scan_sensitive,
     simhash64,
 )
+from app.services.ingest_embed import embed_in_batches
 from app.services.ingest_images import ImageAsset, image_degrade_note, ocr_images
 
 logger = logging.getLogger(__name__)
@@ -69,6 +74,7 @@ class PipelineOutcome:
     simhash: int
     sensitive_hits: int
     near_dup: bool
+    doc_type: str = DocProfile.GENERAL.value  # 五档 code（metrics-balance §3），收口落 documents
     image_assets: list = field(default_factory=list)  # list[ImageAsset]，ingest_commit 落库
     image_count: int = 0  # 成功落盘图片数
     ocr_chars: int = 0  # OCR 提取字符总数
@@ -104,13 +110,14 @@ def analyze_document(
     # 落盘细节见 ingest_images.py（本模块保持只读分析不变量）。
     image_assets, ocr_chars_total, images_unparsed = _ocr_stage(deps, doc, parsed, progress)
     _report(progress, "清洗分块中", 25)
-    chunks, cleaned, fingerprint = _clean_and_chunk(parsed)
+    chunks, cleaned, fingerprint, doc_type = _clean_and_chunk(parsed)
     logger.info(
-        "解析完成 doc_id=%s engine=%s 块=%d 清洗后=%d字 耗时=%.1fs",
+        "解析完成 doc_id=%s engine=%s 块=%d 清洗后=%d字 分型=%s 耗时=%.1fs",
         doc.id,
         engine,
         len(chunks),
         len(cleaned),
+        doc_type,
         time.monotonic() - started,
     )
     embeddings = _embed_stage(deps, doc.id, chunks, progress, started)
@@ -123,6 +130,7 @@ def analyze_document(
         simhash=fingerprint,
         sensitive_hits=len(scan_sensitive(cleaned)),
         near_dup=_find_near_dup(session, doc, fingerprint),
+        doc_type=doc_type,
         image_assets=image_assets,
         image_count=len(image_assets),
         ocr_chars=ocr_chars_total,
@@ -151,9 +159,15 @@ def _embed_stage(
     progress: Callable[[str, int], None] | None,
     started: float,
 ) -> list[list[float]]:
-    """向量化段（批次切分与预算见 _embed_in_batches）：上报进度并记录总耗时日志。"""
+    """向量化段（批次切分与预算见 ingest_embed.embed_in_batches）：上报进度并记录总耗时。"""
     _report(progress, "向量化中", 45)
-    embeddings = _embed_in_batches(deps, doc_id, chunks, progress)
+    embeddings = embed_in_batches(
+        deps.embedder,
+        doc_id,
+        [chunk.content for chunk in chunks],
+        progress,
+        deps.parser_settings.embed_batch_chars,
+    )
     logger.info(
         "向量化完成 doc_id=%s chunks=%d 总耗时=%.1fs",
         doc_id,
@@ -163,12 +177,25 @@ def _embed_stage(
     return embeddings
 
 
-def _clean_and_chunk(parsed: ParsedDoc) -> tuple[list[OutChunk], str, int]:
-    """清洗+红线+分块（§10.3：红线分母=清洗前全文）：返回 (chunks, 清洗后全文, simhash64)。
+def detect_doc_profile(parsed: ParsedDoc) -> DocProfile:
+    """ingest 期适配器（ParsedDoc→detect 三参，spec §3.1）：只取非空节拼标题路径与全文。
+
+    空白节不会落 chunks（chunker._aggregate 丢弃），进入检测输入会漂移 <1500 字信号；
+    存量回填适配器（doc_type.chunks_detect_inputs）按同口径重组，两侧有逐字一致对拍。"""
+    blocks = [block for block in parsed.blocks if block.text.strip()]
+    title_paths = [" > ".join(block.heading_path) for block in blocks]
+    full_text = "\n".join(block.text for block in blocks)
+    return detect_from_text(parsed.title, title_paths, full_text)
+
+
+def _clean_and_chunk(parsed: ParsedDoc) -> tuple[list[OutChunk], str, int, DocProfile]:
+    """清洗+红线+分型+分块（§10.3：红线分母=清洗前全文）：返回 (chunks, 清洗后全文, simhash64, 分型)。
 
     页眉页脚跨块聚合（task-6b 修复轮）：pdf 逐页成块后页眉单块仅 1 次、块内计数
     永不达 >=3，先对全文聚合已知页眉行，逐块清洗时经 known_repeated_lines 并集删除。
-    清洗只覆写 text（dataclasses.replace）：parse 阶段打上的 Block.page 原样保留（task-6b）。"""
+    清洗只覆写 text（dataclasses.replace）：parse 阶段打上的 Block.page 原样保留（task-6b）。
+    分型在分块前（metrics-balance §3.4）：检测输入取清洗后非空节，与回填口径一致；
+    切分参数按分型从档位表取（§3.2），条款档走条款边界、聚合档直传 min/max。"""
     raw = "\n".join(block.text for block in parsed.blocks)
     headers = repeated_short_lines(raw)
     cleaned_blocks = [
@@ -177,68 +204,15 @@ def _clean_and_chunk(parsed: ParsedDoc) -> tuple[list[OutChunk], str, int]:
     ]
     cleaned = "\n".join(block.text for block in cleaned_blocks)
     _check_quality(raw, cleaned)
-    return split(ParsedDoc(title=parsed.title, blocks=cleaned_blocks)), cleaned, simhash64(cleaned)
+    cleaned_doc = ParsedDoc(title=parsed.title, blocks=cleaned_blocks)
+    doc_type = detect_doc_profile(cleaned_doc)
+    chunks = split_by_profile(cleaned_doc, PROFILE_PARAMS[doc_type])
+    return chunks, cleaned, simhash64(cleaned), doc_type
 
 
 def _report(progress: Callable[[str, int], None] | None, stage: str, percent: int) -> None:
     if progress is not None:
         progress(stage, percent)
-
-
-def _embed_in_batches(
-    deps: IngestDeps,
-    doc_id: int,
-    chunks: list[OutChunk],
-    progress: Callable[[str, int], None] | None,
-) -> list[list[float]]:
-    """分批嵌入：TEI --max-batch-tokens 2048（防 OOM 特意调低）下单请求超限即 422——
-    2026-10-02 大文档全量单请求全败根因。按字符预算切批（BGE tokenizer 中文≈1字1token，
-    预算留 40% 余量），逐批串行调用（TEI 单并发最稳），批间上报进度。"""
-    texts = [chunk.content for chunk in chunks]
-    if not texts:
-        return []
-    batch_chars = deps.parser_settings.embed_batch_chars
-    batches = _split_by_chars(texts, batch_chars)
-    logger.info(
-        "向量化开始 doc_id=%s chunks=%d 批=%d 预算=%d字/批",
-        doc_id,
-        len(texts),
-        len(batches),
-        batch_chars,
-    )
-    vectors: list[list[float]] = []
-    started = time.monotonic()
-    for i, batch in enumerate(batches, 1):
-        vectors.extend(deps.embedder.embed(batch))
-        if progress is not None:
-            progress("向量化中", 45 + int(50 * i / len(batches)))
-    logger.info(
-        "向量化批次完成 doc_id=%s 批=%d 耗时=%.1fs",
-        doc_id,
-        len(batches),
-        time.monotonic() - started,
-    )
-    return vectors
-
-
-def _split_by_chars(texts: list[str], budget: int) -> list[list[str]]:
-    """按字符预算切批：超长单条独立成批（不截断内容——截断会丢向量语义）。
-    budget<=0 = 不分批（仅测试桩场景）。"""
-    if budget <= 0:
-        return [texts]
-    batches: list[list[str]] = []
-    current: list[str] = []
-    used = 0
-    for text in texts:
-        length = len(text)
-        if current and used + length > budget:
-            batches.append(current)
-            current, used = [], 0
-        current.append(text)
-        used += length
-    if current:
-        batches.append(current)
-    return batches
 
 
 def _parse_with_fallback(

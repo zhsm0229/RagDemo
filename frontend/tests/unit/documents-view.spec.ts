@@ -1,18 +1,19 @@
 /**
  * P3 知识库·文档管理集成测试：列表渲染与状态列矩阵、筛选/分页（§22.1）、
  * 上传对话框（白名单拒收 / 元数据建议回填 F-1008 / 必填校验 / multipart 提交）、
- * 确认激活与失败重试、置灰控件、zip 导入结果表（T3 契约四态）、30s 轮询（§8.4）。
+ * 确认激活与失败重试、置灰控件、zip 导入结果表（T3 契约四态）、30s 轮询（§8.4）、
+ * 文档分型列展示与列内保存、分型回填（metrics-balance 工单 01，§4.4①②③）。
  * 共享 mock 后端见 helpers/documents-mock.ts（全链路走真 client.ts）。
  */
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
-import ElementPlus, { ElMessageBox } from 'element-plus'
+import ElementPlus, { ElMessage, ElMessageBox } from 'element-plus'
 import type { MessageBoxData } from 'element-plus'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { UploadFile } from 'element-plus'
 import { createMemoryHistory, createRouter, RouterView } from 'vue-router'
 import { defineComponent, h, ref } from 'vue'
-import { suggestDocumentMetadata, uploadDocument } from '@/api/documents'
+import { suggestDocumentMetadata, uploadDocument, type DocType } from '@/api/documents'
 import UploadDialog from '@/components/documents/UploadDialog.vue'
 import ZipImportDialog from '@/components/documents/ZipImportDialog.vue'
 import DocumentsView from '@/views/DocumentsView.vue'
@@ -919,5 +920,173 @@ describe('去审核入口 query 预填（agent-evolution #08 模板生成落点�
     } finally {
       second.wrapper.unmount()
     }
+  })
+})
+
+// ---- 文档分型（metrics-balance 工单 01，spec §4.4①②③） ----
+
+describe('文档分型列与列内保存', () => {
+  /** 打开指定行的分型下拉（teleport 到 body 的最后一个下拉容器须渲染满五档） */
+  async function openDocTypeSelect(
+    wrapper: Awaited<ReturnType<typeof mountDocuments>>,
+    rowIndex: number,
+  ) {
+    const select = wrapper.findAll('.el-table__row')[rowIndex]!.find('.el-select')!
+    await select.find('.el-select__wrapper').trigger('click')
+    await waitFor(() => {
+      const dropdowns = document.querySelectorAll('.el-select-dropdown')
+      const last = dropdowns[dropdowns.length - 1]
+      return (last?.querySelectorAll('.el-select-dropdown__item').length ?? 0) >= 5
+    }, '分型下拉渲染五档')
+    return select
+  }
+
+  /** 点击最后一个下拉容器中含指定文案的选项（弹层显示：none 的陈旧容器不会是最后一个） */
+  async function chooseOption(label: string): Promise<void> {
+    const dropdowns = document.querySelectorAll('.el-select-dropdown')
+    const last = dropdowns[dropdowns.length - 1]
+    const option = [...(last?.querySelectorAll('.el-select-dropdown__item') ?? [])].find((el) =>
+      el.textContent?.includes(label),
+    )
+    expect(option, `下拉应含选项：${label}`).toBeDefined()
+    ;(option as HTMLElement).click()
+    await flushPromises()
+  }
+
+  function rowTag(wrapper: Awaited<ReturnType<typeof mountDocuments>>, rowIndex: number) {
+    return wrapper.findAll('.el-table__row')[rowIndex]!.find('.el-select .el-tag')!
+  }
+
+  it('分型列在"状态"与"责任人"之间：DOC_TYPE_LABELS 中文映射，未知 code 兜底回显原值', async () => {
+    backend.docs = [docItem({ docType: 'policy_clause' }), docItem({ docType: 'moon' as DocType })]
+    const wrapper = await mountDocuments()
+    const headers = wrapper.findAll('.el-table__header th').map((th) => th.text())
+    expect(headers.indexOf('分型')).toBe(headers.indexOf('状态') + 1)
+    expect(headers[headers.indexOf('分型') + 1]).toBe('责任人')
+    expect(rowTag(wrapper, 0).text()).toBe('制度条款')
+    expect(rowTag(wrapper, 1).text()).toBe('moon')
+  })
+
+  it('列内下拉 change 即保存：PATCH 携带新分型，行值以后端返回校准', async () => {
+    const doc = docItem({ docType: 'general' })
+    backend.docs = [doc]
+    const wrapper = await mountDocuments()
+    await openDocTypeSelect(wrapper, 0)
+    await chooseOption('通知公告')
+    await waitFor(() => backend.docTypeCalls.length === 1, 'PATCH doc-type 发出')
+    expect(backend.docTypeCalls[0]).toEqual({ id: doc.id, docType: 'notice' })
+    await waitFor(() => rowTag(wrapper, 0).text() === '通知公告', '行值校准为新分型')
+  })
+
+  it('保存失败回滚：PATCH 422 后行值恢复原分型（失败提示由 client 统一 toast）', async () => {
+    backend.docTypeError = true
+    backend.docs = [docItem({ docType: 'general' })]
+    const wrapper = await mountDocuments()
+    await openDocTypeSelect(wrapper, 0)
+    await chooseOption('表格报表')
+    await waitFor(() => backend.docTypeCalls.length === 1, 'PATCH doc-type 发出')
+    await flushPromises()
+    expect(rowTag(wrapper, 0).text()).toBe('通用')
+  })
+
+  it('保存挂起期间行级锁：全部行下拉禁用（editingTypeId，不复用 actingId）', async () => {
+    backend.holdDocType = true
+    backend.docs = [docItem({ docType: 'general' }), docItem({ docType: 'general' })]
+    const wrapper = await mountDocuments()
+    await openDocTypeSelect(wrapper, 0)
+    await chooseOption('通知公告')
+    await waitFor(() => backend.docTypeCalls.length === 1, '首个 PATCH 已发出（挂起中）')
+    const selects = wrapper.findAll('.el-table__row .el-select')
+    expect(selects).toHaveLength(2)
+    for (const select of selects) {
+      expect(select.find('.el-select__wrapper').classes()).toContain('is-disabled')
+    }
+    expect(backend.docTypeCalls).toHaveLength(1) // 锁期间无第二个请求
+  })
+})
+
+describe('分型回填（工具栏）', () => {
+  function backfillButton(wrapper: Awaited<ReturnType<typeof mountDocuments>>) {
+    return wrapper.findAll('button').find((b) => b.text().includes('分型回填'))!
+  }
+
+  it('按钮在筛选行工具栏"草稿审核"之前', async () => {
+    const wrapper = await mountDocuments()
+    const labels = wrapper.findAll('.filter-row button').map((b) => b.text())
+    expect(labels.indexOf('分型回填')).toBeGreaterThan(-1)
+    expect(labels.indexOf('草稿审核') - labels.indexOf('分型回填')).toBe(1)
+  })
+
+  it('确认文案三点齐全（范围/覆盖/审计）；确认后调回填并按 updated 提示', async () => {
+    const successSpy = vi.spyOn(ElMessage, 'success')
+    const confirmSpy = vi
+      .spyOn(ElMessageBox, 'confirm')
+      .mockResolvedValue('confirm' as MessageBoxData)
+    backend.docs = [docItem({ docType: 'general' })]
+    backend.backfillResult = { updated: 2, byType: { policy_clause: 2 } }
+    const wrapper = await mountDocuments()
+    await backfillButton(wrapper).trigger('click')
+    await flushPromises()
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    const [message, title, options] = confirmSpy.mock.calls[0]!
+    expect(String(message)).toContain('启用且就绪')
+    expect(String(message)).toContain('覆盖现有分型')
+    expect(String(message)).toContain('审计日志')
+    expect(String(title)).toContain('分型回填')
+    expect((options as { type?: string }).type).toBe('warning')
+    expect(backend.backfillCalls).toBe(1)
+    expect(successSpy).toHaveBeenCalledWith('已重算 2 篇文档分型')
+  })
+
+  it('0 变化时提示"本次无分型变化"', async () => {
+    const successSpy = vi.spyOn(ElMessage, 'success')
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as MessageBoxData)
+    backend.docs = [docItem({ docType: 'notice' })]
+    backend.backfillResult = { updated: 0, byType: {} }
+    const wrapper = await mountDocuments()
+    await backfillButton(wrapper).trigger('click')
+    await flushPromises()
+    expect(backend.backfillCalls).toBe(1)
+    expect(successSpy).toHaveBeenCalledWith('本次无分型变化')
+  })
+
+  it('确认弹窗取消：不发回填请求', async () => {
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('cancel' as MessageBoxData)
+    backend.docs = [docItem()]
+    const wrapper = await mountDocuments()
+    await backfillButton(wrapper).trigger('click')
+    await flushPromises()
+    expect(backend.backfillCalls).toBe(0)
+  })
+
+  it('回填在飞防连点：请求挂起期间按钮禁用、确认弹窗不重复（backfilling 全局锁）', async () => {
+    let release: (() => void) | null = null
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const confirmSpy = vi
+      .spyOn(ElMessageBox, 'confirm')
+      .mockResolvedValue('confirm' as MessageBoxData)
+    backend.docs = [docItem()]
+    const wrapper = await mountDocuments()
+    fetchMock.mockImplementation((url: string, init: RequestInit = {}) => {
+      if (String(url) === '/api/admin/documents/backfill-doc-type') {
+        return gate.then(() => routeFetch(String(url), init))
+      }
+      return routeFetch(String(url), init)
+    })
+    const firstClick = backfillButton(wrapper).trigger('click')
+    await flushPromises()
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    await backfillButton(wrapper).trigger('click')
+    await flushPromises()
+    expect(confirmSpy).toHaveBeenCalledTimes(1) // 在飞吞掉重复点击
+    expect(backfillButton(wrapper).attributes('disabled')).toBeDefined()
+    expect(backend.backfillCalls).toBe(0)
+    release!()
+    await firstClick
+    await flushPromises()
+    expect(backend.backfillCalls).toBe(1)
+    expect(backfillButton(wrapper).attributes('disabled')).toBeUndefined() // finally 解锁
   })
 })

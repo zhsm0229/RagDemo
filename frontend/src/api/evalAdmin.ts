@@ -26,7 +26,7 @@ export interface EvalRunItem {
   createdAt: string
 }
 
-/** 收口时 9 字段快照（锁定阈值与模型，防跨跑对比被污染）；running 期为 null */
+/** 收口时 10 字段快照（锁定阈值/模型/提示词与 judge 提示词版本，防跨跑对比被污染）；running 期为 null */
 export interface EvalRunConfig {
   model: string
   promptVersion: string
@@ -37,6 +37,8 @@ export interface EvalRunConfig {
   topN: number
   temperature: number
   manifestVersion: string
+  /** judge 提示词版本（metrics-balance 工单 07，eval_judge.JUDGE_PROMPT_VERSION） */
+  judgePromptVersion: string
 }
 
 /** 逐题明细（api.md §4.2.5）：题面文本不在 DTO（题库无列表端点），以 questionId+expected 呈现 */
@@ -113,12 +115,38 @@ export interface EvalReportGroup {
   accuracy: number
 }
 
+/** 四指标单项（metrics-balance §4.4）：value=null 表示无参算题（拒答类等记 null 排除） */
+export interface FourMetricStat {
+  value: number | null
+  evaluatedCount: number
+}
+
+/** 四指标（contextRecall/contextPrecision/answerRelevancy/answerCorrectness），顺序冻结 */
+export interface EvalReportFourMetrics {
+  contextRecall: FourMetricStat
+  contextPrecision: FourMetricStat
+  answerRelevancy: FourMetricStat
+  answerCorrectness: FourMetricStat
+}
+
+/** 分型分组项（按题目 sourceDocId 指向文档的 docType 分组；unassigned 四指标恒 null） */
+export interface EvalReportDocTypeGroup {
+  docType: string
+  questionCount: number
+  contextRecall: number | null
+  contextPrecision: number | null
+  answerRelevancy: number | null
+  answerCorrectness: number | null
+}
+
 export interface EvalReport {
   config: EvalRunConfig | null
   status: EvalRunStatus
   totals: EvalReportTotals
   byDept: (EvalReportGroup & { deptCode: string })[]
   byQtype: (EvalReportGroup & { qtype: string })[]
+  fourMetrics: EvalReportFourMetrics
+  byDocType: EvalReportDocTypeGroup[]
 }
 
 export function getEvalReport(runId: number): Promise<EvalReport> {

@@ -3,7 +3,8 @@ r"""问答编排（Task 8，W2 链路枢纽）：一轮问答的检索决策计�
 prepare_turn 时序（brief ①-⑧）：多轮先改写（仅携带最近 3 轮，上游故障降级原问题）
 → normalize_question → 精确缓存查（键 = 部门 + 规范化改写问题，§17.5 多轮用改写后
 问题作键）→ 命中返 cache 计划 → 未命中 embed 一次计算复用 → match_qa 命中返 qa
-计划（score=embedding 余弦相似度）→ 未命中 search_chunks + rerank_and_fold → fold
+计划（score=embedding 余弦相似度）→ 未命中 search_chunks + rerank_and_fold（top_n 按
+top1 命中型取档，resolve_top_n，metrics-balance §5）→ fold
 空或 top1.similarity < refuse_threshold → refuse 计划（不写缓存）→ 否则 rag 计划
 （score=rerank sigmoid 分）。分数口径（强制交接①，standards §4.4）：拒答判定与
 citation score 只取 rerank_and_fold 产物——其之前的 DocHit.similarity 是召回余弦
@@ -17,18 +18,18 @@ ExactCache.make_key 一处），为空保持旧键。
 （Task 9 写、prepare 读）：{"answer": str, "citations": list[dict], "answer_type":
 str, "model": str}。本模块只 flush 不 commit、只 HitCounter.add 不 flush，事务边界
 归调用方（对齐 services 层惯例，record_audit 先例）。
-会话/消息存取与归属解析拆至 conversations_store.py（行数红线 §1.4，本模块转出再导出）。
+会话/消息存取、落库收尾与归属解析拆至 conversations_store.py（行数红线 §1.4，本模块
+转出再导出；metrics-balance 03 因本文件触及 300 行红线追加转出 finalize 等）。
 """
 
 from dataclasses import dataclass
 
-from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.core.assembly import PromptPack
 from app.core.config import Settings
 from app.core.llm import Embedder, LLMProvider, Reranker
-from app.db.models import Message
+from app.rag.doc_profile import resolve_top_n
 from app.rag.prompt import (
     ContextSource,
     build_chat_messages,
@@ -39,8 +40,11 @@ from app.services.chat_cache import DailyCounter, ExactCache, HitCounter
 from app.services.conversations_store import (
     MSG_CONVERSATION_NOT_FOUND,
     MSG_MESSAGE_NOT_FOUND,
+    finalize_turn,
     list_conversation_messages,
     list_user_conversations,
+    load_recent_history,
+    mark_interrupted,
     resolve_own_answer,
     resolve_owned_conversation,
 )
@@ -83,6 +87,9 @@ class TurnPlan:
     键，standards §3.6）亦即 messages.citations 的 JSONB 存储形态；llm_messages 仅
     qa/rag 非空；cache_entry 仅 cache 计划非空（命中条目，Task 9 取其中 answer 直接
     改流下发）；cache_key 仅 qa/rag 非空——finalize 后由 Task 9 以其 put。
+    retrieval_trace（metrics-balance §4.2 追加，可选）：评测模式检索轨迹
+    {contextChunkIds, topKCandidates}，仅 prepare_turn 传入 ranked_out 时装配；
+    主问答路径恒 None（不落 trace，行为零改动）。
     """
 
     kind: str
@@ -91,6 +98,7 @@ class TurnPlan:
     llm_messages: list[dict] | None
     cache_entry: dict | None
     cache_key: str | None
+    retrieval_trace: dict | None = None
 
 
 @dataclass
@@ -119,12 +127,14 @@ def prepare_turn(
     history: list[tuple[str, str]],
     *,
     user_id: int | None = None,
+    ranked_out: list[tuple[DocHit, float]] | None = None,
 ) -> TurnPlan:
     """按 brief 时序产出一轮计划：改写 → 归一化 → 缓存 → QA → 检索折叠 → 计划。
 
     dept_ids 恒为 [user_dept_id, all_dept_id]（F-502 部门隔离，全员部门参与过滤
     语义）；refuse 计划 citations 恒空、llm_messages 恒 None；缓存 put 不发生在
-    prepare（Task 9 finalize 后执行）。
+    prepare（Task 9 finalize 后执行）。ranked_out 非 None 即评测模式（metrics-balance
+    §4.2）：检索候选全量分经此收集并装配 plan.retrieval_trace，主路径不传零改动。
 
     user_id 非 None 时启用长期记忆注入（F-210 §3.3，agent-evolution）：仅 rag 分支
     把 <user_memory> 块拼进 system（qa 整条返回/拒答无生成必要，均不注入）；注入
@@ -151,32 +161,49 @@ def prepare_turn(
     )
     cached = deps.cache.get(cache_key)
     if cached is not None:
-        return TurnPlan("cache", cached.get("citations", []), rewritten, None, cached, None)
+        plan = TurnPlan("cache", cached.get("citations", []), rewritten, None, cached, None)
+        return _with_trace(plan, ranked_out)
     query_vec = deps.embedder.embed([rewritten])[0]  # 一次计算，qa 与文档链路复用
     dept_ids = [user_dept_id, all_dept_id]
     qa_hit = deps.store.match_qa(db, query_vec, dept_ids, deps.settings.qa_threshold)
     if qa_hit is not None:
-        return _qa_plan(qa_hit, rewritten, cache_key, deps.prompts.chat_system)
-    folded = _retrieve_folded(db, deps, query_vec, dept_ids, rewritten)
+        return _with_trace(
+            _qa_plan(qa_hit, rewritten, cache_key, deps.prompts.chat_system), ranked_out
+        )
+    folded = _retrieve_folded(db, deps, query_vec, dept_ids, rewritten, ranked_out=ranked_out)
     if not folded or folded[0].similarity < deps.settings.refuse_threshold:
-        return TurnPlan("refuse", [], rewritten, None, None, None)  # 拒答不写缓存
+        plan = TurnPlan("refuse", [], rewritten, None, None, None)  # 拒答不写缓存
+        return _with_trace(plan, ranked_out)
     deps.hit_counter.add([hit.chunk_id for hit in folded])  # 仅 rag 路径计数（F-1011）
     chat_system = deps.prompts.chat_system
     if memory_block:
         chat_system = chat_system.rstrip() + "\n" + memory_block  # 仅 rag 分支注入（§3.3）
-    return _rag_plan(folded, rewritten, cache_key, chat_system)
+    return _with_trace(_rag_plan(folded, rewritten, cache_key, chat_system), ranked_out)
 
 
 def _retrieve_folded(
-    db: Session, deps: ChatDeps, query_vec: list[float], dept_ids: list[int], rewritten: str
+    db: Session,
+    deps: ChatDeps,
+    query_vec: list[float],
+    dept_ids: list[int],
+    rewritten: str,
+    *,
+    ranked_out: list[tuple[DocHit, float]] | None = None,
 ) -> list[DocHit]:
     """向量召回（经 VectorStore 接口）+ 重排折叠：产物 DocHit.similarity 已是
-    rerank sigmoid 分（阈值口径）。"""
+    rerank sigmoid 分（阈值口径）；ranked_out 原样透传收集缝（评测 trace）。
+    top_n 传 resolve_top_n（metrics-balance §5，§17.3 管的检索行为变更）：精排按
+    top1 命中型截取条数，general 档与旧固定 rerank_top_n=5 同值（缺省行为不变）。"""
     hits = deps.store.search_chunks(
         db, query_vec, dept_ids, deps.settings.retriever_top_k, deps.settings.hnsw_ef_search
     )
     return rerank_and_fold(
-        deps.reranker, rewritten, hits, deps.settings.rerank_top_n, deps.settings.chunk_dedup_sim
+        deps.reranker,
+        rewritten,
+        hits,
+        resolve_top_n,
+        deps.settings.chunk_dedup_sim,
+        ranked_out=ranked_out,
     )
 
 
@@ -231,69 +258,19 @@ def _rag_plan(folded: list[DocHit], rewritten: str, cache_key: str, chat_system:
     return TurnPlan("rag", citations, rewritten, messages, None, cache_key)
 
 
-def finalize_turn(
-    db: Session,
-    assistant_msg_id: int,
-    *,
-    content: str,
-    citations: list[dict],
-    answer_type: str,
-    model: str,
-    usage: tuple[int, int] | None,
-    latency_ms: int,
-    cache_hit: bool,
-) -> None:
-    """收尾占位 assistant 消息：纯 UPDATE + flush，commit 归调用方（Task 9）。
+def _with_trace(plan: TurnPlan, ranked_out: list[tuple[DocHit, float]] | None) -> TurnPlan:
+    """评测缝（metrics-balance §4.2）：ranked_out 非 None 时装配 retrieval_trace。
 
-    usage 即 provider.last_usage，None（拒答未调 LLM 等）写 0；answer_type 取值
-    'rag'/'qa'/'refuse'（CHECK 约束）——cache 计划由 Task 9 取缓存条目内的原
-    answer_type，不得传 'cache'。缓存 put 同归 Task 9 在 finalize 后执行。
-    """
-    prompt_tokens, completion_tokens = usage if usage is not None else (0, 0)
-    db.execute(
-        update(Message)
-        .where(Message.id == assistant_msg_id)
-        .values(
-            content=content,
-            citations=citations,
-            answer_type=answer_type,
-            model=model,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            latency_ms=latency_ms,
-            cache_hit=cache_hit,
-        )
-    )
-    db.flush()
-
-
-def mark_interrupted(db: Session, assistant_msg_id: int) -> None:
-    """中断收尾（CHAT-12）：只置 is_active=false 标失败，不重复落库；flush 不 commit。"""
-    db.execute(update(Message).where(Message.id == assistant_msg_id).values(is_active=False))
-    db.flush()
-
-
-def load_recent_history(
-    db: Session, conversation_id: int, current_user_msg_id: int
-) -> list[tuple[str, str]]:
-    """最近 3 轮（6 条）历史（W2 自 api/chat.py 下沉，行为逐字保留）：created_at DESC
-    LIMIT 6 再 reversed。
-
-    id < current_user_msg_id 排除本轮 user 消息（prepare 的 question 另传，不得重复进
-    history）；is_active 过滤中断占位行；同事务 now() 同刻以 id 兜底排序；奇数条（上轮
-    断流留下悬空 user）丢弃最新一条，保证严格 (user, assistant) 轮次对。部门过滤豁免
-    说明：会话归属已在上游校验（resolve_owned_conversation），本查询随之继承本人边界。
-    """
-    rows = db.execute(
-        select(Message.role, Message.content)
-        .where(
-            Message.conversation_id == conversation_id,
-            Message.id < current_user_msg_id,
-            Message.is_active.is_(True),
-        )
-        .order_by(Message.created_at.desc(), Message.id.desc())
-        .limit(6)
-    ).all()
-    if len(rows) % 2 == 1:
-        rows = rows[1:]
-    return [(role, content) for role, content in reversed(rows)]
+    contextChunkIds=citations 中 refType=doc 的 refId（qa 引用非 chunk 不入集，缓存
+    命中题自缓存条目 citations 还原）；topKCandidates=全量 ranked 候选（含 top_n
+    折叠丢弃者，无检索则空）。主路径 ranked_out=None 原样返回，行为零改动。"""
+    if ranked_out is None:
+        return plan
+    plan.retrieval_trace = {
+        "contextChunkIds": [c["refId"] for c in plan.citations if c["refType"] == "doc"],
+        "topKCandidates": [
+            {"chunkId": hit.chunk_id, "docType": hit.doc_type, "rerankScore": score}
+            for hit, score in ranked_out
+        ],
+    }
+    return plan

@@ -1,11 +1,13 @@
-r"""会话与消息存取/归属解析（自 chat.py 拆出，行数红线 §1.4）：列表、历史消息、IDOR 归属闸。
+r"""会话与消息存取/归属解析（自 chat.py 拆出，行数红线 §1.4）：列表、历史消息、落库收尾、IDOR 归属闸。
 
-问答编排（prepare_turn/finalize）仍在 chat.py；本模块只承载"会话/消息的查询与归属
-解析"——api/conversations、api/chat、api/feedback 三端点共用（chat.py 转出再导出，
-既有导入路径不变）。归属校验一律"不存在与无权同判 404/3003"（IDOR 防线 §21.8）。
+问答编排（prepare_turn）仍在 chat.py；本模块承载"会话/消息的查询、落库收尾与归属
+解析"——api/conversations、api/chat、api/chat_stream、api/feedback 共用（chat.py
+转出再导出，既有导入路径不变；finalize/mark_interrupted/load_recent_history 系
+metrics-balance 03 因 chat.py 触及 300 行红线转出）。归属校验一律"不存在与无权
+同判 404/3003"（IDOR 防线 §21.8）。
 """
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.core.errors import ERR_NOT_FOUND, ApiError
@@ -13,6 +15,32 @@ from app.db.models import Conversation, Message, User
 
 MSG_CONVERSATION_NOT_FOUND: str = "会话不存在或无权访问"  # 404/3003 对外文案（归属/软删共用）
 MSG_MESSAGE_NOT_FOUND: str = "消息不存在或无权访问"  # 反馈归属失败对外文案（F-208）
+
+
+def load_recent_history(
+    db: Session, conversation_id: int, current_user_msg_id: int
+) -> list[tuple[str, str]]:
+    """最近 3 轮（6 条）历史（W2 自 api/chat.py 下沉，行为逐字保留；metrics-balance 03
+    因 chat.py 行数红线 §1.4 转出至此）：created_at DESC LIMIT 6 再 reversed。
+
+    id < current_user_msg_id 排除本轮 user 消息（prepare 的 question 另传，不得重复进
+    history）；is_active 过滤中断占位行；同事务 now() 同刻以 id 兜底排序；奇数条（上轮
+    断流留下悬空 user）丢弃最新一条，保证严格 (user, assistant) 轮次对。部门过滤豁免
+    说明：会话归属已在上游校验（resolve_owned_conversation），本查询随之继承本人边界。
+    """
+    rows = db.execute(
+        select(Message.role, Message.content)
+        .where(
+            Message.conversation_id == conversation_id,
+            Message.id < current_user_msg_id,
+            Message.is_active.is_(True),
+        )
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(6)
+    ).all()
+    if len(rows) % 2 == 1:
+        rows = rows[1:]
+    return [(role, content) for role, content in reversed(rows)]
 
 
 def list_user_conversations(
@@ -78,3 +106,45 @@ def resolve_owned_conversation(db: Session, user: User, conversation_id: int) ->
     if conversation is None or conversation.user_id != user.id or not conversation.is_active:
         raise ApiError(ERR_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND, 404)
     return conversation
+
+
+def finalize_turn(
+    db: Session,
+    assistant_msg_id: int,
+    *,
+    content: str,
+    citations: list[dict],
+    answer_type: str,
+    model: str,
+    usage: tuple[int, int] | None,
+    latency_ms: int,
+    cache_hit: bool,
+) -> None:
+    """收尾占位 assistant 消息：纯 UPDATE + flush，commit 归调用方（Task 9）。
+
+    usage 即 provider.last_usage，None（拒答未调 LLM 等）写 0；answer_type 取值
+    'rag'/'qa'/'refuse'（CHECK 约束）——cache 计划由 Task 9 取缓存条目内的原
+    answer_type，不得传 'cache'。缓存 put 同归 Task 9 在 finalize 后执行。
+    """
+    prompt_tokens, completion_tokens = usage if usage is not None else (0, 0)
+    db.execute(
+        update(Message)
+        .where(Message.id == assistant_msg_id)
+        .values(
+            content=content,
+            citations=citations,
+            answer_type=answer_type,
+            model=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            latency_ms=latency_ms,
+            cache_hit=cache_hit,
+        )
+    )
+    db.flush()
+
+
+def mark_interrupted(db: Session, assistant_msg_id: int) -> None:
+    """中断收尾（CHAT-12）：只置 is_active=false 标失败，不重复落库；flush 不 commit。"""
+    db.execute(update(Message).where(Message.id == assistant_msg_id).values(is_active=False))
+    db.flush()

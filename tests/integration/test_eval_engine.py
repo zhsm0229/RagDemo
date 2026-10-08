@@ -40,6 +40,7 @@ from app.db.models import (
     EvalQuestion,
     EvalRun,
     Message,
+    QaPair,
     User,
 )
 from app.rag.prompt import REFUSAL_TEXT
@@ -105,15 +106,42 @@ def _add_chunk(session: Session, doc: Document, content: str, embedder: StubEmbe
 
 
 def _add_question(
-    session: Session, dept_id: int, question: str, expected: str, qtype: str
+    session: Session,
+    dept_id: int,
+    question: str,
+    expected: str,
+    qtype: str,
+    source_doc_id: int | None = None,
 ) -> EvalQuestion:
     """按导入归一后的落库形态直插评测题（expected=[拒答] ⇔ qtype=cross_reject）。"""
     eq = EvalQuestion(
-        dept_id=dept_id, question=question, expected_answer=expected, source_ref=None, qtype=qtype
+        dept_id=dept_id,
+        question=question,
+        expected_answer=expected,
+        source_ref=None,
+        source_doc_id=source_doc_id,
+        qtype=qtype,
     )
     session.add(eq)
     session.flush()
     return eq
+
+
+def _add_qa(
+    session: Session, dept_id: int, admin_id: int, question: str, answer: str, embedder
+) -> QaPair:
+    """直插问答对（形态同 tests/integration/test_chat_flow.py 的 _add_qa）。"""
+    qa = QaPair(
+        dept_id=dept_id,
+        question=question,
+        answer=answer,
+        embedding=embedder.embed([question])[0],
+        status="enabled",
+        created_by=admin_id,
+    )
+    session.add(qa)
+    session.flush()
+    return qa
 
 
 def _seed_bank(session: Session, admin_id: int, embedder: StubEmbedder) -> dict[str, int]:
@@ -238,7 +266,7 @@ def _item_of(run: EvalRun, question_id: int) -> dict:
 
 def test_跑分收口_done与total_correct_accuracy及config快照逐字段(session: Session) -> None:
     """① 4 题收口 done：拒答两题 correct、事实两题 pending 不计；accuracy=0.5；
-    config 快照 9 字段与当前 Settings/prompts 一致。"""
+    config 快照 11 字段与当前 Settings/prompts 一致。"""
     admin = _admin_id(session)
     embedder = StubEmbedder()
     _seed_bank(session, admin, embedder)
@@ -270,8 +298,10 @@ def test_跑分收口_done与total_correct_accuracy及config快照逐字段(sess
         "efSearch": deps.settings.hnsw_ef_search,
         "topK": deps.settings.retriever_top_k,
         "topN": deps.settings.rerank_top_n,
+        "topNMode": "by_doc_type",  # 工单 08：top_n 按 top1 命中型取档（spec §3.2/§5）
         "temperature": deps.prompts.temperature,
         "manifestVersion": deps.prompts.version,
+        "judgePromptVersion": "v1",  # metrics-balance 工单 07 计划内演进（spec §6）
     }
 
 
@@ -362,10 +392,14 @@ def test_detail逐题结构_citations快照与消息一致(session: Session) -> 
         "deptId",
         "qtype",
         "expected",
+        "sourceDocId",  # metrics-balance 工单 07：分型分组键来源（报告/评测追溯）
         "answerType",
         "answer",
         "citations",
+        "retrieval",  # metrics-balance §4.2 计划内演进：检索中间产物 trace
+        "metrics",  # 工单 07：四指标逐题落库（null 排除集均分的原料）
         "autoJudgment",
+        "judgeError",  # 工单 07：judge 失败原因（整题 pending，绝不部分采纳）
         "error",
     }
     assert item1["answerType"] == "rag"
@@ -375,6 +409,7 @@ def test_detail逐题结构_citations快照与消息一致(session: Session) -> 
         chunk_ids["chunk_b"],
     ]  # 高分在前（rerank 降序）
     assert item1["citations"][0]["score"] == pytest.approx(sigmoid(3.0))
+    assert item1["retrieval"]["contextChunkIds"] == [c["refId"] for c in item1["citations"]]
     assistant = session.scalar(
         select(Message).where(Message.role == "assistant", Message.content == item1["answer"])
     )
@@ -393,6 +428,178 @@ def test_detail逐题结构_citations快照与消息一致(session: Session) -> 
         REFUSAL_TEXT,
         [],
     )
+    # 拒答题 trace：contextChunkIds 恒空（无 context 拼装）；候选照记实际检索产物
+    # （两块语料均被召回、均低于拒答阈值 → 2 条候选）
+    assert item3["retrieval"]["contextChunkIds"] == []
+    candidates3 = item3["retrieval"]["topKCandidates"]
+    assert {c["chunkId"] for c in candidates3} == {chunk_ids["chunk_a"], chunk_ids["chunk_b"]}
+    assert all(c["rerankScore"] == pytest.approx(sigmoid(-8.0)) for c in candidates3)
+
+
+# ---------------------------------------------------------------------------
+# ④″ 检索 trace 落库（metrics-balance §4.2）：rag 候选 / 拒答形态 / top_k 上限 /
+#    缓存命中还原 / qa 直答形态
+# ---------------------------------------------------------------------------
+
+
+def test_评测rag题trace读回_候选三键与docType及context一致(session: Session) -> None:
+    """rag 题 trace：topKCandidates 恰含全部召回候选（chunkId/docType/rerankScore 恰三键、
+    docType=documents 默认 general、rerank 分降序），contextChunkIds 与 citations refId
+    逐项一致。"""
+    admin = _admin_id(session)
+    embedder = StubEmbedder()
+    chunk_ids = _seed_bank(session, admin, embedder)
+    questions = _seed_questions(session)
+    run = _new_run(session, admin)
+    deps = _make_deps(embedder, _MarkerReranker(["密码", "差旅"]), StubLLMProvider())
+
+    _run_engine(session, deps, run.id)
+    session.expire_all()
+    run = session.get(EvalRun, run.id)
+
+    retrieval = _item_of(run, questions[0].id)["retrieval"]
+    assert set(retrieval.keys()) == {"contextChunkIds", "topKCandidates"}
+    assert retrieval["contextChunkIds"] == [chunk_ids["chunk_a"], chunk_ids["chunk_b"]]
+    candidates = retrieval["topKCandidates"]
+    assert len(candidates) == 2  # 全量召回候选（2 块语料全部进候选），非 top_n 截取
+    assert {c["chunkId"] for c in candidates} == {chunk_ids["chunk_a"], chunk_ids["chunk_b"]}
+    assert all(set(c.keys()) == {"chunkId", "docType", "rerankScore"} for c in candidates)
+    assert all(c["docType"] == "general" for c in candidates)  # documents.doc_type 默认档
+    # 密码题命中 chunk_a（marker 双出现→高分）；chunk_b 无 marker 命中→低分——候选按
+    # rerank 分降序（高分 chunk_a 在前）
+    assert [c["chunkId"] for c in candidates] == [chunk_ids["chunk_a"], chunk_ids["chunk_b"]]
+    assert [c["rerankScore"] for c in candidates] == [
+        pytest.approx(sigmoid(3.0)),
+        pytest.approx(sigmoid(-8.0)),
+    ]
+
+
+def test_拒答题trace形态_contextChunkIds空且候选照记实际检索产物(session: Session) -> None:
+    """阈值拒答题（§2 裁决）：contextChunkIds=[]（无 context 拼装），topKCandidates 照记
+    实际检索产物——低于拒答阈值的候选分保留观察价值。"""
+    admin = _admin_id(session)
+    embedder = StubEmbedder()
+    chunk_ids = _seed_bank(session, admin, embedder)
+    salary_doc = _add_document(session, _dept_ids(session)["hr"], admin, "HR_薪酬语料")
+    salary_chunk = _add_chunk(
+        session, salary_doc, "薪酬体系：基本工资、绩效奖金与津贴构成。", embedder
+    )
+    questions = _seed_questions(session)
+    run = _new_run(session, admin)
+    deps = _make_deps(embedder, _MarkerReranker(["密码", "差旅"]), StubLLMProvider())
+    # 薪酬不在 marker 表：薪酬题三块语料全被召回、全低分 → 拒答
+
+    _run_engine(session, deps, run.id)
+    session.expire_all()
+    run = session.get(EvalRun, run.id)
+
+    assert run.status == "done"
+    item = _item_of(run, questions[2].id)
+    assert (item["answerType"], item["answer"], item["citations"]) == (
+        "refuse",
+        REFUSAL_TEXT,
+        [],
+    )
+    assert item["retrieval"]["contextChunkIds"] == []
+    candidates = item["retrieval"]["topKCandidates"]
+    assert {c["chunkId"] for c in candidates} == {
+        chunk_ids["chunk_a"],
+        chunk_ids["chunk_b"],
+        salary_chunk.id,
+    }
+    assert all(c["docType"] == "general" for c in candidates)
+    assert all(c["rerankScore"] == pytest.approx(sigmoid(-8.0)) for c in candidates)
+
+
+def test_候选分恒为全量召回_不随top_n截断(session: Session) -> None:
+    """21 块语料：topKCandidates 恰为 top_k 封顶的全量召回（21 块中 top_k 进候选），而
+    citations/context 仍按 top_n 折叠——收集缝是 top_n 之外候选分的唯一获取点。
+    断言以 Settings 实际生效值为准（本地 .env 的 RETRIEVER_TOP_K 覆盖不影响不变量）。"""
+    admin = _admin_id(session)
+    embedder = StubEmbedder()
+    doc = _add_document(session, _dept_ids(session)["hr"], admin, "HR_密码大全")
+    for no in range(21):
+        _add_chunk(session, doc, f"密码重置说明第{no}条：渠道{no}验证后重置。", embedder)
+    dept_id = _dept_ids(session)["service"]
+    question = _add_question(session, dept_id, _FACTUAL_1, "登录页点击忘记密码后重置。", "factual")
+    run = _new_run(session, admin)
+    deps = _make_deps(embedder, _MarkerReranker(["密码"]), StubLLMProvider())
+
+    _run_engine(session, deps, run.id)
+    session.expire_all()
+    run = session.get(EvalRun, run.id)
+
+    assert run.status == "done"
+    item = _item_of(run, question.id)
+    assert item["answerType"] == "rag"
+    retrieval = item["retrieval"]
+    candidates = retrieval["topKCandidates"]
+    # 不变量断言（不依赖本地 .env 的 RETRIEVER_TOP_K 覆盖）：候选数=top_k 封顶而非
+    # top_n 截取——前提 top_n < top_k < 21，否则本测试前提失效先红
+    assert deps.settings.rerank_top_n < deps.settings.retriever_top_k < 21
+    assert len(candidates) == deps.settings.retriever_top_k  # 全量召回，top_k 封顶
+    assert len({c["chunkId"] for c in candidates}) == deps.settings.retriever_top_k  # 无重复
+    assert all(c["docType"] == "general" for c in candidates)
+    assert all(c["rerankScore"] == pytest.approx(sigmoid(3.0)) for c in candidates)
+    assert len(retrieval["contextChunkIds"]) == deps.settings.rerank_top_n  # context 按 top_n 折叠
+    assert retrieval["contextChunkIds"] == [
+        c["chunkId"] for c in candidates[: deps.settings.rerank_top_n]
+    ]
+    assert [c["refId"] for c in item["citations"]] == retrieval["contextChunkIds"]
+
+
+def test_缓存命中题trace_contextChunkIds自citations还原且候选空(session: Session) -> None:
+    """同题重复两问（§2 裁决）：第二问命中随跑旁路缓存——contextChunkIds 自缓存条目
+    citations 还原（与首问一致），topKCandidates=[]（无新检索）。"""
+    admin = _admin_id(session)
+    embedder = StubEmbedder()
+    chunk_ids = _seed_bank(session, admin, embedder)
+    dept_id = _dept_ids(session)["service"]
+    q1 = _add_question(session, dept_id, _FACTUAL_1, "登录页点击忘记密码后重置。", "factual")
+    q_dup = _add_question(session, dept_id, _FACTUAL_1, "登录页点击忘记密码后重置。", "factual")
+    run = _new_run(session, admin)
+    deps = _make_deps(embedder, _MarkerReranker(["密码", "差旅"]), StubLLMProvider())
+
+    _run_engine(session, deps, run.id)
+    session.expire_all()
+    run = session.get(EvalRun, run.id)
+
+    first = _item_of(run, q1.id)["retrieval"]
+    assert [c["chunkId"] for c in first["topKCandidates"]] == [
+        chunk_ids["chunk_a"],
+        chunk_ids["chunk_b"],
+    ]
+    second = _item_of(run, q_dup.id)
+    assert second["answerType"] == "rag"  # 缓存条目内的原答案类型
+    assert second["retrieval"] == {
+        "contextChunkIds": first["contextChunkIds"],
+        "topKCandidates": [],  # 无新检索
+    }
+
+
+def test_qa直答题trace_contextChunkIds与候选均空(session: Session) -> None:
+    """qa 直答题：引用为问答对（非 chunk），trace 两键同构但均空——refType=qa 的 refId
+    不混入 contextChunkIds。qa 对种在视角部门 hr（检索边界 [hr, all]，题面 dept 只进
+    报告口径）。"""
+    admin = _admin_id(session)
+    embedder = StubEmbedder()
+    _seed_bank(session, admin, embedder)
+    qa = _add_qa(session, _dept_ids(session)["hr"], admin, "试用期多久", "试用期为六个月", embedder)
+    question = _add_question(
+        session, _dept_ids(session)["service"], "试用期多久", "六个月", "factual"
+    )
+    run = _new_run(session, admin)
+    deps = _make_deps(embedder, _MarkerReranker(["密码", "差旅"]), StubLLMProvider())
+
+    _run_engine(session, deps, run.id)
+    session.expire_all()
+    run = session.get(EvalRun, run.id)
+
+    item = _item_of(run, question.id)
+    assert item["answerType"] == "qa"
+    assert item["citations"][0]["refType"] == "qa"
+    assert item["citations"][0]["refId"] == qa.id
+    assert item["retrieval"] == {"contextChunkIds": [], "topKCandidates": []}
 
 
 # ---------------------------------------------------------------------------
@@ -597,8 +804,10 @@ def test_创建跑分_202与审计读回及GET接线(eval_client: TestClient, se
         "efSearch",
         "topK",
         "topN",
+        "topNMode",  # 工单 08 计划内演进（spec §6）：top_n 生效模式辨识
         "temperature",
         "manifestVersion",
+        "judgePromptVersion",  # 工单 07 计划内演进（spec §6）
     }
     assert data["detail"] == {"items": [], "pendingCount": 0}
 
@@ -621,6 +830,97 @@ def test_未知视角部门_422部门编码无效(eval_client: TestClient, sessi
     assert resp.json()["code"] == 1003
     assert resp.json()["message"] == "部门编码无效：finance（可选 service/hr/all）"
     assert session.scalar(select(func.count()).select_from(EvalRun)) == 0
+
+
+# ---------------------------------------------------------------------------
+# ⑧ judge 预填 autoJudgment + metrics 落库（metrics-balance 工单 07，spec §2/§4.3）
+# ---------------------------------------------------------------------------
+
+_JUDGE_OK = '{"context_relevant": [true], "relevancy": 1, "correctness": "correct"}'
+
+
+def test_judge预填autoJudgment与metrics落库读回(session: Session) -> None:
+    """⑧ judge 三判合法（专用第二实例注入）：非拒答题 autoJudgment 预填 correctness
+    （correct 计入收口 correct、pendingCount 不含）；metrics 五键读回——recall 命中 1、
+    citationsOk 无角标 false、contextPrecision 全相关 1、relevancy/correctness 折算；
+    拒答题旁路 metrics=null 且 judgeError=null。"""
+    admin = _admin_id(session)
+    embedder = StubEmbedder()
+    doc = _add_document(session, _dept_ids(session)["hr"], admin, "HR_密码语料")
+    _add_chunk(session, doc, "密码重置：登录页点击忘记密码，验证手机号后重置。", embedder)
+    dept_id = _dept_ids(session)["service"]
+    factual = _add_question(
+        session, dept_id, _FACTUAL_1, "登录页点击忘记密码后重置。", "factual", source_doc_id=doc.id
+    )
+    reject = _add_question(session, dept_id, _REJECT_1, "[拒答]", "cross_reject")
+    run = _new_run(session, admin)
+    deps = _make_deps(embedder, _MarkerReranker(["密码"]), StubLLMProvider())
+    judge_llm = StubLLMProvider(chunks=(_JUDGE_OK,))  # 评测专用第二实例替身（spec §2）
+
+    # 幂等闸（status!=running 直接返回）决定 judge 注入必须随首次执行：直调任务体传
+    # judge_llm 实参（对齐 _run_engine 的 session_factory 指向，hr 视角部门）
+    eval_engine.run_eval_run(
+        run.id,
+        deps,
+        _dept_ids(session)["hr"],
+        session_factory=_engine_factory(session),
+        judge_llm=judge_llm,
+    )
+    session.expire_all()
+    run = session.get(EvalRun, run.id)
+
+    assert run.status == "done"
+    answered = _item_of(run, factual.id)
+    assert answered["autoJudgment"] == "correct"  # judge 预填（原恒 pending）
+    assert answered["judgeError"] is None
+    assert answered["sourceDocId"] == doc.id
+    assert answered["metrics"] == {
+        "recall": 1,  # contextChunkIds 的 chunk 均属来源文档
+        "citationsOk": False,  # stub 回答无角标：不可核对，机检必须红（裁决 4）
+        "contextPrecision": pytest.approx(1.0),  # 单块全相关 = 1
+        "relevancy": 1,
+        "correctness": 1,
+    }
+    assert run.correct == 2  # judge 预填 correct 1 + 拒答 auto correct 1
+    assert run.detail["pendingCount"] == 0
+    refused = _item_of(run, reject.id)
+    assert refused["autoJudgment"] == "correct"  # 拒答类走既有规则自动判
+    assert refused["metrics"] is None and refused["judgeError"] is None
+    assert judge_llm.stream_calls == 1  # 拒答类不调 judge（§2 旁路）
+
+
+def test_judge失败_单题pending与judgeError不炸run(session: Session) -> None:
+    """⑧ judge 输出非法（stub 默认产出非 JSON，§2 裁决 3）：该题 pending + judgeError
+    落 detail，机检 recall/citationsOk 照算、三判折算三键 null；run 照常收口 done。"""
+    admin = _admin_id(session)
+    embedder = StubEmbedder()
+    doc = _add_document(session, _dept_ids(session)["hr"], admin, "HR_密码语料")
+    _add_chunk(session, doc, "密码重置：登录页点击忘记密码，验证手机号后重置。", embedder)
+    dept_id = _dept_ids(session)["service"]
+    factual = _add_question(
+        session, dept_id, _FACTUAL_1, "登录页点击忘记密码后重置。", "factual", source_doc_id=doc.id
+    )
+    run = _new_run(session, admin)
+    deps = _make_deps(embedder, _MarkerReranker(["密码"]), StubLLMProvider())
+    # 不注入 judge_llm：缺省 build_llm(settings, 0.0) 在 test_mode 下产出 stub 固定文案
+
+    _run_engine(session, deps, run.id)
+    session.expire_all()
+    run = session.get(EvalRun, run.id)
+
+    assert run.status == "done"  # 单题 judge 失败不拖垮整体
+    item = _item_of(run, factual.id)
+    assert item["autoJudgment"] == "pending"  # 绝不部分采纳、绝不判 wrong
+    assert item["judgeError"] is not None
+    assert item["judgeError"].startswith("judge 输出不是合法 JSON")
+    assert item["metrics"] == {
+        "recall": 1,
+        "citationsOk": False,
+        "contextPrecision": None,
+        "relevancy": None,
+        "correctness": None,
+    }
+    assert run.detail["pendingCount"] == 1  # 失败题进人工复核队列
 
 
 def test_部门未播种_导入422部门数据未初始化(session: Session) -> None:

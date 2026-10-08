@@ -3,8 +3,8 @@ r"""Agent 工具集（ToolProvider 第七接口实现，F-211，工单 #04/#06�
 内部复用既有 service 函数（§1.6 跨模块取数走 service）：
 - knowledge_base_search（#04）：embed（Embedder 接口）→ VectorStore.search_chunks
   （部门隔离 SQL 在 services/retrieval 强制执行：dept_id IN 绑定参数 + 强制 JOIN
-  documents 的 is_active/ready 双闸）→ rerank_and_fold（rerank sigmoid 分口径，
-  standards §4.4，与问答链路同一把尺）；
+  documents 的 is_active/ready 双闸）→ 纯向量序返回（CPU TEI 精排实测超时，见
+  agent 检索降级记录；主问答链路仍走 rerank，两把尺的差异在 known-issues 登记）；
 - save_draft（#06）：包装 services/draft_review.create_draft——预检三闸/精确查重/
   FileStorage 落盘/审计与上传同源，登记 draft+待审核（无审核不落地，specs §五）。
 
@@ -28,7 +28,6 @@ from app.core.storage import FileStorage
 from app.core.tools import RunContext, ToolResult, ToolSpec
 from app.db.models import User
 from app.services.draft_review import create_draft
-from app.services.retrieval import rerank_and_fold
 from app.services.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)

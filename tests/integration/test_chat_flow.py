@@ -35,7 +35,13 @@ from app.db.models import Chunk, Conversation, Department, Document, Message, Qa
 from app.rag.prompt import REFUSAL_TEXT
 from app.services.chat import ChatDeps, TurnPlan, finalize_turn, mark_interrupted, prepare_turn
 from app.services.chat_cache import DailyCounter, ExactCache, HitCounter
-from app.services.retrieval import PgVectorStore, normalize_question, rerank_and_fold, search_chunks
+from app.services.retrieval import (
+    DocHit,
+    PgVectorStore,
+    normalize_question,
+    rerank_and_fold,
+    search_chunks,
+)
 
 # ---------------------------------------------------------------------------
 # 种子与装配助手（ORM 直插，先例 tests/integration/test_retrieval.py）
@@ -51,7 +57,9 @@ def _admin_id(session: Session) -> int:
     return session.execute(select(User.id).where(User.username == "admin")).scalar_one()
 
 
-def _add_document(session: Session, dept_id: int, admin_id: int, title: str) -> Document:
+def _add_document(
+    session: Session, dept_id: int, admin_id: int, title: str, *, doc_type: str = "general"
+) -> Document:
     doc = Document(
         title=title,
         dept_id=dept_id,
@@ -64,6 +72,7 @@ def _add_document(session: Session, dept_id: int, admin_id: int, title: str) -> 
         owner_name="制度责任人",
         status="ready",
         is_active=True,
+        doc_type=doc_type,
         uploaded_by=admin_id,
     )
     session.add(doc)
@@ -159,7 +168,8 @@ class _RecordingLLM:
 
 
 def test_turn_plan_and_chat_deps_field_contracts() -> None:
-    """TurnPlan 六字段（含 cache_key，refuse/cache 计划为 None）与 ChatDeps 八字段即接口。"""
+    """TurnPlan 七字段（cache_key 后追加可选 retrieval_trace，metrics-balance §4.2 计划内
+    演进非放宽；主问答路径恒 None）与 ChatDeps 九字段即接口。"""
     assert [f.name for f in fields(TurnPlan)] == [
         "kind",
         "citations",
@@ -167,6 +177,7 @@ def test_turn_plan_and_chat_deps_field_contracts() -> None:
         "llm_messages",
         "cache_entry",
         "cache_key",
+        "retrieval_trace",
     ]
     assert [f.name for f in fields(ChatDeps)] == [
         "embedder",
@@ -552,6 +563,113 @@ def test_citations_match_fold_result_and_renumber_after_dedup(session: Session) 
     assert [citation["score"] for citation in plan.citations] == [
         pytest.approx(hit.similarity) for hit in expected
     ]
+
+
+# ---------------------------------------------------------------------------
+# 检索 trace 通路（metrics-balance §4.2）：ranked_out 收集缝 + 主路径不产 trace
+# ---------------------------------------------------------------------------
+
+
+def test_rerank_and_fold_ranked_out_collects_full_candidates_with_rerank_scores() -> None:
+    """ranked_out 收集缝：收集含 top_n 之外的全量 ranked (DocHit, rerank分) 按分降序，
+    DocHit.similarity 已覆写为 rerank 分；缺省（主问答路径）不收集且返回值不变；
+    空候选短路时不触碰收集列表。"""
+    hits = [
+        DocHit(
+            chunk_id=chunk_id,
+            document_id=1,
+            title="标题",
+            page_no=None,
+            title_path="路径",
+            content="正文",
+            similarity=0.5,
+            embedding=embedding,
+            doc_type="general",
+        )
+        for chunk_id, embedding in ((1, [1.0, 0.0]), (2, [0.0, 1.0]), (3, [0.6, 0.8]))
+    ]
+    collected: list[tuple[DocHit, float]] = []
+
+    kept = rerank_and_fold(
+        StubReranker(weights=[1.0, 3.0, 2.0]),
+        "查询",
+        hits,
+        ranked_out=collected,
+        top_n=2,
+        dedup_sim=0.98,
+    )
+
+    assert [hit.chunk_id for hit in kept] == [2, 3]  # top_n=2 截取不受收集缝影响
+    assert [(hit.chunk_id, score) for hit, score in collected] == [
+        (2, pytest.approx(sigmoid(3.0))),
+        (3, pytest.approx(sigmoid(2.0))),
+        (1, pytest.approx(sigmoid(1.0))),  # top_n 之外的第 3 名也在收集缝中
+    ]
+    assert all(hit.similarity == pytest.approx(score) for hit, score in collected)
+
+    plain = rerank_and_fold(
+        StubReranker(weights=[1.0, 3.0, 2.0]), "查询", hits, top_n=2, dedup_sim=0.98
+    )
+    assert [hit.chunk_id for hit in plain] == [2, 3]  # 缺省不收集，返回值不变
+
+    empty_sink: list[tuple[DocHit, float]] = []
+    assert (
+        rerank_and_fold(StubReranker(), "查询", [], top_n=2, dedup_sim=0.98, ranked_out=empty_sink)
+        == []
+    )
+    assert empty_sink == []  # 空候选短路：收集列表保持原样
+
+
+# ---------------------------------------------------------------------------
+# 主链路按型截取（metrics-balance §5，§17.3 管的检索行为变更）：
+# chat._retrieve_folded 改传 resolve_top_n——notice 档 citations 3 条 < rerank_top_n
+# ---------------------------------------------------------------------------
+
+
+def test_prepare_turn_notice_doc_yields_three_citations_by_doc_type(session: Session) -> None:
+    """notice 型文档 5 个候选经主问答链路（prepare_turn）→ rag 计划 citations 恰 3 条：
+    若仍传固定 settings.rerank_top_n（=5）必得 5 条，本用例钉死接线已切换到按型取档。"""
+    ids = _dept_ids(session)
+    admin = _admin_id(session)
+    embedder = StubEmbedder()
+    doc = _add_document(session, ids["service"], admin, "客服_通知样本", doc_type="notice")
+    for i in range(1, 6):
+        _add_chunk(session, doc, f"通知候选正文{i}", embedder, position=i)
+    question = "通知查询"
+    recall = search_chunks(
+        session,
+        embedder.embed([question])[0],
+        [ids["service"], ids["all"]],
+        top_k=20,
+        ef_search=40,
+    )
+    assert len(recall) == 5  # 前提：候选多于通知档 3 条，截取可辨
+    deps = _make_deps(embedder, StubReranker(weights=[5.0, 4.0, 3.0, 2.0, 1.0]), StubLLMProvider())
+
+    plan = prepare_turn(session, deps, ids["service"], ids["all"], question, [])
+
+    assert plan.kind == "rag"
+    assert len(plan.citations) == 3  # 通知档 top_n=3
+    assert len(plan.citations) < deps.settings.rerank_top_n  # 与固定 int 基线（5）可区分
+    assert [citation["n"] for citation in plan.citations] == [1, 2, 3]  # 折叠后连续编号
+
+
+def test_main_chat_path_turn_plan_carries_no_retrieval_trace(session: Session) -> None:
+    """主问答路径（不传 ranked_out）TurnPlan.retrieval_trace 恒 None——trace 只落评测
+    链路，普通问答行为与响应体零改动（metrics-balance §4.2）。"""
+    ids = _dept_ids(session)
+    admin = _admin_id(session)
+    embedder = StubEmbedder()
+    doc = _add_document(session, ids["service"], admin, "客服_trace语料")
+    _add_chunk(session, doc, "考勤制度怎么规定", embedder)
+    deps = _make_deps(embedder, StubReranker(weights=[2.0]), StubLLMProvider())
+
+    rag_plan = prepare_turn(session, deps, ids["service"], ids["all"], "考勤制度怎么规定", [])
+    # 拒答方向换 hr 视角：语料块挂在 service 部门，对 hr 不可见 → 空召回 → refuse
+    refuse_plan = prepare_turn(session, deps, ids["hr"], ids["all"], "考勤制度怎么规定", [])
+
+    assert rag_plan.kind == "rag" and rag_plan.retrieval_trace is None
+    assert refuse_plan.kind == "refuse" and refuse_plan.retrieval_trace is None
 
 
 # ---------------------------------------------------------------------------

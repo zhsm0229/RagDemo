@@ -1,11 +1,12 @@
 <script setup lang="ts">
 /**
  * 跑分报告面板（F-603，api.md §4.2.7 + F-1012 阈值扫描区）：totals 四键卡 +
- * byDept/byQtype 两表 + [阈值扫描]。报告 running/failed 也可出（部分明细+真实状态）。
- * 阈值扫描端点已随 feat/w4-fe 合并（5878a01）：T13 评审 #44 解禁，扫描入口
- * 无条件启用（历史开关 FEATURE_FLAGS 已移除）。曲线 accuracy 为重放口径
- * ≠ 报告 accuracy（T5 评审裁决，文案注明）；scope.note（qa 曲线口径局限）原样
- * 展示（T5 裁决）。
+ * byDept/byQtype 两表 + 四指标卡与分型分组（metrics-balance 工单 07，spec §4.4
+ * 设计师约定 ④⑤⑥）+ [阈值扫描]。报告 running/failed 也可出（部分明细+真实状态）。
+ * 四指标 null 显 '—'（拒答类题目记 null 不计入，整卡 tooltip 注明）；byDocType
+ * 单表同 byDept 款（短列头+全称 tooltip），docType 文案复用文档域 DOC_TYPE 映射。
+ * 阈值扫描曲线 accuracy 为重放口径 ≠ 报告 accuracy（T5 评审裁决，文案注明）；
+ * scope.note（qa 曲线口径局限）原样展示（T5 裁决）。
  */
 import { ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
@@ -16,6 +17,7 @@ import {
   type EvalReport,
   type ThresholdScanResult,
 } from '@/api/evalAdmin'
+import { docTypeLabel } from '@/components/documents/options'
 import { deptCodeLabel } from '@/components/admin/options'
 import { formatPercent, qtypeLabel, runStatusTag } from './options'
 
@@ -27,6 +29,34 @@ const loadErr = ref('')
 const scanning = ref(false)
 const scanErr = ref('')
 const scan = ref<ThresholdScanResult | null>(null)
+
+/** 四指标卡（spec §4.4 ④：顺序固定 Recall/Precision/Relevancy/Correctness） */
+const FOUR_METRIC_CARDS = [
+  { key: 'contextRecall', label: 'Recall' },
+  { key: 'contextPrecision', label: 'Precision' },
+  { key: 'answerRelevancy', label: 'Relevancy' },
+  { key: 'answerCorrectness', label: 'Correctness' },
+] as const
+
+/** byDocType 表四列（spec §4.4 ⑤：短列头 + 全称 tooltip） */
+const DOC_TYPE_METRIC_COLUMNS = [
+  {
+    key: 'contextRecall',
+    short: '召回',
+    full: 'Context Recall：期望出处文档进入 context 的比例（机检）',
+  },
+  {
+    key: 'contextPrecision',
+    short: '精确',
+    full: 'Context Precision：context 逐块含作答所需信息的排名加权（LLM judge）',
+  },
+  { key: 'answerRelevancy', short: '相关', full: 'Answer Relevancy：回答切题度（LLM judge）' },
+  {
+    key: 'answerCorrectness',
+    short: '正确',
+    full: 'Answer Correctness：回答正确性（judge 预填，人工评判优先合并）',
+  },
+] as const
 
 // immediate：面板随抽屉内容渲染时 visible 已为 true（v-else-if 之后再挂载），
 // 不加 immediate 首次打开不触发报告加载
@@ -64,6 +94,11 @@ async function doScan(): Promise<void> {
   } finally {
     scanning.value = false
   }
+}
+
+/** 分型分组行文案：unassigned（未标注）是报告分组的合成组（来源未标注），非文档分型五档 */
+function docTypeGroupLabel(docType: string): string {
+  return docType === 'unassigned' ? '未标注' : docTypeLabel(docType)
 }
 
 /** 推荐档高亮判定：曲线档位等于推荐值（推荐值为 null 不高亮） */
@@ -121,6 +156,57 @@ defineExpose({ load, doScan })
         <el-table-column prop="total" label="题数" width="80" />
         <el-table-column label="准确率" width="110">
           <template #default="{ row }">{{ formatPercent(row.accuracy) }}</template>
+        </el-table-column>
+      </el-table>
+
+      <h4 class="sec-title" data-test="doc-type-title">按文档分型</h4>
+      <div class="totals" data-test="doc-type-metrics">
+        <el-tooltip
+          v-for="card in FOUR_METRIC_CARDS"
+          :key="card.key"
+          content="拒答类题目记 null 不计入"
+          placement="top"
+        >
+          <div class="total-card" :data-test="`metric-${card.key}`">
+            <div class="num">
+              {{
+                report.fourMetrics[card.key].value === null
+                  ? '—'
+                  : formatPercent(report.fourMetrics[card.key].value as number)
+              }}
+            </div>
+            <div class="lbl">{{ card.label }}</div>
+            <div class="sub">参算 {{ report.fourMetrics[card.key].evaluatedCount }} 题</div>
+          </div>
+        </el-tooltip>
+      </div>
+      <el-empty
+        v-if="report.byDocType.length === 0"
+        description="本跑分暂无文档分型数据"
+        :image-size="60"
+        data-test="doc-type-empty"
+      />
+      <el-table
+        v-else
+        :data="report.byDocType"
+        border
+        size="small"
+        class="group-table"
+        data-test="doc-type-table"
+      >
+        <el-table-column label="分型" width="110">
+          <template #default="{ row }">{{ docTypeGroupLabel(row.docType) }}</template>
+        </el-table-column>
+        <el-table-column prop="questionCount" label="题数" width="70" />
+        <el-table-column v-for="col in DOC_TYPE_METRIC_COLUMNS" :key="col.key" width="92">
+          <template #header>
+            <el-tooltip :content="col.full" placement="top">
+              <span>{{ col.short }}</span>
+            </el-tooltip>
+          </template>
+          <template #default="{ row }">
+            {{ row[col.key] === null ? '—' : formatPercent(row[col.key] as number) }}
+          </template>
         </el-table-column>
       </el-table>
     </template>
@@ -225,6 +311,11 @@ defineExpose({ load, doScan })
   font-size: 12px;
   color: var(--el-text-color-secondary);
   margin-top: 2px;
+}
+.total-card .sub {
+  font-size: 11px;
+  color: var(--el-text-color-secondary);
+  margin-top: 4px;
 }
 .group-table {
   margin-bottom: 12px;

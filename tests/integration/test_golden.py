@@ -1,5 +1,5 @@
 r"""黄金样本回归骨架（standards §10.7/§15.7）：参数化读 golden/manifest.json，对每个样本
-走 parse→质量红线→清洗→乱码检测→分块 全链断言 expect。
+走 parse→质量红线→清洗→乱码检测→分型→按档分块 全链断言 expect。
 
 样本缺失或 pending=true 时 pytest.skip（显式原因），并由 tests/integration/conftest.py
 的 session 级 pytest_terminal_summary 在汇总区打印缺失清单（§15.1 禁静默跳过；
@@ -12,22 +12,27 @@ hook 挂 conftest 是因为测试模块里的 pytest_terminal_summary 不会触�
 
 红线与乱码判定口径刻意在 run_chain 内独立重算（与 ingest_pipeline._check_quality 一致
 而非 import 其私有函数）：解析/清洗实现漂移时黄金回归必须变红，这正是回归的目的。
+分型+档位分派（metrics-balance §6）按同一纪律镜像：三参构造与管线适配器同口径独立
+重算，detect_from_text / PROFILE_PARAMS / split_by_profile 为 rag 域公共纯函数直接复用。
 """
 
 import importlib.util
 import json
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from io import BytesIO
 from pathlib import Path
 from types import ModuleType
 from typing import Any, cast
 
 import pytest
+from pypdf import PdfReader
 
 from app.core.config import Settings
 from app.core.errors import ERR_PARSE_FAILED, ApiError
-from app.rag.chunker import ParsedDoc, split
+from app.rag.chunker import ParsedDoc, split_by_profile
 from app.rag.clean import RAW_CHARS, clean_text, repeated_short_lines
+from app.rag.doc_profile import PROFILE_PARAMS, DocProfile, detect_from_text
 from app.rag.parser import DocxParser, MinerUParser, Parser, PdfFallbackParser, get_parser
 from app.rag.precheck import GARBLE_THRESHOLD, garbled_ratio
 
@@ -41,6 +46,7 @@ GOLDEN_SETTINGS = Settings(jwt_secret="golden-regression")
 GARBLE_REASON: str = "编码异常"  # F-1005 失败原因前缀，与 ingest_pipeline 文案对齐
 KINDS: frozenset[str] = frozenset({"clean", "dual_col", "table", "scanned", "garbled"})
 ENGINES: frozenset[str] = frozenset({"docx", "mineru", "pypdf"})  # 与 documents.parse_engine 同词汇
+_DOC_TYPES: frozenset[str] = frozenset(profile.value for profile in DocProfile)  # 五档 code
 # 程序化种子三件套（make_golden_seed.py 生成，可直接重生成）：替换种子时同步此处与
 # golden/README.md。不变式只要求它们"在册且生效"，不锁清单总量（对投放状态不敏感）。
 _GOLDEN_SEEDS: tuple[tuple[str, str, str], ...] = (
@@ -60,6 +66,7 @@ class ChainOutcome:
     garbled: float
     block_count: int
     chunk_count: int
+    doc_type: str  # 分型 code（独立重算镜像：detect_from_text + 档位分派）
 
 
 def _tool(name: str) -> ModuleType:
@@ -80,9 +87,9 @@ def _validate_entry(entry: Any) -> None:
     assert filename.endswith((".docx", ".pdf")), f"黄金样本仅收 docx/pdf：{filename}"
     assert kind in KINDS, f"kind 非法：{kind!r}"
     assert isinstance(expect, dict), f"expect 须为对象：{filename}"
-    assert {"engine", "min_chars", "min_blocks", "garbled_ok", "fail_reason"} <= set(expect), (
-        f"expect 缺必填键：{filename}"
-    )
+    assert {"engine", "min_chars", "min_blocks", "garbled_ok", "fail_reason", "doc_type"} <= set(
+        expect
+    ), f"expect 缺必填键：{filename}"
     assert expect["engine"] in ENGINES, f"engine 非法：{filename}"
     assert isinstance(expect["min_chars"], int) and expect["min_chars"] >= 0, filename
     assert isinstance(expect["min_blocks"], int) and expect["min_blocks"] >= 0, filename
@@ -92,6 +99,12 @@ def _validate_entry(entry: Any) -> None:
     assert fail_reason is None or fail_reason == GARBLE_REASON, f"fail_reason 非法：{filename}"
     assert (fail_reason == GARBLE_REASON) == (expect["garbled_ok"] is True), (
         f"garbled_ok 与 fail_reason 不成对：{filename}"
+    )
+    doc_type = expect["doc_type"]
+    assert doc_type is None or doc_type in _DOC_TYPES, f"doc_type 非法：{filename}"
+    # 失败类在质量红线处中止：分型不发生必须标 null；成功类必须标注预期型别（工单 04）
+    assert (doc_type is None) == (fail_reason is not None), (
+        f"doc_type 与 fail_reason 不成对：{filename}"
     )
     if fail_reason is None:  # 全链通过的样本：清洗字符与分块数必须给出正下限
         assert expect["min_chars"] >= 1 and expect["min_blocks"] >= 1, filename
@@ -142,13 +155,35 @@ def _engine_name(parser: Parser) -> str:
     raise AssertionError(f"未知解析器实现，请同步 KINDS/ENGINES：{type(parser).__name__}")
 
 
-def run_chain(filename: str, content: bytes) -> ChainOutcome:
-    """黄金样本全链：parse→红线→清洗→乱码检测→分块，各阶段量化产物供断言。
+_PDF_PROBE_PAGES = 3
+_PDF_PROBE_MIN_CHARS = 200  # 前 3 页有效文字 ≥200 字符视为文字版（同管线预判阈值）
+
+
+def _is_text_based_pdf(content: bytes) -> bool:
+    """文字版预判（与 ingest_pipeline._is_text_based_pdf 同判独立重算，不 import）：
+    pypdf 提取前 3 页文字，有效字符 ≥200 即文字版；探测失败按扫描件处理交给 MinerU。"""
+    try:
+        reader = PdfReader(BytesIO(content))
+        text = "".join((page.extract_text() or "") for page in reader.pages[:_PDF_PROBE_PAGES])
+        return len(text.strip()) >= _PDF_PROBE_MIN_CHARS
+    except Exception:  # noqa: BLE001 — 预判失败不影响回归：按扫描件走 MinerU 兜底
+        return False
+
+
+def run_chain(filename: str, content: bytes, expect_engine: str) -> ChainOutcome:
+    """黄金样本全链：parse→红线→清洗→乱码检测→分型→按档分块，各阶段量化产物供断言。
 
     红线（§10.3：清洗后 < max(100, 清洗前×10%) 判失败）与乱码阈值（F-1005：>5%）的
     判定顺序、分母口径均与 ingest_pipeline._check_quality 一致，且独立重算不 import。
+    分型三参构造与 ingest_pipeline.detect_doc_profile 同口径（非空节 → 标题路径+全文）
+    独立重算：分型/切分漂移时黄金回归必须变红（metrics-balance §6 裁决）。
+    expect_engine 为 manifest 声明的引擎：clean 类 pdf 钉死进程内路径 pypdf（README：
+    不随部署环境 MINERU_BASE_URL 漂移）——文字版预判命中时与管线 _parse_with_fallback
+    同判降级 pypdf；mineru 类样本照走 OCR（版面分析/扫描件是投放该类样本的目的）。
     """
     parser = get_parser(filename, GOLDEN_SETTINGS)
+    if expect_engine == "pypdf" and parser.engine == "mineru" and _is_text_based_pdf(content):
+        parser = PdfFallbackParser()
     parsed = parser.parse(filename, content)
     raw = "\n".join(block.text for block in parsed.blocks)  # 清洗前全文＝红线分母（§10.3）
     # 页眉页脚跨块聚合与 ingest_pipeline.analyze_document 同口径（task-6b 修复轮）：
@@ -164,7 +199,16 @@ def run_chain(filename: str, content: bytes) -> ChainOutcome:
     ratio = garbled_ratio(cleaned)
     if ratio > GARBLE_THRESHOLD:
         raise ApiError(ERR_PARSE_FAILED, f"{GARBLE_REASON}：乱码字符占比 {ratio:.1%} 超过阈值", 422)
-    chunks = split(ParsedDoc(title=parsed.title, blocks=cleaned_blocks))
+    cleaned_doc = ParsedDoc(title=parsed.title, blocks=cleaned_blocks)
+    detect_blocks = [
+        block for block in cleaned_blocks if block.text.strip()
+    ]  # 非空节：同管线适配器
+    profile = detect_from_text(
+        parsed.title,
+        [" > ".join(block.heading_path) for block in detect_blocks],
+        "\n".join(block.text for block in detect_blocks),
+    )
+    chunks = split_by_profile(cleaned_doc, PROFILE_PARAMS[profile])
     return ChainOutcome(
         engine=_engine_name(parser),
         raw_chars=RAW_CHARS(raw),
@@ -172,6 +216,7 @@ def run_chain(filename: str, content: bytes) -> ChainOutcome:
         garbled=ratio,
         block_count=len(parsed.blocks),
         chunk_count=len(chunks),
+        doc_type=profile.value,
     )
 
 
@@ -264,6 +309,7 @@ def test_missing_samples_lists_absent_files(
                         "min_blocks": 1,
                         "garbled_ok": False,
                         "fail_reason": None,
+                        "doc_type": "general",
                     },
                 },
                 {
@@ -276,6 +322,7 @@ def test_missing_samples_lists_absent_files(
                         "min_blocks": 1,
                         "garbled_ok": False,
                         "fail_reason": None,
+                        "doc_type": "general",
                     },
                 },
             ],
@@ -341,6 +388,7 @@ def test_invariants_survive_extra_samples(tmp_path: Path, monkeypatch: pytest.Mo
                 "min_blocks": 1,
                 "garbled_ok": False,
                 "fail_reason": None,
+                "doc_type": "general",
             },
         }
     )
@@ -394,6 +442,10 @@ def test_committed_seeds_match_builder_output() -> None:
     ]
     for rel, name, fresh in cases:
         parser = get_parser(name, GOLDEN_SETTINGS)
+        if parser.engine == "mineru" and _is_text_based_pdf(fresh):
+            parser = (
+                PdfFallbackParser()
+            )  # clean pdf 钉死进程内路径：与 run_chain 同判（不随环境漂移）
         committed = parser.parse(name, (FIXTURES / rel).read_bytes())
         assert committed == parser.parse(name, fresh), f"种子漂移：{rel}"
 
@@ -417,15 +469,16 @@ def test_golden_regression(entry: dict[str, Any]) -> None:
     content = Path(target).read_bytes()
     if expect["fail_reason"] is not None:  # 乱码类：全链在乱码检测处失败且原因可核对
         with pytest.raises(ApiError) as exc_info:
-            run_chain(filename, content)
+            run_chain(filename, content, str(expect["engine"]))
         assert exc_info.value.code == ERR_PARSE_FAILED
         assert exc_info.value.http_status == 422
         assert exc_info.value.message.startswith(GARBLE_REASON)
         return
-    outcome = run_chain(filename, content)
+    outcome = run_chain(filename, content, str(expect["engine"]))
     assert outcome.engine == expect["engine"]
     assert outcome.cleaned_chars >= max(100, outcome.raw_chars * 0.1)  # §10.3 红线显式断言
     assert outcome.cleaned_chars >= int(expect["min_chars"])
     assert outcome.block_count >= 1
     assert outcome.chunk_count >= int(expect["min_blocks"])
+    assert outcome.doc_type == expect["doc_type"]  # 预期型别：分型漂移即红（工单 04）
     assert outcome.garbled <= GARBLE_THRESHOLD

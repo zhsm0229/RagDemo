@@ -17,6 +17,8 @@ export type DocumentStatus = 'pending' | 'parsing' | 'ready' | 'failed'
 export type DocumentSourceType = 'upload' | 'draft'
 /** 草稿审核状态（与后端 0007 迁移 CHECK 同源）；仅 sourceType='draft' 非空 */
 export type ReviewStatus = '待审核' | '已通过' | '已驳回'
+/** 文档分型五档（metrics-balance §3，与后端 0010 迁移 CHECK 同源；中文文案映射在 components/documents/options.ts） */
+export type DocType = 'policy_clause' | 'table_report' | 'notice' | 'operation_manual' | 'general'
 
 /** 列表项（docs/api.md §2.6 全字段）。degraded：ready 且带降级标注（MinerU 不可用走 pypdf） */
 export interface DocumentItem {
@@ -46,6 +48,8 @@ export interface DocumentItem {
   reviewStatus: ReviewStatus | null
   /** 驳回原因，仅 reviewStatus='已驳回' 非空 */
   rejectReason: string | null
+  /** 文档分型五档 code（入库自动检测，可经 PATCH 人工修正；metrics-balance 工单 01） */
+  docType: DocType
   isActive: boolean
   uploadedBy: number
   createdAt: string
@@ -188,6 +192,29 @@ export function rejectDraft(
   return post<{ id: number; reviewStatus: ReviewStatus; rejectReason: string }>(
     `/documents/${id}/draft/reject`,
     { reason },
+  )
+}
+
+// ---- 文档分型（metrics-balance 工单 01）：admin-only；分型不改可检索事实，后端不清问答缓存 ----
+
+/** 人工修正分型（docs/api.md §2.10g）：仅此一字段；枚举外 422 由全局 toast 兜底 */
+export function updateDocumentDocType(
+  id: number,
+  docType: DocType,
+): Promise<{ id: number; docType: DocType }> {
+  return request<{ id: number; docType: DocType }>(`/admin/documents/${id}/doc-type`, {
+    method: 'PATCH',
+    body: { docType },
+  })
+}
+
+/** 存量分型回填（docs/api.md §2.10h）：is_active 且 ready 全量重算，覆盖含手工修正 */
+export function backfillDocumentDocTypes(): Promise<{
+  updated: number
+  byType: Partial<Record<DocType, number>>
+}> {
+  return post<{ updated: number; byType: Partial<Record<DocType, number>> }>(
+    '/admin/documents/backfill-doc-type',
   )
 }
 

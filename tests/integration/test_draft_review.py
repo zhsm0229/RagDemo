@@ -42,7 +42,9 @@ from app.services.retrieval import search_chunks
 MD_MIME = "text/markdown"
 
 _DRAFT_BODY = "\n".join(
-    f"草稿验收第{i}条 内容说明{i}：适用于全体员工并遵照执行。" for i in range(12)
+    # 不含"第X条"字样：条款分型会把它切成碎条多块（<120 并入下条），破坏单块命中断言
+    f"草稿验收要点{i} 内容说明{i}：适用于全体员工并遵照执行。"
+    for i in range(12)
 )
 
 
