@@ -119,12 +119,15 @@ def finalize_turn(
     usage: tuple[int, int] | None,
     latency_ms: int,
     cache_hit: bool,
+    degraded: bool = False,
 ) -> None:
     """收尾占位 assistant 消息：纯 UPDATE + flush，commit 归调用方（Task 9）。
 
     usage 即 provider.last_usage，None（拒答未调 LLM 等）写 0；answer_type 取值
     'rag'/'qa'/'refuse'（CHECK 约束）——cache 计划由 Task 9 取缓存条目内的原
     answer_type，不得传 'cache'。缓存 put 同归 Task 9 在 finalize 后执行。
+    degraded（迁移 0012，retrieval-policy §2）：检索上游降级轮标注，缺省 False
+    （正常轮/缓存命中轮零改动；降级计划不写缓存故 cache 命中轮恒 False）。
     """
     prompt_tokens, completion_tokens = usage if usage is not None else (0, 0)
     db.execute(
@@ -139,6 +142,7 @@ def finalize_turn(
             completion_tokens=completion_tokens,
             latency_ms=latency_ms,
             cache_hit=cache_hit,
+            degraded=degraded,
         )
     )
     db.flush()

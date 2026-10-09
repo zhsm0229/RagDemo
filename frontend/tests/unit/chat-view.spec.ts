@@ -153,6 +153,50 @@ describe('SSE 流式渲染（mock fetch 流）', () => {
     expect(wrapper.text()).toContain('报销标准为每天 200 元。')
   })
 
+  it('done degraded=true 气泡渲染"简化检索"轻标注（retrieval-policy §5，仅 done 态）', async () => {
+    backend.streamQueue = [
+      [{ text: `${tokenFrame('报销标准为每天 200 元。')}${doneFrame({ degraded: true })}` }],
+    ]
+    const wrapper = await mountChat()
+    await ask(wrapper, '报销标准')
+    await waitFor(() => wrapper.text().includes('简化检索'), '简化检索标注')
+    expect(wrapper.find('.bubble.assistant .msg-meta').text()).toContain('简化检索')
+    // 本轮非缓存非拒答：互不串显
+    expect(wrapper.text()).not.toContain('来自缓存')
+    expect(wrapper.text()).not.toContain('已拒答')
+  })
+
+  it('done degraded=false 不渲染"简化检索"，与"来自缓存"标注互不干扰', async () => {
+    backend.streamQueue = [
+      [
+        {
+          text: `${tokenFrame('报销标准为每天 200 元。')}${doneFrame({ cacheHit: true, degraded: false })}`,
+        },
+      ],
+    ]
+    const wrapper = await mountChat()
+    await ask(wrapper, '报销标准')
+    await waitFor(() => wrapper.text().includes('来自缓存'), '缓存标注正常显示')
+    expect(wrapper.find('.bubble.assistant .msg-meta').text()).toContain('来自缓存')
+    expect(wrapper.find('.bubble.assistant .msg-meta').text()).not.toContain('简化检索')
+  })
+
+  it('degraded 与 cacheHit 并存：气泡"简化检索""来自缓存"双标注同显（诚实信号）', async () => {
+    backend.streamQueue = [
+      [
+        {
+          text: `${tokenFrame('报销标准为每天 200 元。')}${doneFrame({ cacheHit: true, degraded: true })}`,
+        },
+      ],
+    ]
+    const wrapper = await mountChat()
+    await ask(wrapper, '报销标准')
+    await waitFor(() => wrapper.text().includes('简化检索'), '简化检索标注')
+    const meta = wrapper.find('.bubble.assistant .msg-meta')
+    expect(meta.text()).toContain('简化检索')
+    expect(meta.text()).toContain('来自缓存')
+  })
+
   it('done 事件 promptTokens/completionTokens/durationMs 展示在消息 meta（对照原型 msg-meta）', async () => {
     backend.streamQueue = [
       [

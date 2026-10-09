@@ -46,6 +46,7 @@ def _message_payload(message: Message) -> dict:
         "feedbackComment": message.feedback_comment,
         "answerType": message.answer_type,
         "cacheHit": message.cache_hit,
+        "degraded": message.degraded,  # 0012（retrieval-policy §2）：重开会话降级标注不消失
         "createdAt": message.created_at.isoformat(),
     }
 

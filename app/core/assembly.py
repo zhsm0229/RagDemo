@@ -4,7 +4,7 @@ r"""装配工厂：按 Settings 装配六接口实现与提示词包（六接口
 装配关切与 tei.py/openai_compat.py 同层：test_mode 返回确定性 Stub（app/core/llm.py，
 同输入必同输出、可注故障），否则返回 TEI / OpenAI 兼容真实现实例（激活在 Task 3/4，
 本模块只负责装配与参数传递）。非 test_mode 且 llm_base_url 为空时 build_llm
-fail-fast（standards §6.4）。load_prompt_pack 读仓库根 prompts/ 四文件（缺文件
+fail-fast（standards §6.4）。load_prompt_pack 读仓库根 prompts/ 五文件（缺文件
 RuntimeError），version 以 chat_system.txt 头注释 `# version:` 行为唯一锚点并与
 manifest.json 交叉校验——代码内不另设版本常量（standards §17.4 模板与生成参数同版本化）；
 memory_extract.txt 同样强制 `# version:` 头注释（§17.1，评测改动可比对 §17.3），
@@ -75,10 +75,13 @@ def build_converter(settings: Settings) -> DocumentConverter | None:
 
 @dataclass
 class PromptPack:
-    """提示词包：问答/改写/记忆抽取系统提示、版本（取自头注释）与生成温度（取自 manifest）。"""
+    """提示词包：问答/改写/三产物改写/记忆抽取系统提示、版本（取自头注释）与生成温度
+    （取自 manifest）。rewrite_multi_system 供 multi_query 门控命中时的三产物合并调用
+    （retrieval-policy §4，工单 06）；门控关闭（本机 cpu 档）不消费该字段。"""
 
     chat_system: str
     rewrite_system: str
+    rewrite_multi_system: str
     memory_extract: str
     version: str
     temperature: float
@@ -138,20 +141,24 @@ def load_prompt_pack(prompts_dir: Path | str | None = None) -> PromptPack:
     root = Path(prompts_dir) if prompts_dir is not None else PROMPTS_DIR
     chat_path = root / "chat_system.txt"
     rewrite_path = root / "rewrite_system.txt"
+    rewrite_multi_path = root / "rewrite_multi_system.txt"
     memory_path = root / "memory_extract.txt"
     manifest_path = root / "manifest.json"
     missing = [
         path.name
-        for path in (chat_path, rewrite_path, memory_path, manifest_path)
+        for path in (chat_path, rewrite_path, rewrite_multi_path, memory_path, manifest_path)
         if not path.is_file()
     ]
     if missing:
         raise RuntimeError(f"提示词包文件缺失：{'、'.join(missing)}（目录：{root}）")
     chat_system = chat_path.read_text(encoding="utf-8")
     rewrite_system = rewrite_path.read_text(encoding="utf-8")
+    rewrite_multi_system = rewrite_multi_path.read_text(encoding="utf-8")
     memory_extract = memory_path.read_text(encoding="utf-8")
     version = _parse_version(chat_system)
-    _parse_version(memory_extract)  # 版本头存在性校验（§17.1 单一真相源）；版本号不并入全局 version
+    # 版本头存在性校验（§17.1 单一真相源）；版本号不并入全局 version（memory_extract 同款）
+    _parse_version(rewrite_multi_system)
+    _parse_version(memory_extract)
     try:
         manifest: dict = json.loads(manifest_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -166,6 +173,7 @@ def load_prompt_pack(prompts_dir: Path | str | None = None) -> PromptPack:
     return PromptPack(
         chat_system=chat_system,
         rewrite_system=rewrite_system,
+        rewrite_multi_system=rewrite_multi_system,
         memory_extract=memory_extract,
         version=version,
         temperature=float(manifest["temperature"]),

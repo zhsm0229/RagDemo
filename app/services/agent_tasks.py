@@ -1,9 +1,13 @@
-r"""agent 任务档案（工单 #06）：taskType → 系统提示 + 工具集，白名单与编排共用一份。
+r"""agent 任务档案（工单 #06/#07）：taskType → 系统提示 + 工具集 + 检索策略覆盖。
 
 为什么单列：api 层白名单（未放开 taskType 一律 422）与 services 层编排（系统提示/
 绑定工具集）必须同源——两处各写一份必然漂移（"任意类型都跑同一个最小 agent"的
 口径漂移正是白名单要防的）。每接入一个任务 = 本表加一行评审一次：提示词过红线
 （拒答红线、无审核不落地），工具集最小化（不因共享骨架顺手放开工具）。
+
+工单 07：档案可携带 profile_policy（RetrievalPolicy | None）做任务级检索策略覆盖
+（消费点在 agent_tools，工单 03 接线——merge_policy 覆盖优先于 resolver 产出）；
+本期两档案均 None=行为不变等价，字段为 kb_qa/template_draft 差异化预留位。
 
 工具名是注册表键（装配层 main._build_agent_deps 注册）：profile 引用了未注册的
 工具名属装配缺陷，编排层 registry.get 会 KeyError fail-fast（响亮暴露，不静默缩集）。
@@ -12,13 +16,17 @@ r"""agent 任务档案（工单 #06）：taskType → 系统提示 + 工具集�
 from dataclasses import dataclass
 from typing import Literal
 
+from app.rag.retrieval_policy import RetrievalPolicy
+
 
 @dataclass(frozen=True)
 class TaskProfile:
-    """一个任务类型的编排档案：系统提示（注入领域约束与红线）+ 绑定工具集（最小化）。"""
+    """一个任务类型的编排档案：系统提示（注入领域约束与红线）+ 绑定工具集（最小化）
+    + 检索策略覆盖（工单 07 预留，None=走 resolver 缺省策略）。"""
 
     system_prompt: str
     tool_names: tuple[str, ...]
+    profile_policy: RetrievalPolicy | None = None  # 覆盖语义见 rag.merge_policy
 
 
 _KB_QA_PROMPT = "你是知识库助手"  # 工单 #07 最小 agent 任务，保持原提示不动
@@ -39,15 +47,19 @@ _TEMPLATE_DRAFT_PROMPT = (
     "5. 最终回复用中文简要说明草稿标题与后续流程（等待管理员审核）。"
 )
 
-# 白名单即评审点：新增任务在此登记（api 校验与编排同源消费）
+# 白名单即评审点：新增任务在此登记（api 校验与编排同源消费）。
+# profile_policy 显式写 None（工单 07）：本期两档案无差异化策略，行为不变等价——
+# 未来差异化时在此填 RetrievalPolicy(...)，评审点即本表。
 TASK_PROFILES: dict[str, TaskProfile] = {
     "kb_qa": TaskProfile(
         system_prompt=_KB_QA_PROMPT,
         tool_names=("knowledge_base_search",),
+        profile_policy=None,
     ),
     "template_draft": TaskProfile(
         system_prompt=_TEMPLATE_DRAFT_PROMPT,
         tool_names=("knowledge_base_search", "save_draft"),
+        profile_policy=None,
     ),
 }
 

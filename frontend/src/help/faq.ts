@@ -1,6 +1,6 @@
 import type { HelpTab } from './types'
 
-/** 常见问题：与 docs/user-guide.md 第三篇同源，Q7 为演示模式辨别（2026-10 试点反馈新增） */
+/** 常见问题：与 docs/user-guide.md 第三篇同源；Q8 为"简化检索"标注（2026-10 retrieval-policy 新增） */
 export const faqTab: HelpTab = {
   name: 'faq',
   label: '常见问题',
@@ -109,6 +109,18 @@ export const faqTab: HelpTab = {
           kind: 'tips',
           items: [
             '前者是登录限流，稍等再试；后者是每人每日提问配额（默认 200 次）用尽，次日自动恢复。',
+          ],
+        },
+      ],
+    },
+    {
+      title: 'Q8 为什么回答显示"简化检索"？',
+      blocks: [
+        {
+          kind: 'tips',
+          items: [
+            '该次回答生成时检索服务临时繁忙或故障，系统自动改用简化检索通道完成回答——这是保障"有问必有答"的兜底机制，不是故障。',
+            '回答仍严格依据知识库生成并附引用，知识不足时照常拒答；检索服务恢复后不再出现该标注。',
           ],
         },
       ],

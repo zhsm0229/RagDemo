@@ -28,6 +28,7 @@ _MESSAGE_KEYS = {
     "feedbackComment",
     "answerType",
     "cacheHit",
+    "degraded",  # 0012（retrieval-policy §2 全链契约）：GET messages 回传降级标注
     "createdAt",
 }
 
@@ -214,7 +215,7 @@ def test_messages_history_asc_filters_interrupted_placeholder(client, session) -
     assert resp.status_code == 200
     items = resp.json()["data"]["items"]
     assert [item["id"] for item in items] == [m1.id, m2.id, m4.id, m5.id]  # ASC，m3 被过滤
-    assert all(set(item) == _MESSAGE_KEYS for item in items)  # 10 键集合全等 camelCase
+    assert all(set(item) == _MESSAGE_KEYS for item in items)  # 11 键集合全等 camelCase
     first_answer = items[1]
     assert first_answer["citations"] == [citation]  # JSONB 逐字段 round-trip
     assert (

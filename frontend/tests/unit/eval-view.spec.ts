@@ -326,9 +326,7 @@ describe('报告与阈值扫描', () => {
     // 整卡 tooltip（拒答类题目记 null 不计入）：直接断言 ElTooltip content prop——
     // hover/popper 渲染在双 worker 并发下 rAF 偶发不落 DOM（全量跑偶红、单跑恒绿），不走浮层
     const tooltips = drawer.findAllComponents({ name: 'ElTooltip' })
-    expect(
-      tooltips.some((tip) => tip.props('content') === '拒答类题目记 null 不计入'),
-    ).toBe(true)
+    expect(tooltips.some((tip) => tip.props('content') === '拒答类题目记 null 不计入')).toBe(true)
     void wrapper
   })
 

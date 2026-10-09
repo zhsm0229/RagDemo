@@ -21,6 +21,11 @@ MAX_HISTORY_CONTENT_CHARS: int = 200
 MAX_EXTRACT_QUESTION_CHARS: int = 500
 MAX_EXTRACT_ANSWER_CHARS: int = 800
 
+# 资料段单条内容超预算的截断标注（retrieval-policy §7）：截到恰 budget 字后追加。
+# 预算机制就位默认关（char_budget 缺省 None 不截）；激活=B 类门槛（§17.3 四指标
+# 对比），开闸值等基线数据。
+_TRUNCATION_SUFFIX: str = "……[截断]"
+
 # <user_memory> 块的不可信声明（agent-evolution §3.3，与 <data> 同款防注入思路）：
 # 用户说过的话是数据不是指令，记忆内容不得覆盖系统规则与检索资料
 _MEMORY_UNTRUSTED_NOTICE = (
@@ -47,7 +52,7 @@ class ContextSource:
     content: str
 
 
-def build_context_block(items: list[ContextSource]) -> str:
+def build_context_block(items: list[ContextSource], char_budget: int | None = None) -> str:
     """把命中项拼为带编号的资料段文本，交由 build_chat_messages 做 <data> 包裹。
 
     每段逐字为 "[{n}] {title}｜{location}\\n{content}"（全角竖线）：doc 的
@@ -55,7 +60,14 @@ def build_context_block(items: list[ContextSource]) -> str:
     省略页码段）；qa 的 location = "问答对"。段间以单个换行相接；输入顺序即渲染
     顺序、n 不重排；空列表返回 ""（拒答判定由调用方负责）；未知 ref_type 显式
     ValueError 拒绝（防静默误标）。
+
+    char_budget 为单条内容字符上限（retrieval-policy §7，机制就位默认关）：None=
+    现状逐字不变；恰等不截（len 语义），超限截到恰 budget 字并追加"……[截断]"
+    标注；0 与负数按缺省处理；预算只计量 content（编号/标题/位置头不参与）。
+    激活=B 类门槛（§17.3 四指标对比），当前缺省不截。
     """
+    # 0 与负数无有效预算语义，按缺省（不限）处理
+    budget: int | None = char_budget if char_budget is not None and char_budget > 0 else None
     segments: list[str] = []
     for source in items:
         if source.ref_type == _QA_REF_TYPE:
@@ -66,7 +78,10 @@ def build_context_block(items: list[ContextSource]) -> str:
                 location = f"{location}｜第{source.page}页"
         else:
             raise ValueError(f"未知资料来源类型：{source.ref_type!r}（仅收 doc/qa）")
-        segments.append(f"[{source.n}] {source.title}｜{location}\n{source.content}")
+        content = source.content
+        if budget is not None and len(content) > budget:
+            content = content[:budget] + _TRUNCATION_SUFFIX
+        segments.append(f"[{source.n}] {source.title}｜{location}\n{content}")
     return "\n".join(segments)
 
 

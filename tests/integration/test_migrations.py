@@ -104,6 +104,7 @@ EXPECTED_COLUMNS: dict[str, list[str]] = {
         "completion_tokens",
         "latency_ms",
         "cache_hit",
+        "degraded",  # 0012（retrieval-policy 工单 01）：检索上游降级标注（embed 拒答/rerank 兜底轮）
         "is_active",
         "created_at",
         "updated_at",

@@ -16,9 +16,11 @@ r"""检索服务（Task 5，问答链路地基）：QA 匹配、向量召回、�
 - SET LOCAL hnsw.ef_search：值经 psycopg sql.Literal 客户端安全转义（§4.3 禁
   f-string 拼 SQL），且 SET LOCAL 只在事务内生效——与检索查询同连接同事务执行，
   事务结束自动还原。
-- 折叠算法（F-1003）：rerank 打分 → 按分降序取 top_n → top_n 内从高到低遍历，与每个
-  已保留项算 embedding 余弦相似度（向量已 L2 归一化，点积即余弦）≥ dedup_sim 则
-  丢弃当前项（留高分弃低分），返回保留列表（仍按 rerank 分降序）。
+- 折叠算法（F-1003，已抽 rag 域纯函数 fold_top_n，app/rag/fold.py——主链路与 agent
+  检索工具共用，retrieval-policy §6/§11 裁决 10）：rerank 打分 → 按分降序取 top_n →
+  top_n 内从高到低遍历，与每个已保留项算 embedding 余弦相似度（向量已 L2 归一化，
+  点积即余弦）≥ dedup_sim 则丢弃当前项（留高分弃低分），返回保留列表（仍按 rerank
+  分降序）。
 """
 
 import re
@@ -30,8 +32,9 @@ from psycopg import sql
 from sqlalchemy import Select, select
 from sqlalchemy.orm import Session
 
-from app.core.llm import Reranker, cosine_to_similarity
+from app.core.llm import Reranker, UpstreamError, cosine_to_similarity
 from app.db.models import Chunk, Document, QaPair
+from app.rag.fold import fold_top_n
 
 _WHITESPACE = re.compile(r"\s")
 _PUNCTUATION = "，。？！；：、,.?!;:"
@@ -131,6 +134,17 @@ def search_chunks(
     ]
 
 
+def merge_multi_query_hits(paths: list[list[DocHit]]) -> list[DocHit]:
+    """multi_query 多路召回合并（retrieval-policy §4）：按 chunk_id 去重、余弦取各路最高、
+    整体按召回余弦降序；合并候选集交 rerank_and_fold **单次**精排（rerank 恒 1 次 ≤3 预算，
+    跨路同尺可比）。分数口径=召回余弦（standards §4.4，不与 rerank 分混），纯函数不改写。"""
+    best: dict[int, DocHit] = {}
+    for hit in (candidate for path in paths for candidate in path):
+        if hit.chunk_id not in best or hit.similarity > best[hit.chunk_id].similarity:
+            best[hit.chunk_id] = hit
+    return sorted(best.values(), key=lambda merged: merged.similarity, reverse=True)
+
+
 def rerank_and_fold(
     reranker: Reranker,
     query: str,
@@ -140,6 +154,7 @@ def rerank_and_fold(
     *,
     return_folded: bool = False,
     ranked_out: list[tuple[DocHit, float]] | None = None,
+    degraded_out: list[bool] | None = None,
 ) -> list[DocHit] | tuple[list[DocHit], list[DocHit]]:
     """重排 + 折叠（F-1003）：top_n 内两两去重，返回 rerank 分降序保留列表。
 
@@ -160,25 +175,58 @@ def rerank_and_fold(
     ranked_out（metrics-balance §4.2 接线缝）：非 None 时把全量 ranked
     (DocHit 已覆写 rerank 分, rerank 分) 按分降序 append 进调用方列表——top_n 折叠
     之外候选分的唯一获取点（评测 trace 用）；主问答路径不传，行为零改动。
+
+    degraded_out（retrieval-policy §3 弹性兜底缝）：非 None 时本调用结束 append 恰一个
+    布尔（True=上游故障已走向量序兜底）；空候选短路不触碰该缝。**降级态口径**：不发起
+    重排，按入参序（召回余弦降序）折叠，top_n callable 在向量序上求值；similarity 与
+    ranked_out 分数均为召回余弦而非 rerank sigmoid 分，消费方（chat 阈值分轨、trace
+    scoreScale="cosine"）按余弦口径消费，两套分数绝不互比（standards §4.4）。
     """
     if not hits:
         return ([], []) if return_folded else []
     docs = [f"{hit.title_path}\n{hit.content}" for hit in hits]
-    scores = reranker.rerank(query, docs)
+    try:
+        scores = reranker.rerank(query, docs)
+    except UpstreamError:
+        return _fold_degraded(hits, top_n, dedup_sim, ranked_out, degraded_out, return_folded)
     ranked = sorted(zip(hits, scores, strict=True), key=lambda pair: pair[1], reverse=True)
     if ranked_out is not None:
         ranked_out.extend((replace(hit, similarity=score), score) for hit, score in ranked)
+    if degraded_out is not None:
+        degraded_out.append(False)
     keep_n = top_n([hit for hit, _ in ranked]) if callable(top_n) else top_n
-    kept: list[DocHit] = []
-    folded_out: list[DocHit] = []
-    for hit, score in ranked[:keep_n]:
-        if any(_cosine(hit.embedding, kept_hit.embedding) >= dedup_sim for kept_hit in kept):
-            folded_out.append(replace(hit, similarity=score))  # 与高分已保留项近重复：折叠丢弃
-            continue
-        kept.append(replace(hit, similarity=score))
-    if return_folded:
-        return kept, folded_out
-    return kept
+    # 折叠主体共用 rag 域纯函数（retrieval-policy §6/裁决 10）：先按 rerank 分覆写
+    # similarity（frozen dataclass 生成新实例），fold_top_n 只选择不改写分数
+    return fold_top_n(
+        [replace(hit, similarity=score) for hit, score in ranked],
+        keep_n,
+        dedup_sim,
+        return_folded=return_folded,
+    )
+
+
+def _fold_degraded(
+    hits: list[DocHit],
+    top_n: int | Callable[[list[DocHit]], int],
+    dedup_sim: float,
+    ranked_out: list[tuple[DocHit, float]] | None,
+    degraded_out: list[bool] | None,
+    return_folded: bool,
+) -> list[DocHit] | tuple[list[DocHit], list[DocHit]]:
+    """上游重排故障的向量序兜底（retrieval-policy §3），参数同主函数同名缝；分数口径
+    （召回余弦）见主函数 docstring 降级态段。"""
+    if degraded_out is not None:
+        degraded_out.append(True)
+    ranked = [(hit, hit.similarity) for hit in hits]  # 召回序即余弦降序（search_chunks 语义）
+    if ranked_out is not None:
+        ranked_out.extend(ranked)
+    keep_n = top_n([hit for hit, _ in ranked]) if callable(top_n) else top_n
+    return fold_top_n(
+        [hit for hit, _ in ranked],  # 降级态分数=召回余弦已在 hit.similarity，无需覆写
+        keep_n,
+        dedup_sim,
+        return_folded=return_folded,
+    )
 
 
 def _chunk_search_statement(
@@ -232,11 +280,6 @@ def _parse_embedding(raw: Any) -> list[float]:
         return [float(component) for component in raw]
     body = raw.strip().strip("[]")
     return [] if not body else [float(part) for part in body.split(",")]
-
-
-def _cosine(left: list[float], right: list[float]) -> float:
-    """余弦相似度：两向量均已 L2 归一化（入库侧保证），点积即余弦。"""
-    return sum(a * b for a, b in zip(left, right, strict=True))
 
 
 class PgVectorStore:

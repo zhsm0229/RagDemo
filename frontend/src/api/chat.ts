@@ -52,6 +52,8 @@ export interface MessageItem {
   feedbackComment: string | null
   answerType: string | null
   cacheHit: boolean
+  /** 检索上游降级轮（retrieval-policy §2 迁移 0012）；旧数据缺省，读取侧 `?? false` 兜底 */
+  degraded?: boolean
   createdAt: string
 }
 

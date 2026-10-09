@@ -15,10 +15,19 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.circuit_breaker import CircuitBreaker, set_rerank_breaker
 from app.core.config import get_settings
 from app.db.models import Department, User
 from app.services import services_health
 from tests.conftest import login_as
+
+
+@pytest.fixture(autouse=True)
+def _reset_rerank_breaker():
+    """熔断器进程单例用例间隔离（本文件会注入开路/半开替身）。"""
+    set_rerank_breaker(None)
+    yield
+    set_rerank_breaker(None)
 
 
 @pytest.fixture()
@@ -135,6 +144,60 @@ def test_services_health_gotenberg_down_alone_is_degraded(real_mode, client, ses
     assert data["overall"] == "degraded"
     by_key = {s["key"]: s for s in data["services"]}
     assert by_key["gotenberg"]["status"] == "down"
+
+
+# ---------------------------------------------------------------------------
+# rerankCircuit 三态字段（retrieval-policy §3/§11 裁决 3）：closed/open/half_open，
+# 总闸关闭恒 closed；与探活相互独立（FakeClock 驱动状态机，全 Stub 零网络）
+# ---------------------------------------------------------------------------
+
+
+def test_services_health_rerank_circuit_defaults_closed(test_mode, client, session):
+    """缺省（总闸开、无失败）：rerankCircuit=closed 且字段在 data 顶层。"""
+    login_admin(client, session)
+    data = client.get("/api/admin/services/health").json()["data"]
+    assert data["rerankCircuit"] == "closed"  # 熔断器不是探活项：与 overall/mineru 环境无关
+
+
+def test_services_health_rerank_circuit_open_after_three_failures(
+    test_mode, client, session, fake_clock
+):
+    """连续 3 次失败 → open：健康卡透出 open（管理员可见"问答已降级"根因）。"""
+    breaker = CircuitBreaker(fake_clock)
+    for _ in range(3):
+        breaker.record_failure()
+    set_rerank_breaker(breaker)
+    login_admin(client, session)
+    data = client.get("/api/admin/services/health").json()["data"]
+    assert data["rerankCircuit"] == "open"
+
+
+def test_services_health_rerank_circuit_half_open_after_cooldown(
+    test_mode, client, session, fake_clock
+):
+    """开路满 300s 冷却 → half_open：健康卡透出 half_open（读侧转换口径与放行一致）。"""
+    breaker = CircuitBreaker(fake_clock)
+    for _ in range(3):
+        breaker.record_failure()
+    fake_clock.advance(seconds=300)
+    set_rerank_breaker(breaker)
+    login_admin(client, session)
+    data = client.get("/api/admin/services/health").json()["data"]
+    assert data["rerankCircuit"] == "half_open"
+
+
+def test_services_health_rerank_circuit_disabled_gate_always_closed(
+    test_mode, client, session, fake_clock
+):
+    """总闸关闭恒 closed（spec §3）：3 次失败后健康卡仍报 closed（单例持 enabled=False
+    实例即总闸关闭语义；settings→enabled 装配读数由 unit 层 test_circuit_breaker 锁定）。"""
+    breaker = CircuitBreaker(fake_clock, enabled=False)
+    for _ in range(3):
+        breaker.record_failure()
+    set_rerank_breaker(breaker)
+    login_admin(client, session)
+    data = client.get("/api/admin/services/health").json()["data"]
+    assert data["rerankCircuit"] == "closed"
 
 
 def test_services_health_forbidden_for_member(client, session):

@@ -304,10 +304,10 @@ SSE 事件 DTO 字段表（**逐字引自 standards §3 第 6 条**）：
 |------|-------------|
 | `citations` | `messageId`, `items: [{n, refType: 'doc'\|'qa', refId, title, page, titlePath, score}]`（**先于 token 事件下发**） |
 | `token` | `messageId`, `content`（增量文本片段） |
-| `done` | `messageId`, `refused: bool`, `cacheHit: bool`, `promptTokens`, `completionTokens`, `durationMs` |
+| `done` | `messageId`, `refused: bool`, `cacheHit: bool`, `promptTokens`, `completionTokens`, `durationMs`, `degraded: bool` |
 | `error` | `code`（取自共享错误码枚举）, `message`（中文，已脱敏）, `retryable: bool` |
 
-补充：`error.retryable` 仅 `code=5001`（生成服务暂时不可用）时为 true；`code=5000`（系统兜底）为 false。拒答分支 `refused=true` 且 token 事件逐字下发固定拒答话术、不写缓存；缓存命中分支 `cacheHit=true` 一次性下发全文。`refId` 语义随 `refType`：`qa` → 问答对 id；`doc` → 命中片段的 chunk id（非文档 id）。检索范围恒为 `[用户部门, 全员]`（F-502）。
+补充：`error.retryable` 仅 `code=5001`（生成服务暂时不可用）时为 true；`code=5000`（系统兜底）为 false。拒答分支 `refused=true` 且 token 事件逐字下发固定拒答话术、不写缓存；缓存命中分支 `cacheHit=true` 一次性下发全文。`degraded`（retrieval-policy §5）标记检索上游降级轮：embed 失败拒答或 rerank 故障向量序兜底为 true（拒答与"简化检索"语义并存），正常/qa/cache 轮恒 false 且字段不缺席（仅 done 事件携带，citations/token 不带；降级轮引用 score 为召回余弦口径，与 rerank sigmoid 分不互比）。`refId` 语义随 `refType`：`qa` → 问答对 id；`doc` → 命中片段的 chunk id（非文档 id）。检索范围恒为 `[用户部门, 全员]`（F-502）。
 
 ### 3.2 POST /api/conversations — 新建会话
 
@@ -332,7 +332,7 @@ SSE 事件 DTO 字段表（**逐字引自 standards §3 第 6 条**）：
 | 项 | 说明 |
 |----|------|
 | 鉴权 | ReadyUser（归属本人，否则与不存在同判 404/3003） |
-| 成功响应 | `200`，`data: {items: [...]}`，created_at 升序（同刻 id 升序兜底）。items 项字段：`id, role, content, citations, feedback, feedbackCategory, feedbackComment, answerType, cacheHit, createdAt`（citations 为 JSONB 原样，user 消息恒 null） |
+| 成功响应 | `200`，`data: {items: [...]}`，created_at 升序（同刻 id 升序兜底）。items 项字段：`id, role, content, citations, feedback, feedbackCategory, feedbackComment, answerType, cacheHit, degraded, createdAt`（citations 为 JSONB 原样，user 消息恒 null） |
 | 过滤语义 | 中断遗留的 assistant 占位行（is_active=false）不进列表；user 消息全返回 |
 | 错误分支 | `404/3003` 会话不存在或无权访问；`401/2003`；`403/2004` |
 
@@ -616,7 +616,7 @@ SSE 事件 DTO 字段表（**逐字引自 standards §3 第 6 条**）：
 | 用途 | 运营概览"服务健康"卡：对问答链路各依赖做轻量探活只读展示（app 容器 healthy 但 TEI/LLM 挂掉时管理页此前不可见）。**只读不做启停**——服务生命周期归 compose/deploy/recover.sh（web 触达容器编排=攻击面质变，2026-10-02 评估结论） |
 | 探活方式 | pg=注入连接 SELECT 1；tei-embed/rerank=GET {base}/health；llm=GET {base}/models（Bearer key，5s 超时）；mineru=GET {base}/docs；gotenberg=GET {base}/health（convert_base_url 空为 not_configured）。各 2.5s 超时（llm 5s），HTTP 探活并发（总耗时=最慢者） |
 | TEST_MODE | embed/rerank/llm 走 Stub 无网络依赖 → 直接 up 且 detail 注明"TEST_MODE 桩，未探活"（CI 无 TEI/外网也全绿）；pg 与 mineru 照常真实探活 |
-| 成功响应 | `200`，`data: {overall, services: [{key, label, status, latencyMs, detail}]}`。key ∈ pg/embed/rerank/llm/mineru/gotenberg；status ∈ up/down/not_configured（mineru_base_url 空=pypdf 降级路径；convert_base_url 空=老格式拒收，均非故障）；overall 三态：down=问答链路（pg/embed/rerank/llm）任一不可用，degraded=仅 mineru/gotenberg 不可用（问答正常、解析或老格式转换降级），up=全绿 |
+| 成功响应 | `200`，`data: {overall, rerankCircuit, services: [{key, label, status, latencyMs, detail}]}`。key ∈ pg/embed/rerank/llm/mineru/gotenberg；status ∈ up/down/not_configured（mineru_base_url 空=pypdf 降级路径；convert_base_url 空=老格式拒收，均非故障）；overall 三态：down=问答链路（pg/embed/rerank/llm）任一不可用，degraded=仅 mineru/gotenberg 不可用（问答正常、解析或老格式转换降级），up=全绿。`rerankCircuit`（retrieval-policy §3）=rerank 熔断器三态 closed/open/half_open，与探活相互独立（探活 up 不代表熔断没开），总闸（RERANK_BREAKER_ENABLED）关闭恒 closed——open/half_open 表示问答已走向量序降级 |
 | 副作用 | 无：只读、不写库、不落审计（探活请求发往依赖服务自身，不触用户数据） |
 | 错误分支 | `401/2003`、`403/2004`；探活异常不报 500——一律转为对应服务 status=down + detail 原因摘要 |
 

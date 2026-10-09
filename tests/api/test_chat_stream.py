@@ -16,12 +16,13 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.errors import (
-    ERR_DAILY_LIMITED,
-    ERR_INTERNAL,
-    ERR_NOT_FOUND,
-    ERR_PARAM_INVALID,
+from app.core.circuit_breaker import (
+    CircuitBreaker,
+    CircuitBreakerReranker,
+    set_rerank_breaker,
 )
+from app.core.clock import FakeClock
+from app.core.errors import ERR_DAILY_LIMITED, ERR_NOT_FOUND, ERR_PARAM_INVALID
 from app.core.llm import DEFAULT_CHAT_CHUNKS, StubEmbedder, StubLLMProvider, StubReranker, sigmoid
 from app.db.models import Chunk, Conversation, Department, Document, Message, QaPair, User
 from app.main import app
@@ -31,6 +32,14 @@ from tests.conftest import login_as
 QUESTION = "公司年假有多少天"
 CHUNK_TEXT = "年假按工龄五到十天"
 DOC_TITLE = "全员_考勤制度"
+
+
+@pytest.fixture(autouse=True)
+def _reset_rerank_breaker():
+    """熔断器进程单例用例间隔离：进出各复位（防降级态泄漏影响后续用例）。"""
+    set_rerank_breaker(None)
+    yield
+    set_rerank_breaker(None)
 
 
 # ---------- 构造与消费辅助（口径同 tests/api/test_auth.py 与集成测试） ----------
@@ -176,6 +185,7 @@ def test_rag_stream_full_event_order_and_message_persisted(chat_client, session)
         "promptTokens": assistant_row.prompt_tokens,
         "completionTokens": assistant_row.completion_tokens,
         "durationMs": assistant_row.latency_ms,
+        "degraded": False,  # 正常 rag 轮恒 false 且字段不缺席（retrieval-policy §5）
     }
 
 
@@ -253,6 +263,7 @@ def test_refuse_stream_exact_order_and_refusal_text(chat_client, session) -> Non
     assert events[0] == ("citations", {"messageId": assistant_row.id, "items": []})
     assert events[1] == ("token", {"messageId": assistant_row.id, "content": REFUSAL_TEXT})
     assert events[2][1]["refused"] is True and events[2][1]["cacheHit"] is False
+    assert events[2][1]["degraded"] is False  # 常规拒答（知识不足）非降级轮：字段不缺席
     assert (events[2][1]["promptTokens"], events[2][1]["completionTokens"]) == (0, 0)
     assert events[2][1]["durationMs"] >= 0
     assert (assistant_row.content, assistant_row.answer_type) == (REFUSAL_TEXT, "refuse")
@@ -343,30 +354,63 @@ def test_empty_llm_output_treated_as_retryable_failure(chat_client, session) -> 
     assert (row.content, row.is_active) == ("", False)  # 空串未落库，中断标记
 
 
-# ---------- ④b prepare 阶段上游故障：500 兜底且不留幽灵占位行（CHAT-12） ----------
+# ---------- ④b prepare 阶段 embed 故障：SSE 200 拒答话术收口（retrieval-policy §3） ----------
 
 
-def test_prepare_upstream_failure_marks_placeholder_interrupted(chat_client, session) -> None:
-    """prepare 阶段 embed 故障（事务①已提交）：500 兜底响应，assistant 占位行读回
-    is_active=false——不留幽灵行混入后续 history 改写上下文；user 行不受牵连。"""
-    make_user(session, "ghostuser", "right-one", role="member")
-    assert login_as(chat_client, "ghostuser", "right-one").status_code == 200
+def test_embed_upstream_failure_returns_sse_refuse_with_degraded(chat_client, session) -> None:
+    """embed 故障（捕获层=prepare_turn，spec §11 裁决 6）：不再 500——SSE 正常四事件
+    拒答话术收口，done.degraded=true；占位行正常 finalize（answer_type='refuse'、
+    degraded=true 读回，非中断标记）。"""
+    make_user(session, "embedfall", "right-one", role="member")
+    assert login_as(chat_client, "embedfall", "right-one").status_code == 200
     app.state.chat_deps.embedder = StubEmbedder(fail_times=1)
 
     resp = post_chat(chat_client, QUESTION)  # 新会话无历史：改写短路，embed 首调即抛
 
-    assert resp.status_code == 500
-    body = resp.json()
-    assert body["code"] == ERR_INTERNAL
-    assert body["message"] == "系统繁忙，请稍后重试"  # 对外脱敏，不透传上游细节
-    (user_row, placeholder) = _messages(session, _conversation_row(session).id)
-    assert (user_row.role, user_row.is_active) == ("user", True)  # 仅中断 assistant 占位
-    assert (placeholder.role, placeholder.content, placeholder.answer_type) == (
-        "assistant",
-        "",
-        None,
-    )
-    assert placeholder.is_active is False  # CHAT-12：中断标记失败，不重复落库
+    assert resp.status_code == 200  # 上游故障经 SSE 表达而非 500（工单 01 验收线）
+    events = _parse_sse(resp.text)
+    assert [name for name, _ in events] == ["citations", "token", "done"]
+    (_, assistant_row) = _messages(session, _conversation_row(session).id)
+    assert events[0] == ("citations", {"messageId": assistant_row.id, "items": []})
+    assert events[1] == ("token", {"messageId": assistant_row.id, "content": REFUSAL_TEXT})
+    assert events[2][1]["refused"] is True
+    assert events[2][1]["degraded"] is True  # 降级拒答：done 布尔透出
+    assert (assistant_row.content, assistant_row.answer_type) == (REFUSAL_TEXT, "refuse")
+    assert (assistant_row.degraded, assistant_row.is_active) == (True, True)  # 正常收尾非中断
+    assert assistant_row.cache_hit is False
+
+
+def test_rerank_upstream_failure_falls_back_to_vector_order_sse(chat_client, session) -> None:
+    """rerank 故障（熔断装饰器包裹的 Stub 抛错，spec §3）：SSE 正常 rag 回答而非
+    500/中断——引用降为召回余弦序、done.degraded=true、messages.degraded=true 落库；
+    熔断器记录 1 次失败（未达阈值仍 closed）。"""
+    user = make_user(session, "rankfall", "right-one", role="member")
+    chunk = _seed_rag_chunk(session, user)
+    breaker = CircuitBreaker(FakeClock())
+    set_rerank_breaker(breaker)
+    app.state.chat_deps.reranker = CircuitBreakerReranker(StubReranker(fail_times=1), breaker)
+    assert login_as(chat_client, "rankfall", "right-one").status_code == 200
+
+    resp = post_chat(chat_client, CHUNK_TEXT)  # 同文提问：召回余弦≈1.0，降级阈值（0.63）之上放行
+
+    assert resp.status_code == 200
+    events = _parse_sse(resp.text)
+    assert [name for name, _ in events] == ["citations", "token", "token", "token", "done"]
+    citation = events[0][1]["items"][0]
+    assert citation["refId"] == chunk.id  # 向量序兜底：同文块召回余弦≈1.0 照常命中
+    assert citation["score"] == pytest.approx(1.0, abs=1e-6)  # 分数=召回余弦（非 rerank 分）
+    assert events[-1][1]["degraded"] is True
+    assert events[-1][1]["refused"] is False
+    (_, assistant_row) = _messages(session, _conversation_row(session).id)
+    assert (assistant_row.answer_type, assistant_row.degraded) == ("rag", True)  # 读回断言
+    assert assistant_row.content == "".join(DEFAULT_CHAT_CHUNKS)  # 生成链路不受检索降级影响
+    assert breaker.consecutive_failures == 1
+    assert breaker.state == "closed"  # 单次失败未达 3 次阈值
+
+    listed = chat_client.get(f"/api/conversations/{assistant_row.conversation_id}/messages")
+    assert listed.status_code == 200
+    assistant_item = next(i for i in listed.json()["data"]["items"] if i["role"] == "assistant")
+    assert assistant_item["degraded"] is True  # GET messages 回传（cache_hit 先例，§2 全链契约）
 
 
 # ---------- ⑤ 问题长度：2001 字 422/1003 字段级；全空白 422 ----------
@@ -454,6 +498,7 @@ def test_second_identical_question_hits_cache_without_generation(chat_client, se
     done_first, done_second = events_first[-1][1], events_second[-1][1]
     assert done_first["cacheHit"] is False
     assert done_second["cacheHit"] is True
+    assert done_second["degraded"] is False  # 缓存命中轮恒非降级（降级计划不写缓存）
     assert (
         done_second["refused"],
         done_second["promptTokens"],
@@ -547,6 +592,8 @@ def test_multi_turn_rewrite_hits_qa_on_rewritten_question_and_history_capped(
     assert events[1][1][1]["content"] == REWRITTEN
     assert all(chunk[2][1]["cacheHit"] is True for chunk in events[2:])  # 第 3 轮起精确缓存
     assert all(chunk[0][1]["items"] == [qa_citation] for chunk in events[2:])
+    # qa 与 cache 轮 degraded 恒 false 且字段不缺席（retrieval-policy §5）
+    assert all(chunk[2][1]["degraded"] is False for chunk in events)
     # llm 调用恰 6 次：4 次改写（第 1 轮无历史短路；缓存命中轮也先改写）+ 2 次生成
     assert len(recording.prompts) == 6
     rewrites = [prompt for prompt in recording.prompts if "[当前问题]" in prompt]

@@ -6,7 +6,9 @@ r"""prompt 组装纯函数测试：注入防线（<data> 包裹、question 只�
 doc 位置 = title_path（page 非 None 时附"｜第N页"），qa 位置 = 问答对）；chat
 messages 恰 2 条、system 原文透传、question 只出现在 user role；rewrite messages
 三轮历史逐字断言、助手内容超 200 字截断加省略号、全部历史原样渲染（取最近 3 轮由
-调用方截断）。
+调用方截断）；字符预算（retrieval-policy §7）：char_budget=None 逐字不变、预算内
+原样、边界恰等不截、超限截到恰 budget 字加"……[截断]"标注、0 与负数按缺省处理、
+口径=单条 content 上限（编号/标题/位置头不计量）。
 """
 
 import pytest
@@ -117,6 +119,98 @@ def test_context_block_multi_segments_joined_in_input_order() -> None:
 def test_context_block_empty_items_returns_empty_string() -> None:
     """空命中返回空串：是否走拒答链路（CHAT-03）由调用方决定。"""
     assert build_context_block([]) == ""
+
+
+def test_context_block_char_budget_none_keeps_verbatim_output() -> None:
+    """char_budget=None 与缺省调用逐字相等：超长内容完整渲染（机制默认关，现状不变）。"""
+    items = [_source(content="长" * 500)]
+    baseline = build_context_block(items)
+    assert build_context_block(items, char_budget=None) == baseline
+    assert build_context_block(items, char_budget=None) == (
+        f"[1] 员工手册｜人事制度 > 员工手册｜第3页\n{'长' * 500}"
+    )
+
+
+def test_context_block_char_budget_within_budget_rendered_verbatim() -> None:
+    """预算内原样：内容 7 字、预算 10 字，逐字等于无预算格式且无截断标注。"""
+    block = build_context_block([_source()], char_budget=10)
+    assert block == "[1] 员工手册｜人事制度 > 员工手册｜第3页\n试用期三个月。"
+    assert "……[截断]" not in block
+
+
+def test_context_block_char_budget_measures_content_only_header_exempt() -> None:
+    """预算只计量 content：编号/标题/位置头 24 字远超 3 字预算仍原样，头不参与截断。"""
+    block = build_context_block([_source(content="三个月")], char_budget=3)
+    assert block == "[1] 员工手册｜人事制度 > 员工手册｜第3页\n三个月"
+    assert "……[截断]" not in block
+
+
+def test_context_block_char_budget_exactly_at_limit_not_truncated() -> None:
+    """边界恰等（len 语义）：内容恰 10 字、预算 10 字，不截不标注逐字原样。"""
+    content = "试" * 10
+    block = build_context_block([_source(content=content)], char_budget=10)
+    assert block == f"[1] 员工手册｜人事制度 > 员工手册｜第3页\n{content}"
+    assert "……[截断]" not in block
+
+
+def test_context_block_char_budget_one_char_over_truncated_with_marker() -> None:
+    """恰超 1 字即截：内容 11 字、预算 10 字 → 截到恰 10 字并追加"……[截断]"标注。"""
+    block = build_context_block([_source(content="试" * 11)], char_budget=10)
+    assert block == f"[1] 员工手册｜人事制度 > 员工手册｜第3页\n{'试' * 10}……[截断]"
+    assert "试" * 11 not in block
+
+
+@pytest.mark.parametrize("budget", [0, -1, -100])
+def test_context_block_char_budget_zero_or_negative_falls_back_to_unlimited(
+    budget: int,
+) -> None:
+    """0 与负数按缺省处理：与 char_budget=None 逐字相等，超长内容完整渲染。"""
+    items = [_source(content="长" * 500)]
+    baseline = build_context_block(items, char_budget=None)
+    assert build_context_block(items, char_budget=budget) == baseline
+    assert build_context_block(items, char_budget=budget) == (
+        f"[1] 员工手册｜人事制度 > 员工手册｜第3页\n{'长' * 500}"
+    )
+
+
+def test_context_block_char_budget_is_per_item_cap_not_total_cap() -> None:
+    """口径=单条上限：两条内容各 8 字合计 16 字超 10 字预算，各自预算内均原样。"""
+    block = build_context_block(
+        [
+            _source(n=1, content="问" * 8),
+            _source(
+                n=2, ref_type="qa", title="退货时限", title_path="", page=None, content="答" * 8
+            ),
+        ],
+        char_budget=10,
+    )
+    expected = (
+        f"[1] 员工手册｜人事制度 > 员工手册｜第3页\n{'问' * 8}\n[2] 退货时限｜问答对\n{'答' * 8}"
+    )
+    assert block == expected
+
+
+def test_context_block_char_budget_truncates_only_over_budget_items_in_place() -> None:
+    """混合条目独立裁决：超限条截断加标注、预算内条原样，段序与编号不重排。"""
+    block = build_context_block(
+        [
+            _source(n=2, content="问" * 12),
+            _source(
+                n=1,
+                ref_type="qa",
+                title="退货时限",
+                title_path="",
+                page=None,
+                content="七日无理由。",
+            ),
+        ],
+        char_budget=10,
+    )
+    expected = (
+        f"[2] 员工手册｜人事制度 > 员工手册｜第3页\n{'问' * 10}……[截断]\n"
+        "[1] 退货时限｜问答对\n七日无理由。"
+    )
+    assert block == expected
 
 
 def test_chat_messages_shape_and_data_wrapping() -> None:

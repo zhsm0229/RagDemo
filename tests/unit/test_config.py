@@ -25,6 +25,10 @@ def test_w2_qa_chain_defaults(monkeypatch):
     assert s.rerank_base_url == "http://localhost:8082"
     # 120：CPU TEI 实测口径（20 条 OCR 长块稳定超 10s，模板生成 400 实证后上调；metrics-balance 前波变更，断言随默认值演进）
     assert s.rerank_timeout_s == 120
+    assert (
+        s.compute_tier == "cpu_constrained"
+    )  # 算力档缺省：重手段（multi_query 等）在 gpu 档才可开闸
+    assert s.fallback_refuse_threshold == 0.63  # 降级态拒答闸（向量余弦口径，开放-2 对照带下沿）
     assert s.llm_base_url == ""
     assert s.llm_api_key == ""
     assert s.llm_model == ""
@@ -39,6 +43,15 @@ def test_w2_qa_chain_defaults(monkeypatch):
     assert s.chunk_dedup_sim == 0.98
     assert s.hnsw_ef_search == 40
     assert s.prompt_version == "v1"
+
+
+def test_retrieval_policy_fallback_and_breaker_defaults(monkeypatch):
+    """检索弹性保护新键缺省值（retrieval-policy §3/§11 裁决 7）：降级拒答阈值取对照带
+    下沿 0.63（v1 的 0.60 与"宁拒勿编"方向矛盾已评审修正）；熔断总闸缺省开。"""
+    monkeypatch.setenv("JWT_SECRET", "x" * 32)
+    s = Settings(_env_file=None)
+    assert s.fallback_refuse_threshold == 0.63
+    assert s.rerank_breaker_enabled is True
 
 
 def test_generation_temperature_dropped_and_env_key_ignored(monkeypatch):

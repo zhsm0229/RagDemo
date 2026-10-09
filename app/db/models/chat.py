@@ -93,6 +93,11 @@ class Message(Base):
     completion_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     latency_ms: Mapped[int | None] = mapped_column(Integer)
     cache_hit: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    degraded: Mapped[bool] = mapped_column(
+        Boolean,
+        server_default=text("false"),
+        comment="检索上游降级标注：embed 失败拒答或 rerank 故障向量序兜底轮为 true，正常轮恒 false",
+    )  # 0012（retrieval-policy §2）：降级轮拒答闸走降级阈值、分数为召回余弦口径
     is_active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(
         _ts(), server_default=text("now()"), primary_key=True

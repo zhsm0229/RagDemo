@@ -37,6 +37,7 @@ async def admin_services_health(user: AdminUser, db: DbSession) -> dict:
         "message": "ok",
         "data": {
             "overall": report.overall,
+            "rerankCircuit": report.rerank_circuit,  # retrieval-policy §3：closed/open/half_open
             "services": [_service_payload(svc) for svc in report.services],
         },
     }

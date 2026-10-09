@@ -18,25 +18,19 @@ ExactCache.make_key 一处），为空保持旧键。
 （Task 9 写、prepare 读）：{"answer": str, "citations": list[dict], "answer_type":
 str, "model": str}。本模块只 flush 不 commit、只 HitCounter.add 不 flush，事务边界
 归调用方（对齐 services 层惯例，record_audit 先例）。
-会话/消息存取、落库收尾与归属解析拆至 conversations_store.py（行数红线 §1.4，本模块
-转出再导出；metrics-balance 03 因本文件触及 300 行红线追加转出 finalize 等）。
+会话/消息存取、落库收尾与归属解析拆至 conversations_store.py；TurnPlan/ChatDeps
+契约拆至 turn_plan.py；qa/rag 计划装配与评测 trace 缝拆至 chat_plans.py（行数红线
+§1.4，本模块转出再导出，既有导入路径不变）。
 """
-
-from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
-from app.core.assembly import PromptPack
-from app.core.config import Settings
-from app.core.llm import Embedder, LLMProvider, Reranker
+from app.core.circuit_breaker import get_rerank_breaker
+from app.core.llm import UpstreamError
 from app.rag.doc_profile import resolve_top_n
-from app.rag.prompt import (
-    ContextSource,
-    build_chat_messages,
-    build_context_block,
-    build_user_memory_block,
-)
-from app.services.chat_cache import DailyCounter, ExactCache, HitCounter
+from app.rag.prompt import build_user_memory_block
+from app.rag.retrieval_policy import RetrievalPolicy, resolve_policy
+from app.services.chat_plans import qa_plan, rag_plan, with_trace
 from app.services.conversations_store import (
     MSG_CONVERSATION_NOT_FOUND,
     MSG_MESSAGE_NOT_FOUND,
@@ -51,12 +45,12 @@ from app.services.conversations_store import (
 from app.services.memory import recall_recent
 from app.services.retrieval import (
     DocHit,
-    QaHit,
+    merge_multi_query_hits,
     normalize_question,
     rerank_and_fold,
 )
-from app.services.rewrite import rewrite_question
-from app.services.vector_store import VectorStore
+from app.services.rewrite import rewrite_question, rewrite_question_multi
+from app.services.turn_plan import ChatDeps, TurnPlan
 
 # 会话/消息存取与归属解析自本文件拆出（行数红线 §1.4）：实现在 conversations_store.py，
 # 此处转出再导出保持既有导入路径（from app.services.chat import resolve_owned_conversation
@@ -77,45 +71,6 @@ __all__ = [
 ]
 
 _REWRITE_ROUNDS: int = 3  # 改写历史取最近 3 轮（prompt 层不截条数，截断归调用方约定）
-
-
-@dataclass
-class TurnPlan:
-    """一轮问答的执行计划（Task 9 SSE 端点直接消费，字段名即接口契约，不得删改）。
-
-    kind: 'cache' | 'qa' | 'rag' | 'refuse'；citations 为 SSE DTO 形态（camelCase
-    键，standards §3.6）亦即 messages.citations 的 JSONB 存储形态；llm_messages 仅
-    qa/rag 非空；cache_entry 仅 cache 计划非空（命中条目，Task 9 取其中 answer 直接
-    改流下发）；cache_key 仅 qa/rag 非空——finalize 后由 Task 9 以其 put。
-    retrieval_trace（metrics-balance §4.2 追加，可选）：评测模式检索轨迹
-    {contextChunkIds, topKCandidates}，仅 prepare_turn 传入 ranked_out 时装配；
-    主问答路径恒 None（不落 trace，行为零改动）。
-    """
-
-    kind: str
-    citations: list[dict]
-    rewritten_question: str
-    llm_messages: list[dict] | None
-    cache_entry: dict | None
-    cache_key: str | None
-    retrieval_trace: dict | None = None
-
-
-@dataclass
-class ChatDeps:
-    """问答链路依赖包：Task 8 消费检索/提示词/缓存，Task 9 消费 counter（每日限额）
-    与 settings.chat_max_tokens（生成 clamp）；store 为 VectorStore 第六接口
-    （规范/规格审查补齐，实现由装配层选择，见 services/vector_store）。"""
-
-    embedder: Embedder
-    reranker: Reranker
-    llm: LLMProvider
-    cache: ExactCache
-    counter: DailyCounter
-    hit_counter: HitCounter
-    settings: Settings
-    prompts: PromptPack
-    store: "VectorStore"
 
 
 def prepare_turn(
@@ -142,13 +97,24 @@ def prepare_turn(
     引擎等直调方）或缺省时跳过召回查询，行为与上线前逐字节一致。
     """
     rewritten = question_raw
+    sub_queries: list[str] = []
     if history:
-        rewritten = rewrite_question(
-            deps.llm,
-            history[-2 * _REWRITE_ROUNDS :],
-            question_raw,
-            system=deps.prompts.rewrite_system,
-        )
+        truncated = history[-2 * _REWRITE_ROUNDS :]
+        if resolve_policy(question_raw, compute_tier=deps.settings.compute_tier).multi_query:
+            # multi_query 门控命中（L0 multi_hop 信号且 gpu 档，spec §4）：改写升级为一次
+            # 三产物调用（改写+意图+子查询）；解析失败/上游故障已在 rewrite 层降级单路
+            outcome = rewrite_question_multi(
+                deps.llm,
+                truncated,
+                question_raw,
+                system=deps.prompts.rewrite_system,
+                multi_system=deps.prompts.rewrite_multi_system,
+            )
+            rewritten, sub_queries = outcome.rewritten, outcome.sub_queries
+        else:  # 门控关闭（本机 cpu 档）：既有单产物改写路径逐字不变
+            rewritten = rewrite_question(
+                deps.llm, truncated, question_raw, system=deps.prompts.rewrite_system
+            )
     memory_block = ""
     if user_id is not None:
         memories = recall_recent(db, user_id)
@@ -162,41 +128,102 @@ def prepare_turn(
     cached = deps.cache.get(cache_key)
     if cached is not None:
         plan = TurnPlan("cache", cached.get("citations", []), rewritten, None, cached, None)
-        return _with_trace(plan, ranked_out)
-    query_vec = deps.embedder.embed([rewritten])[0]  # 一次计算，qa 与文档链路复用
+        return with_trace(plan, ranked_out)
+    try:
+        # multi_query 分支同享一次 embed 调用：[改写问题, *子查询] 一次多向量（spec §4）；
+        # 门控关闭时 sub_queries 恒空，调用形态与现状 embed([rewritten]) 逐字等价
+        query_vecs = deps.embedder.embed([rewritten, *sub_queries])
+    except UpstreamError:
+        # embed 上游故障（spec retrieval-policy §3 捕获层裁决）：拒答话术计划收口不外泄，
+        # answer_type 恒 refuse——主链路/评测/检索测试三调用方同享，500 不再漏出
+        return with_trace(
+            TurnPlan("refuse", [], rewritten, None, None, None, degraded=True), ranked_out
+        )
+    query_vec = query_vecs[0]  # qa 与文档链路复用改写问题向量（多路仅用于文档召回合并）
+    policy = resolve_policy(
+        rewritten,
+        compute_tier=deps.settings.compute_tier,
+        circuit_state=get_rerank_breaker().state,
+    )
     dept_ids = [user_dept_id, all_dept_id]
     qa_hit = deps.store.match_qa(db, query_vec, dept_ids, deps.settings.qa_threshold)
     if qa_hit is not None:
-        return _with_trace(
-            _qa_plan(qa_hit, rewritten, cache_key, deps.prompts.chat_system), ranked_out
+        return with_trace(
+            qa_plan(qa_hit, rewritten, cache_key, deps.prompts.chat_system, policy.char_budget),
+            ranked_out,
         )
-    folded = _retrieve_folded(db, deps, query_vec, dept_ids, rewritten, ranked_out=ranked_out)
-    if not folded or folded[0].similarity < deps.settings.refuse_threshold:
-        plan = TurnPlan("refuse", [], rewritten, None, None, None)  # 拒答不写缓存
-        return _with_trace(plan, ranked_out)
+    degraded_marks: list[bool] = []
+    folded = _retrieve_folded(
+        db,
+        deps,
+        policy,
+        query_vecs,
+        dept_ids,
+        rewritten,
+        ranked_out=ranked_out,
+        degraded_out=degraded_marks,
+    )
+    degraded = any(degraded_marks)  # 收集缝恰一元素（True=兜底轮）；bool(列表) 会对 [False] 误判
+    # 拒答闸两套阈值分轨（spec §3，§4.4 分数口径分轨同理）：降级态分数是召回余弦，
+    # 用 fallback_refuse_threshold；正常态是 rerank sigmoid 分，用 refuse_threshold
+    threshold = (
+        deps.settings.fallback_refuse_threshold if degraded else deps.settings.refuse_threshold
+    )
+    if not folded or folded[0].similarity < threshold:
+        plan = TurnPlan(
+            "refuse", [], rewritten, None, None, None, degraded=degraded
+        )  # 拒答不写缓存
+        return with_trace(plan, ranked_out)
     deps.hit_counter.add([hit.chunk_id for hit in folded])  # 仅 rag 路径计数（F-1011）
     chat_system = deps.prompts.chat_system
     if memory_block:
         chat_system = chat_system.rstrip() + "\n" + memory_block  # 仅 rag 分支注入（§3.3）
-    return _with_trace(_rag_plan(folded, rewritten, cache_key, chat_system), ranked_out)
+    # 降级态 rag 计划 cache_key=None 不写缓存（spec §11 裁决 2）：混尺分数不入缓存、
+    # 标注不丢失，代价仅故障窗口重算
+    return with_trace(
+        rag_plan(
+            folded,
+            rewritten,
+            None if degraded else cache_key,
+            chat_system,
+            degraded,
+            policy.char_budget,
+        ),
+        ranked_out,
+    )
 
 
 def _retrieve_folded(
     db: Session,
     deps: ChatDeps,
-    query_vec: list[float],
+    policy: RetrievalPolicy,
+    query_vecs: list[list[float]],
     dept_ids: list[int],
     rewritten: str,
     *,
     ranked_out: list[tuple[DocHit, float]] | None = None,
+    degraded_out: list[bool] | None = None,
 ) -> list[DocHit]:
     """向量召回（经 VectorStore 接口）+ 重排折叠：产物 DocHit.similarity 已是
-    rerank sigmoid 分（阈值口径）；ranked_out 原样透传收集缝（评测 trace）。
-    top_n 传 resolve_top_n（metrics-balance §5，§17.3 管的检索行为变更）：精排按
-    top1 命中型截取条数，general 档与旧固定 rerank_top_n=5 同值（缺省行为不变）。"""
-    hits = deps.store.search_chunks(
-        db, query_vec, dept_ids, deps.settings.retriever_top_k, deps.settings.hnsw_ef_search
-    )
+    rerank sigmoid 分（阈值口径）；ranked_out/degraded_out 原样透传收集缝（评测
+    trace 与降级标记，retrieval-policy §3）。降级轮产物分数=召回余弦（口径见
+    rerank_and_fold docstring）。top_n 传 resolve_top_n（metrics-balance §5，
+    §17.3 管的检索行为变更）：精排按 top1 命中型截取条数，general 档与旧固定
+    rerank_top_n=5 同值（缺省行为不变）。
+
+    召回参数读 RetrievalPolicy（retrieval-policy §2，工单 02，由 prepare_turn 解析
+    传入）：top_k/ef_search 取 resolve_policy 缺省 20/40（与 settings 旧缺省同值，
+    缺省输入零变化，等价证明由既有用例承担）；rerank_mode（熔断 open→vector_only）
+    的执行由装配层熔断装饰器承载（工单 01，调用方零分支）。multi_query 召回分支
+    （工单 06，spec §4）：多向量（改写问题+子查询 ≤3）逐路 search_chunks 后合并
+    去重（merge_multi_query_hits），合并候选集交 rerank_and_fold **单次**精排
+    （rerank 恒 1 次 ≤3 次预算）；单向量（门控关闭/三产物降级）与现状逐字等价。
+    doc_type 恒缺省 general（§11 裁决 9，agent TASK_PROFILES 覆盖归工单 07）。"""
+    recall_paths = [
+        deps.store.search_chunks(db, query_vec, dept_ids, policy.top_k, policy.ef_search)
+        for query_vec in query_vecs
+    ]
+    hits = merge_multi_query_hits(recall_paths) if len(recall_paths) > 1 else recall_paths[0]
     return rerank_and_fold(
         deps.reranker,
         rewritten,
@@ -204,73 +231,5 @@ def _retrieve_folded(
         resolve_top_n,
         deps.settings.chunk_dedup_sim,
         ranked_out=ranked_out,
+        degraded_out=degraded_out,
     )
-
-
-def _qa_plan(qa_hit: QaHit, rewritten: str, cache_key: str, chat_system: str) -> TurnPlan:
-    """qa 计划：恰 1 条 qa 引用（score=余弦相似度），答案经 ContextSource 进 <data>。"""
-    source = ContextSource(
-        n=1, ref_type="qa", title=qa_hit.question, title_path="", page=None, content=qa_hit.answer
-    )
-    citation = {
-        "n": 1,
-        "refType": "qa",
-        "refId": qa_hit.qa_id,
-        "title": qa_hit.question,
-        "page": None,
-        "titlePath": "",
-        "score": qa_hit.similarity,
-    }
-    messages = build_chat_messages(chat_system, build_context_block([source]), rewritten)
-    return TurnPlan("qa", [citation], rewritten, messages, None, cache_key)
-
-
-def _rag_plan(folded: list[DocHit], rewritten: str, cache_key: str, chat_system: str) -> TurnPlan:
-    """rag 计划：citations 按 fold 序（rerank 分降序）编号 1..N，资料段与之一一对应。"""
-    sources = [
-        ContextSource(
-            n=n,
-            ref_type="doc",
-            title=hit.title,
-            title_path=hit.title_path,
-            page=hit.page_no,
-            content=hit.content,
-        )
-        for n, hit in enumerate(folded, start=1)
-    ]
-    citations = [
-        {
-            "n": n,
-            "refType": "doc",
-            "refId": hit.chunk_id,
-            # docId：文档主键——前端引用弹窗取原文件/图片/预览按文档寻址；refId 是
-            # chunk id，仅供 /api/citations/content 取切片正文，两者不可混用
-            # （2026-10-05 缺陷修复：此前弹窗误用 refId 拼 /documents/{id}/file|images）。
-            "docId": hit.document_id,
-            "title": hit.title,
-            "page": hit.page_no,
-            "titlePath": hit.title_path,
-            "score": hit.similarity,
-        }
-        for n, hit in enumerate(folded, start=1)
-    ]
-    messages = build_chat_messages(chat_system, build_context_block(sources), rewritten)
-    return TurnPlan("rag", citations, rewritten, messages, None, cache_key)
-
-
-def _with_trace(plan: TurnPlan, ranked_out: list[tuple[DocHit, float]] | None) -> TurnPlan:
-    """评测缝（metrics-balance §4.2）：ranked_out 非 None 时装配 retrieval_trace。
-
-    contextChunkIds=citations 中 refType=doc 的 refId（qa 引用非 chunk 不入集，缓存
-    命中题自缓存条目 citations 还原）；topKCandidates=全量 ranked 候选（含 top_n
-    折叠丢弃者，无检索则空）。主路径 ranked_out=None 原样返回，行为零改动。"""
-    if ranked_out is None:
-        return plan
-    plan.retrieval_trace = {
-        "contextChunkIds": [c["refId"] for c in plan.citations if c["refType"] == "doc"],
-        "topKCandidates": [
-            {"chunkId": hit.chunk_id, "docType": hit.doc_type, "rerankScore": score}
-            for hit, score in ranked_out
-        ],
-    }
-    return plan

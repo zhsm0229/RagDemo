@@ -48,6 +48,7 @@ from app.core.assembly import (
     build_storage,
     load_prompt_pack,
 )
+from app.core.circuit_breaker import CircuitBreakerReranker, get_rerank_breaker
 from app.core.clock import SystemClock
 from app.core.config import Settings, get_settings
 from app.core.llm import (
@@ -89,6 +90,10 @@ def _build_chat_deps(settings: Settings) -> ChatDeps:
         embedder = build_embedder(settings)
         reranker = build_reranker(settings)
         llm = build_llm(settings, prompts.temperature)
+    # rerank 熔断装饰器在装配层包装 build_reranker 产物（retrieval-policy §3/§11 裁决 3：
+    # 实现类只在装配层出现）；test_mode 同样包装——故障语义与生产一致，状态接
+    # services_health 共享同一单例
+    reranker = CircuitBreakerReranker(reranker, get_rerank_breaker())
     # VectorStore 第六接口在装配层选择实现（services 层协议不进 core/assembly——
     # 五层单向依赖）；pg 实现无状态不随 test_mode 变化（stub 的是向量产物，检索恒打真库）
     store: VectorStore = PgVectorStore()

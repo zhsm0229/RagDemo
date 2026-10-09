@@ -1,4 +1,4 @@
-# 开发规范手册 v1.8（草案，待评审）
+# 开发规范手册 v1.9（草案，待评审）
 
 > 项目：企业智能工作台 MVP（RAG 问答，客服 + HR 双部门试点）
 > 效力：本文档是评审基线。代码评审时逐条对照，违反规范 = 不合入。修改规范须更新版本号并在评审时知会全员。
@@ -10,6 +10,7 @@
 > v1.6 变更：新增 §10.8 预检自动化（傻瓜式原则）——上传即自动查重（MD5+simhash）/敏感扫描/乱码检测，零人工预处理；§11.4 到期自动下线；配套 features M10（F-1001~1012 语料治理与调优工具）。
 > v1.7 变更：新增 §12.8 模型工件管理——离线分发（镜像内置/摆渡导入 + hash 校验）、模型版本登记表、embedding 升级重建索引联动（与设计文档 §6 模型清单配套）。
 > v1.8 变更：重构 §19 项目文档管理规范——新增文档三档生命周期（活文档/快照/台账）、单一真相源、数字守账、活文档头部元数据、引用完整性、同步义务三绑定；存量快照归档至 `docs/archive/`（规范生效即合规的配套整理）。
+> v1.9 变更：§25.3-7 检索与评测演进触发线改写为 A/B/C 三分类（specs/retrieval-policy.md v1.1 §1 评审裁决并入；原 metrics-balance 登记 ①-⑥ 并入 B 类；动态 top_p 定为 C 类永久门，known-issues 裁决-6 备查）。
 > 定位：活文档（规范基线）｜对账：2026-10-07｜同步保障：修改须更新版本号并在评审知会全员（本头部效力行）
 
 ---
@@ -57,7 +58,7 @@
    |------|-------------|
    | `citations` | `messageId`, `items: [{n, refType: 'doc'\|'qa', refId, title, page, titlePath, score}]`（**先于 token 事件下发**） |
    | `token` | `messageId`, `content`（增量文本片段） |
-   | `done` | `messageId`, `refused: bool`, `cacheHit: bool`, `promptTokens`, `completionTokens`, `durationMs` |
+   | `done` | `messageId`, `refused: bool`, `cacheHit: bool`, `degraded: bool`（检索降级/熔断态标记，正常恒 false——retrieval-policy §5）, `promptTokens`, `completionTokens`, `durationMs` |
    | `error` | `code`（取自共享错误码枚举）, `message`（中文，已脱敏）, `retryable: bool` |
    注意：POST SSE 须用 fetch + ReadableStream 消费（无 EventSource 自动重连）；**重试 = 前端重新发起请求生成新消息**，被中断的 assistant 消息标记失败，不重复落库。
 7. 文件上传用 multipart，字段名 `file`；所有接口鉴权依赖注入，无匿名接口（登录除外）。
@@ -337,7 +338,10 @@
 4. **禁止提前建设清单**：Milvus、K8s、微服务拆分、细粒度 ACL、语义缓存（A 阶段前用 §17.5 精确匹配 TTL 缓存）、自动同步连接器、GPU 推理集群、只读副本、多环境晋升流水线。
 5. **退路验证义务**：阶段 A 开始前做一次"退路演练"——在测试环境验证 `VectorStore` 可替换、auth 可换 SSO、`FileStorage` 可换对象存储、应用可双实例运行，确认退路真实可用而非纸面设计。
 6. **硬前提对齐**：LLM 成本测算与预算对齐、团队扩编计划，最晚在阶段 A 启动时同步管理层（详见 scaling-plan 第六节）。
-7. **检索与评测演进触发线（metrics-balance 登记，2026-10-08，设计见 specs/metrics-balance.md §1）**：①表格感知分块——表格类问答 badcase ≥5 例后立项；②句子窗口 / ③语义分块——条款切分与档位参数实测不足（Context Recall 持续低于验收线且调档无效）再评估；④BM25 混合检索——向量召回 recall 实测不足时经 ADR 立项（当前未规划未禁止）；⑤LLM 自动分型——结构检测实测误判率高（回填后台人工修正率 >20%）时替换 detect_from_text 内核；⑥条款级/页级 Context Recall——文档级机检口径不足以定位召回缺陷时升级。
+7. **检索与评测演进触发线（A/B/C 三分类，2026-10-09 随 [specs/retrieval-policy.md](specs/retrieval-policy.md) v1.1 §1 评审裁决改写；原 metrics-balance 登记 ①-⑥ 并入 B 类，设计分别见该 spec 与 [specs/metrics-balance.md](specs/metrics-balance.md) §1）**：
+   - **A 资源门槛**（本机 CPU TEI 不能测，Mac Mini gpu 档解锁，解锁即做）：agent 检索精排恢复、multi_query 激活（双门控：L0 multi_hop 信号且 compute_tier=gpu，参数收拢于 `app/rag/retrieval_policy.py`）、HyDE 实验、基线提速（NFR #7 首 token/检索复测）。
+   - **B 证据门槛**（本机可测，激活=§17.3 四指标跑分对比+评审）：L1 意图分类激活、动态 top_k/ef_search 激活、字符预算开闸；metrics-balance 原登记项——①表格感知分块（表格类问答 badcase ≥5 例后立项）、②句子窗口/③语义分块（条款切分与档位参数实测不足，即 Context Recall 持续低于验收线且调档无效，再评估）、④BM25 混合检索（向量召回 recall 实测不足时经 ADR 立项，当前未规划未禁止）、⑤LLM 自动分型（结构检测实测误判率高，回填后台人工修正率 >20% 时替换 detect_from_text 内核）、⑥条款级/页级 Context Recall（文档级机检口径不足以定位召回缺陷时升级）。
+   - **C 纪律永久门**（唯二不做）：语义缓存（§25.4 禁止清单已有，A 阶段前用 §17.5 精确匹配 TTL 缓存）；动态 top_p（无收益证据，known-issues 裁决-6 登记备查）。
 
 ---
 

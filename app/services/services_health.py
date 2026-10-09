@@ -26,6 +26,7 @@ import httpx
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.core.circuit_breaker import get_rerank_breaker
 from app.core.config import get_settings
 
 _PROBE_TIMEOUT_S = 2.5  # 内网依赖（TEI/MinerU）
@@ -58,6 +59,14 @@ class ServicesHealthReport:
         if any(s.status == "down" for s in self.services):
             return "degraded"
         return "up"
+
+    @property
+    def rerank_circuit(self) -> str:
+        """rerank 熔断器三态（retrieval-policy §3）：closed/open/half_open。
+
+        与探活相互独立：探活 up 不代表熔断没开（半开探测期等）；总闸关闭恒 closed
+        （circuit_breaker.state 口径）。"""
+        return get_rerank_breaker().state
 
 
 def _brief(exc: Exception) -> str:

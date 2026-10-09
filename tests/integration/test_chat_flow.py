@@ -15,7 +15,9 @@ r"""问答编排集成测试（Task 8，真 pg + Stub 三件套 + FakeClock）�
 ⑦ 折叠一致：citations 与检索 fold 结果一致，近重复折叠后 5→4（<top_n）连续编号。
 ⑧ 拒答不写缓存：prepare 后 cache.get 为空。
 另有 finalize_turn / mark_interrupted 的真 pg 读回断言（flush 不 commit，commit 归
-Task 9）与 TurnPlan/ChatDeps 字段契约锁定。种子一律 ORM 直插（先例 test_retrieval.py）。
+Task 9）与 TurnPlan/ChatDeps 字段契约锁定。policy 接线零变化见证与接线辨识因本文件
+触 800 行测试上限拆至 test_chat_policy_wiring.py（§1.4，同被测模块 chat.py）。
+种子一律 ORM 直插（先例 test_retrieval.py）。
 """
 
 import hashlib
@@ -168,8 +170,8 @@ class _RecordingLLM:
 
 
 def test_turn_plan_and_chat_deps_field_contracts() -> None:
-    """TurnPlan 七字段（cache_key 后追加可选 retrieval_trace，metrics-balance §4.2 计划内
-    演进非放宽；主问答路径恒 None）与 ChatDeps 九字段即接口。"""
+    """TurnPlan 八字段（retrieval_trace 后追加可选 degraded=retrieval-policy §2 计划内
+    演进非放宽；主问答路径恒 False）与 ChatDeps 九字段即接口。"""
     assert [f.name for f in fields(TurnPlan)] == [
         "kind",
         "citations",
@@ -178,6 +180,7 @@ def test_turn_plan_and_chat_deps_field_contracts() -> None:
         "cache_entry",
         "cache_key",
         "retrieval_trace",
+        "degraded",
     ]
     assert [f.name for f in fields(ChatDeps)] == [
         "embedder",
@@ -670,6 +673,7 @@ def test_main_chat_path_turn_plan_carries_no_retrieval_trace(session: Session) -
 
     assert rag_plan.kind == "rag" and rag_plan.retrieval_trace is None
     assert refuse_plan.kind == "refuse" and refuse_plan.retrieval_trace is None
+    assert rag_plan.degraded is False and refuse_plan.degraded is False  # 正常路径恒非降级
 
 
 # ---------------------------------------------------------------------------

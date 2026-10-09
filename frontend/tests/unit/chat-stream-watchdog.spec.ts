@@ -40,7 +40,7 @@ function lastAssistant(messages: ChatMessage[]): ChatMessage {
 
 const token = (content: string): ChatStreamEvent =>
   ({ event: 'token', messageId: 1, content }) as ChatStreamEvent
-const done = (): ChatStreamEvent =>
+const done = (extra: Record<string, unknown> = {}): ChatStreamEvent =>
   ({
     event: 'done',
     messageId: 1,
@@ -49,6 +49,7 @@ const done = (): ChatStreamEvent =>
     promptTokens: 1,
     completionTokens: 2,
     durationMs: 3,
+    ...extra,
   }) as ChatStreamEvent
 
 beforeEach(() => {
@@ -135,7 +136,7 @@ describe('问答流看门狗（A8）', () => {
 
     for (let i = 0; i < 10; i++) {
       stream.onEvent(token(`第${i}段`))
-      await vi.advanceTimersByTimeAsync(40_000) // 累计 400s，停滞未触发（喂狗线 240s）
+      await vi.advanceTimersByTimeAsync(40_000) // 累计 400s，停滞未触发（喂狗线 300s，retrieval-policy §5 竞态修复）
     }
     expect(lastAssistant(chat.messagesOf(null)).status).toBe('streaming')
 
@@ -172,5 +173,37 @@ describe('问答流看门狗（A8）', () => {
     expect(assistant.status).toBe('failed')
     expect(assistant.failure).toBe('连接中断，请重试')
     expect(assistant.retryable).toBe(true)
+  })
+})
+
+describe('done degraded 字段应用（retrieval-policy 工单 04）', () => {
+  it('done degraded=true：ChatMessage.degraded 置 true，且不改变 status/failure 收尾', async () => {
+    const chat = useChatStream()
+    void chat.send('报销标准', null)
+    await flushPromises()
+    const stream = openStreams[0]!
+    stream.onEvent(token('回答内容'))
+    stream.onEvent(done({ degraded: true }))
+    stream.resolve()
+    await flushPromises()
+    const assistant = lastAssistant(chat.messagesOf(null))
+    expect(assistant.degraded).toBe(true)
+    expect(assistant.status).toBe('done')
+    expect(assistant.failure).toBeNull()
+    expect(assistant.stopped).toBe(false)
+  })
+
+  it('done 缺 degraded 字段（旧帧容错）：degraded 兜底 false，其余收尾不受影响', async () => {
+    const chat = useChatStream()
+    void chat.send('报销标准', null)
+    await flushPromises()
+    const stream = openStreams[0]!
+    stream.onEvent(done()) // 无 degraded 键：模拟旧版后端帧
+    stream.resolve()
+    await flushPromises()
+    const assistant = lastAssistant(chat.messagesOf(null))
+    expect(assistant.degraded).toBe(false)
+    expect(assistant.status).toBe('done')
+    expect(assistant.cacheHit).toBe(false)
   })
 })

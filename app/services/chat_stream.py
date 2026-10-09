@@ -47,8 +47,11 @@ def _done_payload(
     cache_hit: bool,
     usage: tuple[int, int] | None,
     duration_ms: int,
+    degraded: bool = False,
 ) -> dict:
-    """done 事件 DTO（§3.6 逐字）：无 usage（拒答/缓存命中/流断未耗尽）tokens 记 0。"""
+    """done 事件 DTO（§3.6 逐字 + retrieval-policy §5 追加）：无 usage（拒答/缓存命中/
+    流断未耗尽）tokens 记 0；degraded 全轮携带（正常/qa/cache 轮恒 false 且字段不缺席，
+    旧前端未知字段忽略即容错）。"""
     prompt_tokens, completion_tokens = usage if usage is not None else (0, 0)
     return {
         "messageId": assistant_msg_id,
@@ -57,6 +60,7 @@ def _done_payload(
         "promptTokens": prompt_tokens,
         "completionTokens": completion_tokens,
         "durationMs": duration_ms,
+        "degraded": degraded,
     }
 
 
@@ -76,6 +80,7 @@ def _finalize(
     usage: tuple[int, int] | None,
     latency_ms: int,
     cache_hit: bool,
+    degraded: bool = False,
 ) -> None:
     """流式收尾（正常路径）：短会话 finalize_turn（纯 UPDATE）+ 独立事务提交。"""
     with SessionLocal() as db:
@@ -89,6 +94,7 @@ def _finalize(
             usage=usage,
             latency_ms=latency_ms,
             cache_hit=cache_hit,
+            degraded=degraded,
         )
         db.commit()
 
@@ -117,18 +123,27 @@ def _stream_cache_hit(plan: TurnPlan, assistant_msg_id: int, start: float) -> It
         usage=None,
         latency_ms=duration_ms,
         cache_hit=True,
+        degraded=False,  # 降级计划不写缓存（spec §11 裁决 2）：cache 命中轮恒非降级
     )
     yield (
         "done",
         _done_payload(
-            assistant_msg_id, refused=False, cache_hit=True, usage=None, duration_ms=duration_ms
+            assistant_msg_id,
+            refused=False,
+            cache_hit=True,
+            usage=None,
+            duration_ms=duration_ms,
+            degraded=False,
         ),
     )
 
 
-def _stream_refuse(settings: Settings, assistant_msg_id: int, start: float) -> Iterator[tuple]:
+def _stream_refuse(
+    settings: Settings, degraded: bool, assistant_msg_id: int, start: float
+) -> Iterator[tuple]:
     """refuse 分支：token 逐字 REFUSAL_TEXT → finalize(answer_type='refuse') → done
-    {refused:true, cacheHit:false, tokens 0}（拒答不写缓存）。"""
+    {refused:true, cacheHit:false, tokens 0}（拒答不写缓存）。降级轮（embed 失败/
+    降级阈值拒答）degraded 随计划透出——拒答与"简化检索"语义并存（诚实信号）。"""
     yield "token", {"messageId": assistant_msg_id, "content": REFUSAL_TEXT}
     duration_ms = _elapsed_ms(start)
     _finalize(
@@ -140,11 +155,17 @@ def _stream_refuse(settings: Settings, assistant_msg_id: int, start: float) -> I
         usage=None,
         latency_ms=duration_ms,
         cache_hit=False,
+        degraded=degraded,
     )
     yield (
         "done",
         _done_payload(
-            assistant_msg_id, refused=True, cache_hit=False, usage=None, duration_ms=duration_ms
+            assistant_msg_id,
+            refused=True,
+            cache_hit=False,
+            usage=None,
+            duration_ms=duration_ms,
+            degraded=degraded,
         ),
     )
 
@@ -166,13 +187,19 @@ def _finish_generated(
         usage=usage,
         latency_ms=duration_ms,
         cache_hit=False,
+        degraded=plan.degraded,
     )
     deps.cache.put(
         plan.cache_key,
         {"answer": content, "citations": plan.citations, "answer_type": plan.kind, "model": model},
     )
     return _done_payload(
-        assistant_msg_id, refused=False, cache_hit=False, usage=usage, duration_ms=duration_ms
+        assistant_msg_id,
+        refused=False,
+        cache_hit=False,
+        usage=usage,
+        duration_ms=duration_ms,
+        degraded=plan.degraded,
     )
 
 
@@ -228,6 +255,6 @@ def event_stream(
     if plan.kind == "cache":
         yield from _stream_cache_hit(plan, assistant_msg_id, start)
     elif plan.kind == "refuse":
-        yield from _stream_refuse(deps.settings, assistant_msg_id, start)
+        yield from _stream_refuse(deps.settings, plan.degraded, assistant_msg_id, start)
     else:  # qa / rag：逐段生成
         yield from _stream_generate(deps, plan, assistant_msg_id, start)

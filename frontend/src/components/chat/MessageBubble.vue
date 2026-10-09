@@ -6,7 +6,7 @@
  * 等待阶段提示（2026-10-06）：流式占位期且尚无内容时展示阶段文案+已等待秒数+
  * 脉冲点——发送后到首 token 之间（CPU rerank 可达分钟级）气泡不再全白。
  * meta 行按状态展示：失败（生成失败+原因+重试）/ 已停止（可重试）/
- * 完成（已拒答、来自缓存、token·耗时、👍👎 反馈与已点踩标注）。
+ * 完成（已拒答、简化检索、来自缓存、token·耗时、👍👎 反馈与已点踩标注）。
  */
 import { computed, onUnmounted, ref, watch } from 'vue'
 import type { ChatMessage } from '@/composables/useChatStream'
@@ -137,6 +137,8 @@ onUnmounted(() => {
       <el-tag v-if="message.refused" size="small" type="warning">已拒答</el-tag>
       <!-- 拒答场景补充部门可见性口径（B12）：解释"为什么没答到"的最常见原因 -->
       <span v-if="message.refused" class="refuse-hint">问答仅检索你所在部门与通用知识库</span>
+      <!-- 检索上游降级轻标注（retrieval-policy §5）：与拒答双标签同显，零弹窗零打断 -->
+      <el-tag v-if="message.degraded" size="small" type="info">简化检索</el-tag>
       <el-tag v-if="message.cacheHit" size="small" type="info">来自缓存</el-tag>
       <span v-if="message.promptTokens !== null" class="token-info">
         token: in {{ message.promptTokens }} / out {{ message.completionTokens }} ·

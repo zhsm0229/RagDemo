@@ -1,10 +1,12 @@
 r"""Agent 工具集（ToolProvider 第七接口实现，F-211，工单 #04/#06）。
 
 内部复用既有 service 函数（§1.6 跨模块取数走 service）：
-- knowledge_base_search（#04）：embed（Embedder 接口）→ VectorStore.search_chunks
-  （部门隔离 SQL 在 services/retrieval 强制执行：dept_id IN 绑定参数 + 强制 JOIN
-  documents 的 is_active/ready 双闸）→ 纯向量序返回（CPU TEI 精排实测超时，见
-  agent 检索降级记录；主问答链路仍走 rerank，两把尺的差异在 known-issues 登记）；
+- knowledge_base_search（#04）：embed（Embedder 接口）→ match_qa 直答通道（retrieval-policy
+  §6，工单 03：settings.qa_threshold 与主链路同尺，命中返问答对引用并跳过文档检索）→
+  VectorStore.search_chunks（部门隔离 SQL 在 services/retrieval 强制执行：dept_id IN
+  绑定参数 + 强制 JOIN documents 的 is_active/ready 双闸）→ fold_top_n 折叠（主/agent
+  共用 rag 域纯函数）→ 纯向量序返回（CPU TEI 精排实测超时，见 agent 检索降级记录；
+  主问答链路仍走 rerank，两把尺的差异在 known-issues 登记）；
 - save_draft（#06）：包装 services/draft_review.create_draft——预检三闸/精确查重/
   FileStorage 落盘/审计与上传同源，登记 draft+待审核（无审核不落地，specs §五）。
 
@@ -27,7 +29,10 @@ from app.core.llm import Embedder, Reranker, UpstreamError
 from app.core.storage import FileStorage
 from app.core.tools import RunContext, ToolResult, ToolSpec
 from app.db.models import User
+from app.rag.fold import fold_top_n
+from app.rag.retrieval_policy import RetrievalPolicy, merge_policy, resolve_policy
 from app.services.draft_review import create_draft
+from app.services.retrieval import QaHit
 from app.services.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -59,12 +64,15 @@ KNOWLEDGE_SEARCH_SPEC = ToolSpec(
 @dataclass(frozen=True)
 class KnowledgeSearchDeps:
     """检索工具依赖包：协议件与问答链路同款（Embedder/VectorStore/Reranker + Settings），
-    实现选择归装配层（工单 #06），本模块不做装配。"""
+    实现选择归装配层（工单 #06），本模块不做装配。profile_policy 为任务档案策略覆盖
+    注入点（agent_tasks.TASK_PROFILES[task].profile_policy，工单 07 预留；装配层按任务
+    档案传入，缺省 None=无覆盖，与工单 02 行为逐字一致）。"""
 
     embedder: Embedder
     store: VectorStore
     reranker: Reranker
     settings: Settings
+    profile_policy: RetrievalPolicy | None = None
 
 
 class KnowledgeBaseSearchTool:
@@ -106,23 +114,42 @@ class KnowledgeBaseSearchTool:
         实测 20 条 OCR 长块稳定超 120s（known-issues 开放-1 算力不足），会把任务拖死；
         agent few-shot 参照只需向量序 top_n（pgvector 已按余弦降序返回）。GPU TEI 就位后
         恢复精排（specs/agent-evolution.md §七触发线）。embed 瞬时故障（UpstreamError）
-        降级为 fail 观察喂回模型——检索不可用不应炸掉整个 run。"""
+        降级为 fail 观察喂回模型——检索不可用不应炸掉整个 run。
+
+        对齐主链路一把尺（retrieval-policy §6，工单 03）：embed 后先 match_qa 直答通道
+        （settings.qa_threshold 同主链路，命中即返问答对引用、跳过文档检索，与
+        prepare_turn 的 qa 短路同语义）；未命中走文档检索并按 chunk_dedup_sim 折叠
+        （fold_top_n 主/agent 共用纯函数）。熔断 open 态本工具天然 vector_only（无精排
+        可降、行为不变，用例锁定）；qa 阈值口径为 embedding 余弦（§4.4，不与 rerank 分混）。"""
         query = str(args.get("query", "")).strip()
         if not query:
             return ToolResult.fail("query 不能为空")
         settings = self._deps.settings
-        top_n = _clamp_top_n(args.get("top_n"), settings.rerank_top_n)
+        top_n = _clamp_top_n(args.get("top_n"), settings.rerank_top_n)  # 钳制逻辑保留（工单 02）
         dept_ids = list(ctx.dept_ids)  # 红线：只认调用者上下文，args 的部门字段一律无视
+        # 召回参数读 RetrievalPolicy（retrieval-policy §2/§6，工单 02/03/06）：档案覆盖经
+        # merge_policy 消费（resolver 产出为 base、TASK_PROFILES.profile_policy 为 override，
+        # None=无覆盖，本期两档案均 None=行为不变）；agent 无精排可降级，熔断态不参与路由。
+        policy = merge_policy(resolve_policy(query), self._deps.profile_policy)
         try:
             query_vec = self._deps.embedder.embed([query])[0]
-            hits = self._deps.store.search_chunks(
-                ctx.db, query_vec, dept_ids, settings.retriever_top_k, settings.hnsw_ef_search
+            # 直答通道：复用 VectorStore.match_qa（services/retrieval 现有函数，不另造）
+            qa_hit = self._deps.store.match_qa(ctx.db, query_vec, dept_ids, settings.qa_threshold)
+            hits = (
+                []
+                if qa_hit is not None
+                else self._deps.store.search_chunks(
+                    ctx.db, query_vec, dept_ids, policy.top_k, policy.ef_search
+                )
             )
         except UpstreamError as exc:
             logger.warning("knowledge_base_search 检索暂时不可用（降级为 fail 观察）: %s", exc)
             return ToolResult.fail("知识库检索暂时不可用，请稍后重试")
+        if qa_hit is not None:
+            return ToolResult.succeed(_qa_answer_payload(qa_hit))
         if not hits:
             return ToolResult.succeed({"items": [], "note": "知识库中未找到相关内容"})
+        folded = fold_top_n(hits, top_n, settings.chunk_dedup_sim)  # 主/agent 共用折叠纯函数
         items = [
             {
                 "title": hit.title,
@@ -131,9 +158,29 @@ class KnowledgeBaseSearchTool:
                 "excerpt": hit.content[:_EXCERPT_CHARS],
                 "score": round(hit.similarity, 4),
             }
-            for hit in hits[:top_n]  # store 已按向量余弦降序返回，截前 top_n 即可
+            for hit in folded  # store 已按向量余弦降序返回：fold_top_n 在向量序上截断+折叠
         ]
         return ToolResult.succeed({"items": items})
+
+
+def _qa_answer_payload(qa_hit: QaHit) -> dict[str, Any]:
+    """qa 直答 ToolResult 载荷：引用形态与主链路 qa 计划 citation 等价（chat_plans.qa_plan
+    同键：refType=qa、refId=问答对主键、title=问题），答案走 excerpt 通道（500 字截断
+    同预算）；score 为余弦相似度（qa 阈值口径，§4.4）；note 指引模型直答。"""
+    return {
+        "items": [
+            {
+                "refType": "qa",
+                "refId": qa_hit.qa_id,
+                "title": qa_hit.question,
+                "titlePath": "",
+                "page": None,
+                "excerpt": qa_hit.answer[:_EXCERPT_CHARS],
+                "score": round(qa_hit.similarity, 4),
+            }
+        ],
+        "note": "命中知识库问答对：excerpt 为标准答案，请直接据此回答用户问题",
+    }
 
 
 def _clamp_top_n(raw: Any, default: int) -> int:

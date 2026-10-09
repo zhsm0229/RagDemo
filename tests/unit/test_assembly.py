@@ -6,7 +6,8 @@ storage/converter 按 Settings 装配并缓存单例（findings I5 收敛后的�
 Settings 对应键；非 test_mode 且 llm_base_url 为空 → RuntimeError（§6.4 fail-fast）；
 load_prompt_pack 接受目录注入（tmp_path）：四文件齐备逐字段返回，缺任一文件
 RuntimeError；version 以 chat_system.txt 头注释 `# version:` 为唯一锚点，并与
-manifest.json 交叉校验，代码内不另设版本常量；memory_extract.txt 同样强制版本头
+manifest.json 交叉校验，代码内不另设版本常量；memory_extract.txt 与
+rewrite_multi_system.txt（retrieval-policy §4 三产物改写，工单 06）同样强制版本头
 （存在性校验，manifest 全局 version 不与其交叉）；无参调用对仓库 prompts/ 做逐字校验。
 Settings 一律 `_env_file=None` 直构，不触碰 get_settings() lru_cache 与仓库 .env
 （缓存契约见 app/core/config.py）。
@@ -166,15 +167,17 @@ def test_build_converter_assembles_fields_and_caches_per_key() -> None:
 
 _CHAT_TEXT = "# version: v9  （测试头注释）\n你是测试问答助手。\n"
 _REWRITE_TEXT = "# version: v9\n你是测试改写器。\n"
+_REWRITE_MULTI_TEXT = "# version: v9\n你是测试三产物改写器。\n"
 _MEMORY_TEXT = "# version: v9\n你是测试画像抽取器。\n"
 _MANIFEST_TEXT = '{"version": "v9", "temperature": 0.7}\n'
 
 
 def _write_pack(root: Path, *, skip: str | None = None) -> None:
-    """向 root 写四件套（skip 指定的文件不写），供 tmp_path 注入用例使用。"""
+    """向 root 写五件套（skip 指定的文件不写），供 tmp_path 注入用例使用。"""
     files: dict[str, str] = {
         "chat_system.txt": _CHAT_TEXT,
         "rewrite_system.txt": _REWRITE_TEXT,
+        "rewrite_multi_system.txt": _REWRITE_MULTI_TEXT,
         "memory_extract.txt": _MEMORY_TEXT,
         "manifest.json": _MANIFEST_TEXT,
     }
@@ -184,18 +187,26 @@ def _write_pack(root: Path, *, skip: str | None = None) -> None:
 
 
 def test_load_prompt_pack_reads_injected_dir_field_by_field(tmp_path: Path) -> None:
-    """tmp_path 注入四文件：五字段逐字段等于注入内容，version 取自头注释首 token。"""
+    """tmp_path 注入五文件：六字段逐字段等于注入内容，version 取自头注释首 token。"""
     _write_pack(tmp_path)
     pack = load_prompt_pack(tmp_path)
     assert pack.chat_system == _CHAT_TEXT
     assert pack.rewrite_system == _REWRITE_TEXT
+    assert pack.rewrite_multi_system == _REWRITE_MULTI_TEXT
     assert pack.memory_extract == _MEMORY_TEXT
     assert pack.version == "v9"  # 头注释 `# version: v9  （测试头注释）` 的首 token
     assert pack.temperature == 0.7
 
 
 @pytest.mark.parametrize(
-    "missing", ["chat_system.txt", "rewrite_system.txt", "memory_extract.txt", "manifest.json"]
+    "missing",
+    [
+        "chat_system.txt",
+        "rewrite_system.txt",
+        "rewrite_multi_system.txt",
+        "memory_extract.txt",
+        "manifest.json",
+    ],
 )
 def test_load_prompt_pack_missing_file_raises(tmp_path: Path, missing: str) -> None:
     """缺任一文件：RuntimeError 指名缺失文件，不静默回退。"""
@@ -230,6 +241,16 @@ _REPO_REWRITE = (
     "你是问题改写器。把用户的最新问题改写为不依赖对话历史、可独立理解的完整问题。\n"
     "只输出改写后的问题本身，不要任何解释、前缀或引号；若最新问题已独立完整，原样输出。\n"
 )
+_REPO_REWRITE_MULTI = (
+    "# version: v1  （§17.1 版本注释；任何修改须附评测对比 §17.3）\n"
+    "你是问题改写与意图分析器。把用户的最新问题改写为不依赖对话历史、可独立理解的完整问题，同时判断意图类型并拆解子问题。\n"
+    "只输出一个 JSON 对象，不要任何解释、前缀、引号或代码块标记，字段固定为：\n"
+    '{"rewritten": "改写后的完整问题", "intent": "single_hop 或 multi_hop", "subQueries": ["子问题", "..."]}\n'
+    "规则：\n"
+    "1. rewritten：改写后的独立完整问题；若最新问题已独立完整，原样输出。\n"
+    '2. intent：回答只需单一信息用 "single_hop"；需要综合多个实体、比较或因果链用 "multi_hop"。\n'
+    "3. subQueries：intent 为 multi_hop 时拆出至多 3 个可独立检索的子问题；single_hop 时输出 []。\n"
+)
 _REPO_MEMORY_EXTRACT = (
     "# version: v1  （§17.1 版本注释；任何修改须附评测对比 §17.3）\n"
     "你是用户画像抽取器。从下面给出的一轮问答（用户问题与助手回答）中，提取值得长期记住的用户稳定信息。\n"
@@ -244,10 +265,12 @@ _REPO_MEMORY_EXTRACT = (
 
 
 def test_load_prompt_pack_default_dir_returns_verbatim_repo_pack() -> None:
-    """无参调用：读仓库根 prompts/，chat/rewrite/memory_extract 与实现逐字全等，版本/温度取自文件。"""
+    """无参调用：读仓库根 prompts/，chat/rewrite/rewrite_multi/memory_extract 与实现逐字
+    全等，版本/温度取自文件。"""
     pack = load_prompt_pack()
     assert pack.chat_system == _REPO_CHAT
     assert pack.rewrite_system == _REPO_REWRITE
+    assert pack.rewrite_multi_system == _REPO_REWRITE_MULTI
     assert pack.memory_extract == _REPO_MEMORY_EXTRACT
     assert pack.version == "v1"
     assert pack.temperature == 0.2
@@ -258,5 +281,14 @@ def test_load_prompt_pack_memory_extract_without_version_header_raises(tmp_path:
     评测改动可比对 §17.3 的前提；版本号本身不并入全局 version、不与 manifest 交叉）。"""
     _write_pack(tmp_path)
     (tmp_path / "memory_extract.txt").write_text("没有版本头的抽取器提示\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="version"):
+        load_prompt_pack(tmp_path)
+
+
+def test_load_prompt_pack_rewrite_multi_without_version_header_raises(tmp_path: Path) -> None:
+    """rewrite_multi_system.txt 缺 `# version:` 头注释：RuntimeError（§17.4 提示词包
+    纪律同款，工单 06 三产物提示词版本化）。"""
+    _write_pack(tmp_path)
+    (tmp_path / "rewrite_multi_system.txt").write_text("没有版本头的三产物提示\n", encoding="utf-8")
     with pytest.raises(RuntimeError, match="version"):
         load_prompt_pack(tmp_path)

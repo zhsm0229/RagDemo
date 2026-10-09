@@ -36,11 +36,25 @@ class Settings(BaseSettings):
     daily_question_limit: int = 200  # 单用户每日提问上限
     qa_threshold: float = 0.85  # 问答对准入阈值（embedding 余弦相似度 ≥ 此值才走问答对直答；不得与 rerank 分混用，§4.4）
     refuse_threshold: float = 0.55  # 拒答阈值；两套阈值不得混用（standards §4.4）
+    fallback_refuse_threshold: float = (
+        0.63  # 降级态（rerank 故障/熔断 → 向量序兜底）拒答阈值，与 refuse_threshold
+        # 分轨不互比（§4.4）：取开放-2 对照命中带 0.63-0.71 下沿为保守下限，实测后按
+        # 降级态负例校准（retrieval-policy §3/§11 裁决 7）
+    )
+    rerank_breaker_enabled: bool = (
+        True  # rerank 熔断总闸（retrieval-policy §3）：手动关闭恒 closed 不记失败
+    )
     cache_ttl_s: int = 300  # 问答结果缓存 TTL（秒）
     retriever_top_k: int = 20  # 向量检索候选数 top_k
     rerank_top_n: int = 5  # 重排后保留条数 top_n
     chunk_dedup_sim: float = 0.98  # 检索结果去重相似度阈值
     hnsw_ef_search: int = 40  # pgvector HNSW 查询 ef_search
+    compute_tier: str = (
+        "cpu_constrained"  # 算力档位（retrieval-policy §2）：cpu_constrained（本机 CPU
+        # TEI 缺省）/ gpu（Mac Mini 部署档）——multi_query 等 A 类重手段的解锁闸
+        # （spec §1），消费方 app/rag/retrieval_policy.resolve_policy；代码缺省即现状，
+        # 与 agent_model_* 同款不进 .env.example 部署必填清单
+    )
     message_retention_days: int = 90  # 提问记录保留天数，超过即归档停用（两段式第一阶段，§7.3）
     message_cleanup_cooldown_days: int = 30  # 归档冷却天数，期满物理清理（两段式第二阶段，§4.6）
     # ---- 长期记忆（F-210，agent-evolution §三）：两项为代码缺省，非部署必填项，不进 .env.example ----

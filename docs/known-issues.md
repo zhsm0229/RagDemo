@@ -55,6 +55,7 @@ SSE 问答/生成链路的服务端流式调用不做进程内重试：**重试�
 | 裁决-3 | mineru compose 构建为 pipeline 后端 vs §12.5"必须 ONNX 后端" | 换 ONNX 镜像 or 修订标准（随 MinerU 实际部署一并裁决） |
 | 裁决-4 | compose 注释引用不存在的 make-dev-models 目标 | 补 Makefile 目标 or 改注释（按 download_models.py 实际入口已登记 runbook） |
 | 裁决-5 | frontend/e2e lint 归口（见开放-8④） | e2e 车道自清 or eslint 例外 |
+| 裁决-6 | 动态 top_p：生成参数动态化无收益证据，retrieval-policy §1 定为 C 类纪律永久门（不做）；本条为登记裁决备查（2026-10-09，工单 02 随 standards §25.3-7 A/B/C 改写落档），非缺陷 | 维持不做（缺省口径）/ 未来重启须附 §17.3 四指标跑分对比证据 |
 
 ## 三、已修复关闭（本机部署验收后）
 

@@ -20,9 +20,10 @@ import { ABORTED_CODE, ApiClientError } from '@/api/client'
 import { NON_RETRYABLE_PRESTREAM_CODES, streamChat, type MessageItem } from '@/api/chat'
 import type { ChatStreamEvent, CitationItem, FeedbackKind } from '@/api/types'
 
-/** 连接停滞阈值：覆盖 CPU TEI 慢重排的检索期（rerank 20 条实测 ~110s，known-issues
- * 开放-1 算力不足）；45s 问答口径在当前语料规模下会把"检索慢"误杀为"连接停滞" */
-export const STALL_TIMEOUT_MS = 240_000
+/** 连接停滞阈值：覆盖 CPU TEI 慢重排的检索期（rerank_timeout_s=120s × TEI 内部重试
+ * 2 次 = 最坏 240s，retrieval-policy §5：与 240s 相等属先到先判竞态，故取 300s 留出
+ * 熔断余量；后端 120s 实测口径不动） */
+export const STALL_TIMEOUT_MS = 300_000
 /** 单次回答总时长兜底（慢检索 + 流式生成余量），到点强判失败 */
 export const TOTAL_TIMEOUT_MS = 420_000
 
@@ -50,6 +51,8 @@ export interface ChatMessage {
   startedAt: number | null
   refused: boolean
   cacheHit: boolean
+  /** 检索上游降级轮"简化检索"轻标注（retrieval-policy §5；done 旧帧/历史缺省按 false 兜底） */
+  degraded: boolean
   /** done 事件下发的用量（对照原型 msg-meta 的 token·耗时；历史接口无此字段恒 null） */
   promptTokens: number | null
   completionTokens: number | null
@@ -91,6 +94,7 @@ function userMessage(question: string, keyOf: () => number): ChatMessage {
     startedAt: null,
     refused: false,
     cacheHit: false,
+    degraded: false,
     promptTokens: null,
     completionTokens: null,
     durationMs: null,
@@ -114,6 +118,7 @@ function assistantPlaceholder(keyOf: () => number): ChatMessage {
     startedAt: Date.now(),
     refused: false,
     cacheHit: false,
+    degraded: false,
     promptTokens: null,
     completionTokens: null,
     durationMs: null,
@@ -144,6 +149,7 @@ export function mapHistory(items: MessageItem[], keyOf: () => number): ChatMessa
       startedAt: null,
       refused: item.answerType === 'refuse',
       cacheHit: item.cacheHit,
+      degraded: item.degraded ?? false,
       promptTokens: null,
       completionTokens: null,
       durationMs: null,
@@ -171,6 +177,7 @@ export function mapHistory(items: MessageItem[], keyOf: () => number): ChatMessa
         startedAt: null,
         refused: false,
         cacheHit: false,
+        degraded: false,
         promptTokens: null,
         completionTokens: null,
         durationMs: null,
@@ -201,6 +208,7 @@ function applyEvent(message: ChatMessage, event: ChatStreamEvent): void {
       message.id = event.messageId
       message.refused = event.refused
       message.cacheHit = event.cacheHit
+      message.degraded = event.degraded ?? false // 旧帧容错（retrieval-policy §5）
       message.promptTokens = event.promptTokens
       message.completionTokens = event.completionTokens
       message.durationMs = event.durationMs

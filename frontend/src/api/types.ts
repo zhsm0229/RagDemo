@@ -77,6 +77,8 @@ export interface ChatDoneEvent {
   messageId: number
   refused: boolean
   cacheHit: boolean
+  /** 检索上游降级轮（retrieval-policy §5）：仅 done 携带；embed 拒答或 rerank 向量序兜底为 true */
+  degraded: boolean
   promptTokens: number
   completionTokens: number
   durationMs: number
