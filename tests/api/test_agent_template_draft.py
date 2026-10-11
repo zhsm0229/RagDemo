@@ -199,7 +199,7 @@ def sandbox_storage(tmp_path, monkeypatch):
 def agent_client(session, fake_clock, test_mode, sandbox_storage, monkeypatch):
     """模板生成任务测试客户端：三处短会话工厂指向测试连接（agent_runs 生成器/收尾、
     agent_bridge 工具调用、agent_steps 轨迹落库）；剧本通道逐用例经 _use_turns 注入
-    （fresh 实例保 _calls 归零）。"""
+    （通道已无实例状态，fresh 实例只为换剧本）。"""
     from app.api.deps import get_db
     from app.services import agent_bridge, agent_runs, agent_steps
     from app.services.auth import default_limiter

@@ -113,22 +113,25 @@ def _build_chat_deps(settings: Settings) -> ChatDeps:
 
 class ScriptedAgentChannel:
     """脚本化确定性通道（test_mode agent 装配用，Stub 三件套同哲学：同输入必同输出、
-    零网络）。按脚本顺序吐 ChannelTurn，脚本耗尽后恒重放末条（agent 循环多轮也不失
-    控）。定义在装配模块而非 core：core 只承载协议与适配层，业务剧本属装配选择
-    （main 内定义实现类有 _HashedAssets 先例）。"""
+    零网络）。进度 = 对话里已有的工具结果条数（agent 循环每收一个观察回灌一条 tool
+    消息）：0 条发首回合、N 条发第 N+1 回合，脚本耗尽恒重放末条——无实例状态，
+    lifespan 级单例跨 run 安全（实例计数版会让第二个 run 起恒拿末条正文、无工具步，
+    AGENT-01 时间线断言随机挂，2026-10-11 重启容器 A/B 实验实证）。定义在装配模块
+    而非 core：core 只承载协议与适配层，业务剧本属装配选择（main 内定义实现类有
+    _HashedAssets 先例）。"""
 
     def __init__(self, turns: list[ChannelTurn]) -> None:
         if not turns:
             raise ValueError("脚本化通道至少需要一个回合")
         self._turns = turns
-        self._calls = 0
 
     def complete(
         self, messages: Any, tools: Any, max_tokens: int
-    ) -> ChannelTurn:  # AgentModelChannel 协议面：messages/tools 只透传不消费
-        index = min(self._calls, len(self._turns) - 1)
-        self._calls += 1
-        return self._turns[index]
+    ) -> ChannelTurn:  # AgentModelChannel 协议面：tools 只透传不消费
+        tool_results = sum(
+            1 for m in messages if isinstance(m, dict) and m.get("role") == "tool"
+        )
+        return self._turns[min(tool_results, len(self._turns) - 1)]
 
 
 # test_mode 装配的 agent 演示剧本（ScriptedAgentChannel 注入）：
