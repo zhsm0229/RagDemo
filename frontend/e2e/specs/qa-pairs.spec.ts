@@ -47,10 +47,8 @@ test.describe('问答对管理', () => {
     await chat.ask('报销的时限是多少天')
     await expect(page.locator('#cite-card-1')).toBeVisible()
     await expect(page.locator('.cite-panel, [class*="cite"]').last()).not.toContainText('问答对')
-    await expect(
-      page.locator('.el-table__row', { hasText: '年假有几天' }).first().getByRole('switch'),
-    ).not.toBeChecked()
     // QA-05 断言（口径修正）：停用=行保留 + 启用开关关断（退出匹配），行不消失
+    // （switch 断言必须打在管理页——下方 qa.goto() 之后；此前错位到 chat 页必超时）
     await qa.goto()
     const row = page.locator('.el-table__row', { hasText: '年假有几天' }).first()
     await expect(row).toBeVisible()

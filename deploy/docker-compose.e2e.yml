@@ -15,3 +15,8 @@ services:
       # 图片 OCR（F-1017）依赖真实 MinerU：L1 确定性层显式关闭，
       # 防宿主 .env 的 IMAGE_OCR_ENABLED=true 泄入使含图用例超时（2026-10-06 DOC-25 教训）
       IMAGE_OCR_ENABLED: "false"
+      # 扫描件主解析链同理清空（空=pypdf 降级，parser.py 分型选择器）：防宿主/主 compose
+      # 的 MINERU_BASE_URL 泄入使扫描件用例跑真实 OCR——8G 机单件数百秒 >> 用例超时，
+      # 且占满解析线程池连坐后续上传用例（2026-10-11 DOC-10/01/13/QA 雪崩根因）。
+      # DOC-10 在本栈恒走"缺位=红线失败"分支；OCR 就绪分支由部署机 L2 覆盖
+      MINERU_BASE_URL: ""

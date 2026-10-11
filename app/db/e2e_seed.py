@@ -225,7 +225,10 @@ def _write_upload_fixture() -> None:
 
     out_dir = Path("/srv/ragdemo/data/e2e")
     out_dir.mkdir(parents=True, exist_ok=True)
-    stamp = str(time.time()).replace(".", "")
+    # 10 位秒级（<13 位）：13-19 位纯数字串会进银行卡敏感扫描并按 ~1/10 概率过
+    # Luhn → 文档被判敏感命中 is_active=False 待确认 → 评测题来源匹配 422、setup
+    # 随机挂（2026-10-11 第六轮根因；17 位毫秒串整串命中 _BANK_CARD_RE）
+    stamp = str(int(time.time()))
     for name, paragraphs in _FIXTURE_TEMPLATES:
         doc = Document()
         doc.add_heading("员工差旅费报销小样", level=0)

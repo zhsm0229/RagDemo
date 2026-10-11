@@ -24,10 +24,11 @@ export class BadcasePage {
   /** ADM-03：忽略不填理由 → 前端内联拦截，弹窗不关。返回内联错误文本。 */
   async ignoreWithoutReason(): Promise<string> {
     const dialog = this.page.locator('.el-dialog').last()
-    await dialog
-      .getByRole('radio', { name: /忽略/ })
-      .check()
-      .catch(() => dialog.getByText('忽略', { exact: false }).first().click())
+    // 点 .el-radio 容器（EP 原生 input 隐藏，check()/getByText 都可能不切换）；
+    // 不切中「忽略」则默认「更新文档」模式备注非必填，提交会直接成功关弹窗
+    const ignoreRadio = dialog.locator('.el-radio', { hasText: '忽略' })
+    await ignoreRadio.click()
+    await expect(ignoreRadio.locator('input')).toBeChecked()
     await dialog.getByRole('button', { name: /确定|提交/ }).click()
     const err = dialog.locator('.el-form-item__error').last()
     await expect(err).toBeVisible()
@@ -39,7 +40,9 @@ export class BadcasePage {
   /** 处置提交（radio 处理/忽略 + 理由），成功关弹窗。 */
   async dispose(reason: string, mode: '处理' | '忽略' = '处理'): Promise<void> {
     const dialog = this.page.locator('.el-dialog').last()
-    await dialog.getByText(mode, { exact: false }).first().click()
+    // radio 实际文案：「更新文档/补问答对」=处理、「忽略（说明理由）」=忽略
+    const radioText = mode === '处理' ? '更新文档' : '忽略'
+    await dialog.locator('.el-radio', { hasText: radioText }).click()
     const note = dialog.locator('textarea')
     if (await note.count()) await note.fill(reason)
     await dialog.getByRole('button', { name: /确定|提交/ }).click()

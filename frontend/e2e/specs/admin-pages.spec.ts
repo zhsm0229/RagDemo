@@ -62,11 +62,20 @@ test.describe('管理页（检索测试/提问记录/审计/评测）', () => {
   })
 
   test('ADM-09: 审计日志过滤 + CSV 导出', async ({ page }) => {
+    // 前置自足：user.create 审计由本用例经 API 自建（ADM-04 是 UI 建号且按文件字典序
+    // 更晚执行，依赖它会顺序翻车）；审计在 POST 事务内同步落库
+    // 用户名仅中文/字母/数字（§21.5，下划线会被 422 拒）
+    const uname = `e2eaudit${Date.now()}`
+    const created = await page.request.post('/api/admin/users', {
+      data: { username: uname, deptCode: 'all', role: 'member' },
+    })
+    if (!created.ok())
+      throw new Error(`审计前置建号失败: ${created.status()} ${await created.text()}`)
     await page.goto('/admin/audit')
     await expect(page.locator('.el-table__row').first()).toBeVisible() // 无过滤先见记录
     await page.locator('input[placeholder*="动作"]').fill('user.create')
     await page.getByRole('button', { name: '查询' }).click()
-    await expect(page.locator('.el-table__row').first()).toBeVisible() // ADM-04 建号动作已留痕
+    await expect(page.locator('.el-table__row', { hasText: 'user.create' }).first()).toBeVisible() // 建号动作已留痕（动作列；详情 payload 不逐字段入行文本）
     const download = page.waitForEvent('download', { timeout: 15_000 }).catch(() => null)
     await page.locator('[data-test="export-btn"]').click()
     expect(await download).not.toBeNull() // CSV 导出可下载
@@ -84,7 +93,11 @@ test.describe('管理页（检索测试/提问记录/审计/评测）', () => {
       .getByRole('button', { name: /导入|确定/ })
       .last()
       .click()
-    // 页面明示"题库列表暂无查询端点"：断言导入弹窗关闭（成功路径）即可
+    // UI 契约（ImportEvalDialog）：成功后弹窗切结果视图等用户点「关闭」，从不自动关；
+    // 断成功标题可见 → 点「关闭」→ 弹窗收起（题库导入后端无去重，重复导入合法再插行）
+    await expect(dialog.getByText(/导入完成：本批 \d+ 条评测题已入库/)).toBeVisible()
+    // exact：弹窗 header 自带「关闭此对话框」，子串匹配会 strict violation
+    await dialog.getByRole('button', { name: '关闭', exact: true }).click()
     await expect(dialog).toBeHidden({ timeout: 15_000 })
   })
 

@@ -27,17 +27,22 @@ test.describe('缓存与会话管理', () => {
     await chat.newConversation()
     await chat.ask(QUESTION)
     await chat.expectConversationListed(QUESTION)
-    const item = page.locator('.conv-item', { hasText: QUESTION }).first()
+    // setup ④ 的 API 提问与 CHAT-05 等用例会建同名会话（标题=首问截断，DOM 无唯一
+    // 标识），断言"删一个少一个"而非同名清零
+    const items = page.locator('.conv-item', { hasText: QUESTION })
+    const before = await items.count()
+    const item = items.first()
     await item.hover()
     await item
       .getByRole('button', { name: '删除' })
       .click({ force: true })
       .catch(() => item.evaluate((el) => (el.querySelector('.del') as HTMLElement | null)?.click()))
-    // 二次确认（ElMessageBox，§22.2 禁遮罩关闭）
+    // 二次确认（ElMessageBox，§22.2 禁遮罩关闭）；必须收窄到弹窗容器——同名会话行内
+    // hover 的「删除」钮也匹配 /确定|删除/，page 级 .last() DOM 序不定会点错（删除不生效）
     await page
+      .locator('.el-message-box')
       .getByRole('button', { name: /确定|删除/ })
-      .last()
       .click()
-    await expect(page.locator('.conv-item', { hasText: QUESTION })).toHaveCount(0)
+    await expect(items).toHaveCount(before - 1)
   })
 })

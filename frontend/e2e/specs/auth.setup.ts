@@ -80,12 +80,13 @@ setup('prepare login states', async ({ playwright }) => {
     await loginAndSave(ctx, 'e2e-admin', '.auth/admin.json')
 
     // ---- 数据预置（清库后自足，执行顺序无关化）----
-    // ① 三份文档入库（TEST_MODE 同步解析出块，供检索测试/问答引用）；
-    //   svc-only 归属客服部门（SEC-AGENT-01 串库边界断言的越界标记源），其余为全员。
+    // ① 两份文档入库（TEST_MODE 同步解析出块，供检索测试/问答引用）；
+    //   svc-only 归属客服部门（SEC-AGENT-01 串库边界断言的越界标记源），latest 为全员。
+    //   docspec 不再预置：其夹具字节与 DOC-01 专用（同内容再传必撞 F-1001 查重，
+    //   2026-10-11 第四轮 DOC-01 根因）。
     const dataDir = path.resolve(repoRoot, 'data/uploads/e2e')
     for (const [name, title, dept] of [
       ['e2e-upload-latest.docx', 'e2e_差旅报销制度_预置', 'all'],
-      ['e2e-upload-docspec.docx', 'e2e_DOC01专用文档_预置', 'all'],
       ['e2e-svc-only.docx', 'e2e_客服专属话术_预置', 'service'],
     ] as const) {
       const buffer = fs.readFileSync(path.join(dataDir, name))
@@ -107,23 +108,9 @@ setup('prepare login states', async ({ playwright }) => {
         throw new Error(`预置上传失败 ${name}: ${up.status()} ${await up.text()}`)
       }
     }
-    // ② 问答对导入（年假行供 QA-05 启停用例）
-    const qaXlsx = fs.readFileSync(
-      path.resolve(repoRoot, 'frontend/e2e/fixtures/files/qa_合规.xlsx'),
-    )
-    const qa = await ctx.post('/api/admin/qa-pairs/import', {
-      multipart: {
-        file: {
-          name: 'qa_合规.xlsx',
-          mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-          buffer: qaXlsx,
-        },
-        deptCode: 'all',
-      },
-    })
-    if (qa.status() !== 201 && qa.status() !== 200) {
-      throw new Error(`预置问答对导入失败: ${qa.status()} ${await qa.text()}`)
-    }
+    // ② 问答对导入已移除：qa-pairs.spec 的 QA-01 自己 UI 导入同一夹具，setup 预导入
+    //   会造成「年假有几天」双行歧义（QA-07 删一行后 expectRowAbsent 永不满足，
+    //   2026-10-11 第四轮 QA-05/06/07 根因）；QA-05 另有 count===0 兜底导入
     // ③ 评测题库导入（EVAL 域用例数据）
     const evalXlsx = fs.readFileSync(
       path.resolve(repoRoot, 'frontend/e2e/fixtures/files/eval_题库.xlsx'),

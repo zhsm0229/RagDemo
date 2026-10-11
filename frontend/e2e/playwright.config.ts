@@ -12,6 +12,10 @@ export default defineConfig({
   timeout: 120_000, // 上传同步解析 + SSE 全程留余量（L2 CPU rerank 更慢）
   expect: { timeout: 15_000 },
   fullyParallel: false, // 种子数据（账号/问答对）共享，串行最稳
+  // workers=1 落实上一行意图：默认 4 worker 各驻留一个浏览器进程，headed 下叠加
+  // TEI×2+MinerU 容器把 12G 内存打满，Edge 渲染进程被 OOM（"browser has been
+  // closed" 随机命中后续用例，2026-10-11 第五轮 DOC-13/01/QA 连环崩根因）
+  workers: 1,
   retries: process.env.CI ? 1 : 0,
   reporter: [['list'], ['html', { outputFolder: './.artifacts/report', open: 'never' }]],
   use: {

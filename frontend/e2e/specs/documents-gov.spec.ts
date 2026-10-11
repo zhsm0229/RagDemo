@@ -7,6 +7,7 @@ import { DocumentsPage } from '../pages/DocumentsPage'
 const LATEST = fileURLToPath(
   new URL('../../../data/uploads/e2e/e2e-upload-latest.docx', import.meta.url),
 )
+const V1 = fileURLToPath(new URL('../../../data/uploads/e2e/e2e-doc13-v1.docx', import.meta.url))
 const V2 = fileURLToPath(new URL('../../../data/uploads/e2e/e2e-doc13-v2.docx', import.meta.url))
 const REDLINE = fileURLToPath(
   new URL('../../../data/uploads/e2e/e2e-fail-redline.docx', import.meta.url),
@@ -81,7 +82,9 @@ test.describe('文档治理', () => {
       title,
       owner: 'e2e-bot',
     })
-    // 双终态均为正确产品行为：MinerU 在位 → OCR 解析就绪；缺位 → §10.3 红线失败
+    // 双终态均为正确产品行为：MinerU 在位 → OCR 解析就绪；缺位 → §10.3 红线失败。
+    // E2E 栈隔离 MinerU（e2e override 清空 MINERU_BASE_URL）→ 恒走缺位分支秒级失败；
+    // OCR 就绪分支（数百秒/件）本机不测，由部署机 L2 覆盖
     const ready = page
       .locator('.el-table__row', { hasText: title })
       .locator('.el-tag', { hasText: '就绪' })
@@ -94,7 +97,8 @@ test.describe('文档治理', () => {
   test('DOC-11: 失败文档可重试（状态回解析再终态）', async () => {
     const title = `e2e_重试_${Date.now()}`
     await docs.uploadAllowFailure(REDLINE, { title, owner: 'e2e-bot' })
-    await docs.filterByStatusFailed()
+    // 默认列表按时间倒序，刚上传的失败行在最前，无需状态筛选
+    // （filterByStatusFailed 从未在页对象实现过，c85bc74 引用的规划 API，调用必 TypeError）
     await docs.expectRowFailed(title)
     await docs.retry(title) // 重试 → parsing → 仍失败（扫描件确定性），但状态机走通
     await docs.expectRowFailed(title)
@@ -102,7 +106,9 @@ test.describe('文档治理', () => {
 
   test('DOC-13: 同标题传新版本 → 旧版归档，仅新版生效', async ({ page }) => {
     const title = `e2e_版本_${Date.now()}`
-    await docs.upload(LATEST, { title, owner: 'e2e-bot' })
+    // v1 必须用专用夹具：LATEST 与 setup 的预置文档字节同源，首传即撞 F-1001 查重
+    // （2026-10-11 第四轮根因——c85bc74 造了 v1/v2 夹具，用例却仍在传 LATEST）
+    await docs.upload(V1, { title, owner: 'e2e-bot' })
     await docs.expectRowReady(title)
     // 内容不同（绕开 F-1001 查重）+ 同标题同部门 → 版本递增，旧版归档
     await docs.uploadAllowFailure(V2, { title, owner: 'e2e-bot' })

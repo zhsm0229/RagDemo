@@ -12,8 +12,14 @@ test('AGENT-01: 发起模板生成，时间线与草稿按 AG-UI 事件序呈现
   await page
     .locator('.el-select-dropdown__item:visible', { hasText: 'e2e_差旅报销制度_预置' })
     .click()
+  // 等前一个 popper 真收起再开下一个：文档 popper 收起动画中点 .cfg-dept，
+  // 部门项的 click 会落在过渡态上不生效（第五轮根因：部门未选→开始生成被前端
+  // 校验静默拦截→无请求无 run，时间线断言空等超时）
+  await expect(page.locator('.el-select-dropdown:visible')).toHaveCount(0)
   await page.locator('.cfg-dept').click()
   await page.locator('.el-select-dropdown__item:visible', { hasText: '客服' }).click()
+  // 选中态显式断言：部门未选中时「开始生成」不发请求（上面竞态若复发在此红，不空等时间线）
+  await expect(page.locator('.cfg-dept')).toContainText('客服')
   await page.getByRole('button', { name: '开始生成' }).click()
 
   // 时间线：0 号"已提交生成任务"伪节点收口后，脚本首轮 = STEP_STARTED + TOOL_CALL 组
