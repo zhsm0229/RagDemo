@@ -6,6 +6,7 @@
 
 import logging
 import os
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -204,7 +205,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     add_hit_flush_job(scheduler, chat_deps.hit_counter, settings.cache_ttl_s)
     app.state.chat_deps = chat_deps
     app.state.agent_deps = _build_agent_deps(settings, chat_deps)
-    _startup_catchup(settings)
+    # 启动补偿放后台线程：合成/跑分是分钟-小时级 LLM 任务，同步执行会阻塞 lifespan
+    # （healthz 不就绪、端口不监听——2026-10-31 dev 实测教训）；daemon=True 随进程退出
+    threading.Thread(target=_startup_catchup, args=(settings,), daemon=True, name="eval-catchup").start()
     try:
         yield
     finally:
