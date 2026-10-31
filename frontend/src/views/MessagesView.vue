@@ -152,7 +152,7 @@ function formatTime(iso: string): string {
       <span v-if="filterErr" class="err-inline" role="alert">{{ filterErr }}</span>
     </div>
 
-    <el-table v-loading="loading" :data="items" border stripe>
+    <el-table v-loading="loading" :data="items" border stripe max-height="560">
       <el-table-column label="时间" width="150">
         <template #default="{ row }">{{ formatTime(row.createdAt) }}</template>
       </el-table-column>

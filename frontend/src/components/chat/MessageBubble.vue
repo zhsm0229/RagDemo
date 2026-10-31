@@ -149,6 +149,7 @@ onUnmounted(() => {
         <el-button
           link
           size="small"
+          aria-label="点赞：回答有帮助"
           :type="message.feedback === 'up' ? 'primary' : ''"
           @click="emit('like')"
           >👍</el-button
@@ -156,6 +157,7 @@ onUnmounted(() => {
         <el-button
           link
           size="small"
+          aria-label="点踩：回答有问题"
           :type="message.feedback === 'down' ? 'danger' : ''"
           @click="emit('dislike')"
           >👎</el-button

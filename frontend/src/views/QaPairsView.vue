@@ -201,7 +201,7 @@ function formatTime(iso: string): string {
       <el-button type="primary" @click="importVisible = true">Excel 批量导入</el-button>
     </div>
 
-    <el-table v-loading="loading" :data="items" border stripe>
+    <el-table v-loading="loading" :data="items" border stripe max-height="560">
       <el-table-column label="问题" min-width="220" show-overflow-tooltip>
         <template #default="{ row }">{{ row.question }}</template>
       </el-table-column>

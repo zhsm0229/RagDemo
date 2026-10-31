@@ -187,7 +187,7 @@ function objectText(row: AuditLogItem): string {
       @close="actionErr = ''"
     />
 
-    <el-table v-loading="loading" :data="items" border stripe row-key="id">
+    <el-table v-loading="loading" :data="items" border stripe max-height="560" row-key="id">
       <el-table-column type="expand">
         <template #default="{ row }">
           <pre class="detail-json" data-test="detail-json">{{ formatAuditDetail(row.detail) }}</pre>

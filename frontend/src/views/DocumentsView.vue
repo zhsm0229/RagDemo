@@ -402,7 +402,7 @@ function onZipImported(): void {
       <el-button type="primary" @click="uploadVisible = true">＋ 上传文档</el-button>
     </div>
 
-    <el-table v-loading="loading" :data="items" border stripe>
+    <el-table v-loading="loading" :data="items" border stripe max-height="560">
       <el-table-column label="标题" min-width="200">
         <template #default="{ row }">
           {{ row.title }} <span class="ver">v{{ row.version }}</span>

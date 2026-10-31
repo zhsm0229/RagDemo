@@ -130,7 +130,7 @@ function formatTime(iso: string): string {
       <el-button @click="resetFilters">重置</el-button>
     </div>
 
-    <el-table v-loading="loading" :data="items" border stripe>
+    <el-table v-loading="loading" :data="items" border stripe max-height="560">
       <el-table-column label="时间" width="150">
         <template #default="{ row }">{{ formatTime(row.createdAt) }}</template>
       </el-table-column>
@@ -171,7 +171,7 @@ function formatTime(iso: string): string {
       <template #empty>
         <!-- 空态双分支（B11/工单 08）：加载失败可重试优先于真空态 -->
         <LoadErrorState v-if="loadError" data-test="badcases-load-error" @retry="load" />
-        <el-empty v-else description="没有待处理的 badcase" :image-size="60" />
+        <el-empty v-else description="没有待处理的问题反馈" :image-size="60" />
       </template>
     </el-table>
 

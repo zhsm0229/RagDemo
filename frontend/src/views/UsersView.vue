@@ -170,7 +170,7 @@ function formatTime(iso: string | null): string {
       @close="actionErr = ''"
     />
 
-    <el-table v-loading="loading" :data="items" border stripe>
+    <el-table v-loading="loading" :data="items" border stripe max-height="560">
       <el-table-column prop="username" label="用户名" width="140" />
       <el-table-column prop="name" label="姓名" width="110" />
       <el-table-column label="部门" width="110">

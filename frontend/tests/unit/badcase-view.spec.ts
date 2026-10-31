@@ -92,9 +92,9 @@ describe('列表加载与渲染', () => {
     expect(rows[1]!.findAll('button').some((b) => b.text().includes('处理'))).toBe(false)
   })
 
-  it('空队列展示"没有待处理的 badcase"空态', async () => {
+  it('空队列展示"没有待处理的问题反馈"空态', async () => {
     const wrapper = await mountBadcase()
-    expect(wrapper.text()).toContain('没有待处理的 badcase')
+    expect(wrapper.text()).toContain('没有待处理的问题反馈')
   })
 })
 
@@ -289,7 +289,7 @@ describe('api 层契约（路径/方法/参数钉死）', () => {
 // ---- 加载失败错误态（工单 08：失败 ≠ 没有数据，错误态先于空态呈现"点击重试"） ----
 
 describe('加载失败错误态（工单 08）', () => {
-  it('加载失败空态显示"加载失败，点击重试"而非"没有待处理的 badcase"，重试成功恢复列表', async () => {
+  it('加载失败空态显示"加载失败，点击重试"而非"没有待处理的问题反馈"，重试成功恢复列表', async () => {
     badcaseItem({ questionPreview: '恢复用 badcase' })
     fetchMock.mockImplementation((url: string, init: RequestInit = {}) => {
       if (String(url).startsWith('/api/admin/badcases?') && (init.method ?? 'GET') === 'GET') {
@@ -300,7 +300,7 @@ describe('加载失败错误态（工单 08）', () => {
     const wrapper = await mountBadcase()
     expect(wrapper.find('[data-test="badcases-load-error"]').exists()).toBe(true)
     expect(wrapper.text()).toContain('加载失败，点击重试')
-    expect(wrapper.text()).not.toContain('没有待处理的 badcase') // 失败 ≠ 没有数据
+    expect(wrapper.text()).not.toContain('没有待处理的问题反馈') // 失败 ≠ 没有数据
     // 后端恢复后点重试：列表恢复、错误态退场
     fetchMock.mockImplementation(routeFetch)
     await wrapper.find('[data-test="badcases-load-error"]').trigger('click')

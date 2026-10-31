@@ -49,7 +49,7 @@ async function submit(): Promise<void> {
     return
   }
   if (trimmed.length === 0) {
-    error.value = '点踩必须填写备注（帮助定位 badcase）'
+    error.value = '点踩必须填写备注（帮助定位回答问题）'
     return
   }
   if (trimmed.length > 500) {
@@ -95,7 +95,7 @@ async function submit(): Promise<void> {
           type="textarea"
           :rows="3"
           maxlength="500"
-          placeholder="请描述问题，帮助定位 badcase"
+          placeholder="请描述问题，帮助定位回答问题"
         />
       </el-form-item>
       <div v-if="error !== null" class="err-inline">{{ error }}</div>

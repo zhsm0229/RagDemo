@@ -223,7 +223,7 @@ describe('消息反馈（F-208/CHAT-09）', () => {
 
     await chooseCategory(wrapper, '答案错误')
     await clickDialogButton(wrapper, '提交反馈')
-    expect(dialogText(wrapper)).toContain('点踩必须填写备注（帮助定位 badcase）')
+    expect(dialogText(wrapper)).toContain('点踩必须填写备注（帮助定位回答问题）')
     expect(backend.feedbackCalls).toHaveLength(0)
 
     await setComment(wrapper, '引用与问题无关')

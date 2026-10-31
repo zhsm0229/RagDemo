@@ -162,7 +162,7 @@ function formatTime(iso: string): string {
         <el-button :loading="rescanning" @click="onRescan">重扫待补语料</el-button>
       </el-tooltip>
     </div>
-    <el-table v-loading="loading" :data="items" border stripe>
+    <el-table v-loading="loading" :data="items" border stripe max-height="560">
       <el-table-column prop="questionText" label="用户问题" min-width="220" show-overflow-tooltip />
       <el-table-column label="来源" width="80">
         <template #default="{ row }">{{

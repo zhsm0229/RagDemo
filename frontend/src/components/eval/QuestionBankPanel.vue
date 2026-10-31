@@ -127,7 +127,7 @@ function formatTime(iso: string): string {
       />
       <el-button type="primary" @click="search">查询</el-button>
     </div>
-    <el-table v-loading="loading" :data="items" border stripe>
+    <el-table v-loading="loading" :data="items" border stripe max-height="560">
       <el-table-column prop="id" label="ID" width="70" />
       <el-table-column prop="question" label="问题" min-width="220" show-overflow-tooltip />
       <el-table-column label="部门" width="80">

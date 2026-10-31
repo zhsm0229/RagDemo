@@ -153,7 +153,7 @@ function formatTime(iso: string): string {
             <el-button type="primary" @click="createVisible = true">发起跑分</el-button>
           </el-tooltip>
         </div>
-        <el-table v-loading="loading" :data="items" border stripe>
+        <el-table v-loading="loading" :data="items" border stripe max-height="560">
           <el-table-column prop="name" label="名称" min-width="160" />
           <el-table-column label="状态" width="100">
             <template #default="{ row }">

@@ -51,7 +51,7 @@ const menuGroups = computed<MenuGroup[]>(() => {
         { path: '/admin/retrieval-test', label: '检索测试' },
         { path: '/admin/users', label: '用户管理' },
         { path: '/admin/messages', label: '提问记录' },
-        { path: '/admin/badcase', label: 'badcase 管理' },
+        { path: '/admin/badcase', label: '问题反馈管理' },
         { path: '/admin/eval', label: '评测管理' },
         { path: '/admin/overview', label: '运营概览' },
         { path: '/admin/audit', label: '审计日志' },
