@@ -191,6 +191,8 @@ function formatTime(iso: string): string {
   align-items: center;
   gap: 8px;
   margin-bottom: 12px;
+  /* 工单 18 窄屏兜底：4 下拉+输入+按钮最易挤压，折行避免横向溢出 */
+  flex-wrap: wrap;
 }
 .pager-row {
   display: flex;

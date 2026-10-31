@@ -222,6 +222,8 @@ function formatTime(iso: string): string {
   align-items: center;
   gap: 8px;
   margin-bottom: 12px;
+  /* 工单 18 窄屏兜底：题库动作行/跑分行控件挤压时折行，避免横向溢出 */
+  flex-wrap: wrap;
 }
 .pager-row {
   display: flex;

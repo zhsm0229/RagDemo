@@ -223,6 +223,8 @@ function formatTime(iso: string): string {
   align-items: center;
   gap: 8px;
   margin-bottom: 12px;
+  /* 工单 18 窄屏兜底：筛选下拉与动作按钮挤压时折行，避免横向溢出 */
+  flex-wrap: wrap;
 }
 .pager-row {
   display: flex;
