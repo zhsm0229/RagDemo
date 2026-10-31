@@ -11,6 +11,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import KnowledgeGapCard from '@/components/overview/KnowledgeGapCard.vue'
 import ServicesHealthPanel from '@/components/admin/ServicesHealthPanel.vue'
+import { ApiClientError } from '@/api/client'
 import { getHealth, getOverview, type HealthData, type OverviewData } from '@/api/overview'
 import { deptCodeLabel } from '@/components/admin/options'
 import { fmtTime } from '@/utils/format'
@@ -19,6 +20,8 @@ const days = ref<1 | 7>(1)
 const loading = ref(false)
 const overview = ref<OverviewData | null>(null)
 const health = ref<HealthData | null>(null)
+/** 概览加载失败信息（工单 08）：catch 静默会让"接口挂了"伪装成"数据为零"，补内联错误 + 重试 */
+const loadErr = ref('')
 
 const router = useRouter()
 
@@ -26,8 +29,10 @@ async function load(): Promise<void> {
   loading.value = true
   try {
     overview.value = await getOverview(days.value)
-  } catch {
-    // client 已统一 toast；概览卡保持空（v-if 隐藏），等待用户切档/刷新重拉（M36）
+    loadErr.value = ''
+  } catch (e) {
+    // client 已统一 toast；此处再留内联错误 + 重试入口（工单 08），概览卡保持空（M36）
+    loadErr.value = e instanceof ApiClientError ? e.message : '概览加载失败，请稍后重试'
   } finally {
     loading.value = false
   }
@@ -62,6 +67,11 @@ function pctText(value: number): string {
 const questionsLabel = computed(() => (days.value === 1 ? '近1天提问' : '近7天提问'))
 
 /** 待处理跳转：不带条件进文档管理（待确认文档数量少，进页即可见） */
+/** 评测退化提示跳转：评测管理页（评测集自动更新 08 票） */
+function gotoEval(): void {
+  void router.push('/admin/eval')
+}
+
 function gotoDocuments(): void {
   void router.push({ name: 'kb-documents' })
 }
@@ -85,6 +95,19 @@ function expiryClass(expiryDate: string): string {
         <el-radio-button :value="1">近1天</el-radio-button>
         <el-radio-button :value="7">近7天</el-radio-button>
       </el-radio-group>
+    </div>
+
+    <!-- 概览加载失败（工单 08）：错误横幅 + 重试，置于统计卡区之前 -->
+    <div v-if="loadErr" class="load-err-row">
+      <el-alert
+        :title="loadErr"
+        type="error"
+        :closable="false"
+        show-icon
+        class="load-err"
+        data-test="overview-load-err"
+      />
+      <el-button size="small" data-test="overview-retry" @click="load">重试</el-button>
     </div>
 
     <div v-if="overview" class="stat-cards">
@@ -148,6 +171,13 @@ function expiryClass(expiryDate: string): string {
 
     <section v-if="health" class="panel" data-test="health-panel">
       <h4>语料健康度</h4>
+      <div v-if="health.evalQuality" class="eval-quality-warn" data-test="eval-quality-warn">
+        <b>评测质量退化：</b>
+        「{{ health.evalQuality.name }}」准确率
+        {{ (health.evalQuality.previousAccuracy * 100).toFixed(1) }}% →
+        {{ ((health.evalQuality.previousAccuracy + health.evalQuality.delta) * 100).toFixed(1) }}%
+        <el-button link type="primary" @click="gotoEval">查看评测报告</el-button>
+      </div>
       <div class="health-row">
         <span>文档就绪率（{{ health.readyCount }}/{{ health.totalDocs }}）</span>
         <el-progress class="ready-bar" :percentage="Number((health.readyRate * 100).toFixed(1))" />
@@ -208,6 +238,15 @@ function expiryClass(expiryDate: string): string {
 .days-row {
   margin-bottom: 12px;
 }
+.load-err-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.load-err {
+  flex: 1;
+}
 .panel {
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 6px;
@@ -223,6 +262,15 @@ function expiryClass(expiryDate: string): string {
   margin-top: 12px;
   font-size: 13px;
   color: var(--el-text-color-regular);
+}
+.eval-quality-warn {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--el-color-danger-light-5);
+  border-radius: 4px;
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger);
+  font-size: 13px;
 }
 .health-row {
   display: flex;

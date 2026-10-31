@@ -15,6 +15,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { checkDateRange } from '@/validators'
 import { listAdminMessages, type AdminMessageItem } from '@/api/adminMessages'
 import { answerTypeLabel, ADMIN_DEPT_ID_OPTIONS, deptCodeLabel } from '@/components/admin/options'
+import LoadErrorState from '@/components/common/LoadErrorState.vue'
 import MessageDetailDrawer from '@/components/messages/MessageDetailDrawer.vue'
 
 const filters = reactive({
@@ -29,6 +30,8 @@ const total = ref(0)
 const page = ref(1)
 const pageSize = ref(20)
 const loading = ref(false)
+/** 加载失败标记（B11/工单 08）：失败 ≠ 没有数据，空态区呈现"可重试"而非"还没有" */
+const loadError = ref(false)
 const detailVisible = ref(false)
 const detailId = ref<number | null>(null)
 
@@ -50,6 +53,10 @@ async function load(): Promise<void> {
     })
     items.value = data.items
     total.value = data.total
+    loadError.value = false
+  } catch {
+    // client 已统一 toast；此处标错误态供空态区呈现"失败可重试"（B11/工单 08）
+    loadError.value = true
   } finally {
     loading.value = false
   }
@@ -179,10 +186,11 @@ function formatTime(iso: string): string {
           <el-button link type="primary" @click="openDetail(row)">详情</el-button>
         </template>
       </el-table-column>
-      <!-- 空态双分支（B9）：筛选无结果 vs 未积累 -->
+      <!-- 空态三分支（B11/工单 08 + B9）：加载失败可重试 > 筛选无结果 > 未积累 -->
       <template #empty>
+        <LoadErrorState v-if="loadError" data-test="messages-load-error" @retry="load" />
         <el-empty
-          v-if="hasFilter"
+          v-else-if="hasFilter"
           description="没有匹配筛选条件的提问记录"
           :image-size="60"
           data-test="messages-empty-filtered"

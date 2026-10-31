@@ -1,11 +1,12 @@
 <script setup lang="ts">
 /**
  * P9 评测管理（ui-spec §八，对照原型 EvalView，F-601/602/603）：
- * 题库 tab（Excel 导入 + 模板下载；原型题目列表无后端列表端点——§4.2 仅
- * import/template，以空态引导承载，deviations #41）+ 跑分记录 tab（[发起跑分]
- * 名称+视角部门；列表 名称/状态/总数/正确/准确率/时间——原型"模型/提示词版本"
- * 列不在列表 DTO，config 快照在详情展示，deviations #43；running 行每 10s 轮询
- * 列表刷新状态）+ 详情抽屉（逐题明细/录分/报告/阈值扫描，见 RunDetailDrawer）。
+ * 题库 tab（QuestionBankPanel：全量列表 + 五维筛选 + 层级升格/降格——原"无查询
+ * 端点空态"（deviations #41）随 §4.2.9 列表端点上线消解；Excel 导入 + 模板下载
+ * 保留本 tab 工具行）+ 跑分记录 tab（[发起跑分] 名称+视角部门；列表 名称/状态/
+ * 总数/正确/准确率/时间——原型"模型/提示词版本"列不在列表 DTO，config 快照在
+ * 详情展示，deviations #43；running 行每 10s 轮询列表刷新状态）+ 详情抽屉
+ * （逐题明细/录分/报告/阈值扫描，见 RunDetailDrawer）。
  */
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import {
@@ -15,8 +16,12 @@ import {
   type EvalRunItem,
 } from '@/api/evalAdmin'
 import { formatPercent, runStatusTag } from '@/components/eval/options'
+import LoadErrorState from '@/components/common/LoadErrorState.vue'
 import CreateRunDialog from '@/components/eval/CreateRunDialog.vue'
+import EvalAutoSettingsPanel from '@/components/eval/EvalAutoSettingsPanel.vue'
+import HardcasePoolPanel from '@/components/eval/HardcasePoolPanel.vue'
 import ImportEvalDialog from '@/components/eval/ImportEvalDialog.vue'
+import QuestionBankPanel from '@/components/eval/QuestionBankPanel.vue'
 import RunDetailDrawer from '@/components/eval/RunDetailDrawer.vue'
 
 const LIST_POLL_INTERVAL_MS = 10_000
@@ -27,6 +32,8 @@ const total = ref(0)
 const page = ref(1)
 const pageSize = ref(20)
 const loading = ref(false)
+/** 加载失败标记（B11/工单 08）：失败 ≠ 没有数据，空态区呈现"可重试"而非"还没有" */
+const loadError = ref(false)
 const importVisible = ref(false)
 const createVisible = ref(false)
 const drawerVisible = ref(false)
@@ -39,7 +46,11 @@ async function load(): Promise<void> {
     const data = await listEvalRuns({ page: page.value, pageSize: pageSize.value })
     items.value = data.items
     total.value = data.total
+    loadError.value = false
     syncPolling(data.items)
+  } catch {
+    // client 已统一 toast；此处标错误态供空态区呈现"失败可重试"（B11/工单 08）
+    loadError.value = true
   } finally {
     loading.value = false
   }
@@ -114,9 +125,15 @@ function formatTime(iso: string): string {
           <el-button @click="downloadTemplate">下载模板</el-button>
           <el-button type="primary" @click="importVisible = true">Excel 导入题目</el-button>
         </div>
-        <el-empty description="题库列表暂无查询端点：题目经 Excel 导入后在跑分报告中逐题呈现">
-          <el-button type="primary" @click="importVisible = true">导入第一批评测题</el-button>
-        </el-empty>
+        <QuestionBankPanel />
+      </el-tab-pane>
+
+      <el-tab-pane label="难例池" name="hardcase">
+        <HardcasePoolPanel />
+      </el-tab-pane>
+
+      <el-tab-pane label="自动评测设置" name="auto" lazy>
+        <EvalAutoSettingsPanel />
       </el-tab-pane>
 
       <el-tab-pane label="跑分记录" name="runs">
@@ -153,7 +170,9 @@ function formatTime(iso: string): string {
             </template>
           </el-table-column>
           <template #empty>
-            <el-empty description="还没有跑分任务" :image-size="60">
+            <!-- 空态双分支（B11/工单 08）：加载失败可重试优先于真空态 -->
+            <LoadErrorState v-if="loadError" data-test="eval-runs-load-error" @retry="load" />
+            <el-empty v-else description="还没有跑分任务" :image-size="60">
               <el-button type="primary" size="small" @click="createVisible = true">
                 发起第一次跑分
               </el-button>

@@ -21,6 +21,11 @@ import { docTypeLabel } from '@/components/documents/options'
 import { deptCodeLabel } from '@/components/admin/options'
 import { formatPercent, qtypeLabel, runStatusTag } from './options'
 
+/** 层级文案（评测集自动更新 07）：official=正式集 / extended=扩充集 */
+function tierLabel(tier: string): string {
+  return tier === 'official' ? '正式集' : '扩充集'
+}
+
 const props = defineProps<{ runId: number | null; visible: boolean }>()
 
 const loading = ref(false)
@@ -159,6 +164,38 @@ defineExpose({ load, doScan })
         </el-table-column>
       </el-table>
 
+      <h4 v-if="(report.byTier?.length ?? 0) > 0" class="sec-title">按题库层级</h4>
+      <el-table
+        v-if="(report.byTier?.length ?? 0) > 0"
+        :data="report.byTier"
+        border
+        size="small"
+        class="group-table"
+      >
+        <el-table-column label="层级" width="110">
+          <template #default="{ row }">{{ tierLabel(row.tier) }}</template>
+        </el-table-column>
+        <el-table-column prop="total" label="题数" width="80" />
+        <el-table-column label="准确率" width="110">
+          <template #default="{ row }">{{ formatPercent(row.accuracy) }}</template>
+        </el-table-column>
+        <el-table-column label="说明" min-width="180">
+          <template #default="{ row }">
+            {{ row.tier === 'official' ? '发版门禁口径（正式集）' : '自动扩充集（不进门禁口径）' }}
+          </template>
+        </el-table-column>
+      </el-table>
+      <div
+        v-if="report.vsPrevious"
+        class="vs-prev"
+        :class="{ degraded: report.vsPrevious.delta <= 0 }"
+      >
+        环比上一轮：{{ formatPercent(report.vsPrevious.previousAccuracy) }} →
+        {{ formatPercent(report.totals.accuracy) }}
+        （{{ report.vsPrevious.delta >= 0 ? '+' : ''
+        }}{{ (report.vsPrevious.delta * 100).toFixed(1) }}pp）
+      </div>
+
       <h4 class="sec-title" data-test="doc-type-title">按文档分型</h4>
       <div class="totals" data-test="doc-type-metrics">
         <el-tooltip
@@ -282,6 +319,14 @@ defineExpose({ load, doScan })
 </template>
 
 <style scoped>
+.vs-prev {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.vs-prev.degraded {
+  color: var(--el-color-danger);
+}
 .sec-title {
   margin: 18px 0 10px;
   font-size: 14px;

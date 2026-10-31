@@ -44,6 +44,15 @@ export interface ExpiringDoc {
   expiryDate: string
 }
 
+/** 评测质量项（评测集自动更新 08 票）：最近自动跑分带退化标记时返回，否则键省略 */
+export interface EvalQualityWarn {
+  status: 'warn'
+  runId: number
+  name: string
+  previousAccuracy: number
+  delta: number
+}
+
 export interface HealthData {
   totalDocs: number
   readyCount: number
@@ -51,6 +60,8 @@ export interface HealthData {
   pendingConfirm: number
   zeroRecall: ZeroRecallDoc[]
   expiringSoon: ExpiringDoc[]
+  /** 键省略 = 无自动跑分历史（前端整卡不显）；status 恒 'warn' 才下发 */
+  evalQuality?: EvalQualityWarn
 }
 
 export function getHealth(): Promise<HealthData> {

@@ -21,6 +21,7 @@ import {
 } from '@/api/adminUsers'
 import { ApiClientError } from '@/api/client'
 import { deptCodeLabel } from '@/components/admin/options'
+import LoadErrorState from '@/components/common/LoadErrorState.vue'
 import CreateUserDialog from '@/components/users/CreateUserDialog.vue'
 import PasswordDialog from '@/components/users/PasswordDialog.vue'
 
@@ -30,6 +31,8 @@ const total = ref(0)
 const page = ref(1)
 const pageSize = ref(20)
 const loading = ref(false)
+/** 加载失败标记（B11/工单 08）：失败 ≠ 没有数据，空态区呈现"可重试"而非"还没有" */
+const loadError = ref(false)
 const createVisible = ref(false)
 const pwdVisible = ref(false)
 /** 一次性明文：仅发放/重置响应带来的那一份，关弹窗即弃 */
@@ -50,6 +53,10 @@ async function load(): Promise<void> {
     })
     items.value = data.items
     total.value = data.total
+    loadError.value = false
+  } catch {
+    // client 已统一 toast；此处标错误态供空态区呈现"失败可重试"（B11/工单 08）
+    loadError.value = true
   } finally {
     loading.value = false
   }
@@ -203,10 +210,11 @@ function formatTime(iso: string | null): string {
           </el-popconfirm>
         </template>
       </el-table-column>
-      <!-- 空态双分支（B9）：筛选无结果 vs 未积累 -->
+      <!-- 空态三分支（B11/工单 08 + B9）：加载失败可重试 > 筛选无结果 > 未积累 -->
       <template #empty>
+        <LoadErrorState v-if="loadError" data-test="users-load-error" @retry="load" />
         <el-empty
-          v-if="hasFilter"
+          v-else-if="hasFilter"
           description="没有匹配筛选条件的用户"
           :image-size="60"
           data-test="users-empty-filtered"

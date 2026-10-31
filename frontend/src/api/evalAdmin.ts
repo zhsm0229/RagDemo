@@ -139,14 +139,30 @@ export interface EvalReportDocTypeGroup {
   answerCorrectness: number | null
 }
 
+/** 层级分组项（评测集自动更新 07：official=正式集发版门禁口径；extended=扩充集） */
+export interface EvalReportTierGroup {
+  tier: 'official' | 'extended'
+  total: number
+  accuracy: number
+}
+
+/** 同口径相邻轮环比（07 票）：无前轮或旧 run 无 perspective 时为 null */
+export interface EvalVsPrevious {
+  previousRunId: number
+  previousAccuracy: number
+  delta: number
+}
+
 export interface EvalReport {
   config: EvalRunConfig | null
   status: EvalRunStatus
   totals: EvalReportTotals
   byDept: (EvalReportGroup & { deptCode: string })[]
   byQtype: (EvalReportGroup & { qtype: string })[]
+  byTier: EvalReportTierGroup[]
   fourMetrics: EvalReportFourMetrics
   byDocType: EvalReportDocTypeGroup[]
+  vsPrevious: EvalVsPrevious | null
 }
 
 export function getEvalReport(runId: number): Promise<EvalReport> {
@@ -215,3 +231,128 @@ export function importEvalQuestions(file: File): Promise<EvalImportResult> {
 export const EVAL_QUESTIONS_TEMPLATE_URL = '/api/admin/eval-questions/template'
 /** Content-Disposition 文件名（api.md §4.2.2） */
 export const EVAL_QUESTIONS_TEMPLATE_FILENAME = 'eval_questions_template.xlsx'
+
+// ---- 题库列表与层级切换（api.md §4.2.9/§4.2.10，评测集自动更新 02） ----
+
+/** 题目来源：manual_import=人工 Excel 导入；hardcase_synth=难例合成；doc_synth=文档造题 */
+export type EvalQuestionOrigin = 'manual_import' | 'hardcase_synth' | 'doc_synth'
+/** 题目层级：official=正式集（发版门禁口径）；extended=自动扩充集 */
+export type EvalQuestionTier = 'official' | 'extended'
+
+/** 题库列表项（api.md §4.2.9 全 11 键） */
+export interface EvalQuestionItem {
+  id: number
+  deptCode: string
+  question: string
+  expectedAnswer: string
+  sourceRef: string | null
+  sourceDocId: number | null
+  qtype: string
+  origin: EvalQuestionOrigin
+  tier: EvalQuestionTier
+  isActive: boolean
+  createdAt: string
+}
+
+export function listEvalQuestions(query: {
+  page: number
+  pageSize: number
+  origin?: string
+  tier?: string
+  dept?: string
+  qtype?: string
+  keyword?: string
+}): Promise<PageData<EvalQuestionItem>> {
+  const params = new URLSearchParams()
+  params.set('page', String(query.page))
+  params.set('pageSize', String(query.pageSize))
+  for (const key of ['origin', 'tier', 'dept', 'qtype', 'keyword'] as const) {
+    const value = query[key]
+    if (value) params.set(key, value)
+  }
+  return get<PageData<EvalQuestionItem>>(`/admin/eval-questions?${params.toString()}`)
+}
+
+/** 层级一键切换（§4.2.10）：extended=扩充集，official=正式集（升格进发版门禁口径） */
+export function patchEvalQuestionTier(
+  id: number,
+  tier: EvalQuestionTier,
+): Promise<{ id: number; tier: EvalQuestionTier }> {
+  return request<{ id: number; tier: EvalQuestionTier }>(`/admin/eval-questions/${id}/tier`, {
+    method: 'PATCH',
+    body: { tier },
+  })
+}
+
+// ---- 难例池（api.md §4.2.11/§4.2.12/§4.2.13，评测集自动更新 03） ----
+
+export type HardcaseSeedStatus = 'pending' | 'synthesized' | 'no_ground' | 'ignored'
+export type HardcaseSeedSourceType = 'refuse' | 'feedback_down'
+
+/** 难例种子列表项（api.md §4.2.11 全 8 键） */
+export interface HardcaseSeedItem {
+  id: number
+  sourceType: HardcaseSeedSourceType
+  status: HardcaseSeedStatus
+  deptCode: string
+  questionText: string
+  answerSnapshot: string | null
+  synthCount: number
+  createdAt: string
+}
+
+export function listHardcaseSeeds(query: {
+  page: number
+  pageSize: number
+  status?: string
+  dept?: string
+}): Promise<PageData<HardcaseSeedItem>> {
+  const params = new URLSearchParams()
+  params.set('page', String(query.page))
+  params.set('pageSize', String(query.pageSize))
+  if (query.status) params.set('status', query.status)
+  if (query.dept) params.set('dept', query.dept)
+  return get<PageData<HardcaseSeedItem>>(`/admin/hardcase-seeds?${params.toString()}`)
+}
+
+/** 置 ignored 终态（人工否决该种子，api.md §4.2.12） */
+export function ignoreHardcaseSeed(id: number): Promise<{ id: number; status: string }> {
+  return request<{ id: number; status: string }>(`/admin/hardcase-seeds/${id}`, {
+    method: 'PATCH',
+    body: { status: 'ignored' },
+  })
+}
+
+/** 手动触发合成（§4.2.13）：pending 种子 → LLM 变体入扩充集，返回结果摘要 */
+export interface HardcaseSynthSummary {
+  seedsProcessed: number
+  synthesized: number
+  noGround: number
+  skipped: number
+}
+
+export function synthesizeHardcaseSeeds(): Promise<HardcaseSynthSummary> {
+  return post<HardcaseSynthSummary>('/admin/hardcase-seeds/synthesize')
+}
+
+// ---- 评测自动配置（api.md §4.2.14/§4.2.15，评测集自动更新 05） ----
+
+/** 评测自动闭环运行配置（app_settings 持久化，PUT 后重启不丢） */
+export interface EvalAutoConfig {
+  enabled: boolean
+  synthPerSeed: number
+  docSamplePerDept: number
+  weeklyMaxQuestions: number
+  regressionPp: number
+}
+
+export function getEvalAutoConfig(): Promise<EvalAutoConfig> {
+  return get<EvalAutoConfig>('/admin/eval-auto/config')
+}
+
+export function putEvalAutoConfig(config: EvalAutoConfig): Promise<EvalAutoConfig> {
+  return request<EvalAutoConfig>('/admin/eval-auto/config', {
+    method: 'PUT',
+    body: config,
+  })
+}

@@ -21,6 +21,7 @@ import {
   updateMemorySettings,
   type MemoryItem,
 } from '@/api/memory'
+import LoadErrorState from '@/components/common/LoadErrorState.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const CONTENT_MAX = 200 // 与后端 add_manual / user_memories_content_check 同源
@@ -289,15 +290,7 @@ function formatTime(iso: string): string {
       </el-table-column>
       <!-- 空态三分支：加载失败可重试（B11）优先，其后筛选无结果 vs 未积累（§2.5） -->
       <template #empty>
-        <div
-          v-if="loadError"
-          class="load-error"
-          data-test="memory-load-error"
-          role="alert"
-          @click="retryLoad"
-        >
-          加载失败，点击重试
-        </div>
+        <LoadErrorState v-if="loadError" data-test="memory-load-error" @retry="retryLoad" />
         <el-empty
           v-else-if="hasFilter"
           description="没有匹配筛选条件的记忆，试试更换关键字"
@@ -378,13 +371,5 @@ function formatTime(iso: string): string {
   display: flex;
   justify-content: flex-end;
   margin-top: 12px;
-}
-/* 加载失败可重试空态（B11）：整块可点，颜色区分于普通空态 */
-.load-error {
-  padding: 24px 0;
-  text-align: center;
-  color: var(--el-color-danger);
-  font-size: 13px;
-  cursor: pointer;
 }
 </style>

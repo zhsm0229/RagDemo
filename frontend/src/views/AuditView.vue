@@ -15,6 +15,7 @@ import {
   type AuditLogItem,
 } from '@/api/auditLogs'
 import { ApiClientError } from '@/api/client'
+import LoadErrorState from '@/components/common/LoadErrorState.vue'
 import { fmtTime } from '@/utils/format'
 import { checkDateRange } from '@/validators'
 
@@ -32,6 +33,8 @@ const total = ref(0)
 const page = ref(1)
 const pageSize = ref(20)
 const loading = ref(false)
+/** 加载失败标记（B11/工单 08）：失败 ≠ 没有数据，空态区呈现"可重试"而非"还没有" */
+const loadError = ref(false)
 const exporting = ref(false)
 
 async function load(): Promise<void> {
@@ -48,6 +51,10 @@ async function load(): Promise<void> {
     })
     items.value = data.items
     total.value = data.total
+    loadError.value = false
+  } catch {
+    // client 已统一 toast；此处标错误态供空态区呈现"失败可重试"（B11/工单 08）
+    loadError.value = true
   } finally {
     loading.value = false
   }
@@ -202,7 +209,13 @@ function objectText(row: AuditLogItem): string {
         <template #default="{ row }">{{ row.ip ?? '-' }}</template>
       </el-table-column>
       <template #empty>
-        <el-empty description="暂无审计记录（audit_logs 只增不删，随操作产生）" :image-size="60" />
+        <!-- 空态双分支（B11/工单 08）：加载失败可重试优先于真空态 -->
+        <LoadErrorState v-if="loadError" data-test="audit-load-error" @retry="load" />
+        <el-empty
+          v-else
+          description="暂无审计记录（audit_logs 只增不删，随操作产生）"
+          :image-size="60"
+        />
       </template>
     </el-table>
 

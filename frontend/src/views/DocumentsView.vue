@@ -40,6 +40,7 @@ import {
   STATUS_OPTIONS,
   docTypeLabel,
 } from '@/components/documents/options'
+import LoadErrorState from '@/components/common/LoadErrorState.vue'
 import DocPreviewDialog from '@/components/documents/DocPreviewDialog.vue'
 import UploadDialog from '@/components/documents/UploadDialog.vue'
 import ZipImportDialog from '@/components/documents/ZipImportDialog.vue'
@@ -566,15 +567,7 @@ function onZipImported(): void {
       <!-- 空态多分支：加载失败可重试（B11）> 草稿审核专属空态 > 筛选无结果（B9，照
            MemoryView §2.5 范式）> 真空态引导上传 -->
       <template #empty>
-        <div
-          v-if="loadError"
-          class="load-error"
-          data-test="documents-load-error"
-          role="alert"
-          @click="retryLoad"
-        >
-          加载失败，点击重试
-        </div>
+        <LoadErrorState v-if="loadError" data-test="documents-load-error" @retry="retryLoad" />
         <el-empty v-else-if="isDraftReview" description="暂无待审核草稿" :image-size="60" />
         <el-empty
           v-else-if="hasFilter"
@@ -661,13 +654,5 @@ function onZipImported(): void {
 /* 分型下拉占满 110 列内可用宽度（列头 tooltip 同宿主类） */
 .doc-type-select {
   width: 96px;
-}
-/* 加载失败可重试空态（B11）：整块可点，颜色区分于普通空态 */
-.load-error {
-  padding: 24px 0;
-  text-align: center;
-  color: var(--el-color-danger);
-  font-size: 13px;
-  cursor: pointer;
 }
 </style>
