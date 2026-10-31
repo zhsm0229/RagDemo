@@ -54,3 +54,8 @@ include = ["app/rag/*", "app/services/*"]
 
 [tool.coverage.report]
 fail_under = 70
+
+[dependency-groups]
+dev = [
+    "fpdf2>=2.9.0",
+]
