@@ -33,3 +33,13 @@ deploy/nul
 
 # Playwright 登录态（httpOnly cookie 快照，严禁入库）
 .auth/
+
+# ===== 本地工具产物与会话产物（2026-10-31 基线冻结补充）=====
+.DS_Store
+.v2c/
+.video_agent/
+.vscode/
+training/
+out/
+frontend/out/
+deploy/.DS_Store
