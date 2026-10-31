@@ -409,3 +409,49 @@ CREATE INDEX idx_agent_steps_run ON agent_steps(run_id, seq);
 - **2026-10-06 勾稽注（实现为准）**：①agent_steps 实际随迁移 0009 落地（0008 先落 agent_runs，拆批见迁移头注释），并在设计稿列集外**补 `error` 列**（工具失败中文原因快照，脱敏话术与 run.error 同口径，成功为 NULL）；②agent_runs.run_type 实际为 TEXT 不设 CHECK（迁移友好，注释口径）；③两表其余列/约束/索引与设计一致，逐列中文注释齐备。
 - 保留策略预告：比照提问记录 90 天两段式（§4.6）评估；因承担审核回放职责倾向延长保留期，**以实现工单与合规签批为准**。
 - AG-UI 事件流（F-212）与 steps 一一对应：前端事件序 = 库内轨迹序，收缩旧端点后仍可回放。
+
+### 18. state_* 状态外置三表（迁移 0019，商用就绪工单 19——六接口哲学的第七替换点）
+
+```sql
+-- 易失状态（非业务实体）：无 is_active 软删（对缓存/计数无意义）；STATE_BACKEND=pg 时启用，
+-- memory 后端（缺省）三表为空。逐列中文注释见迁移 0019 与 app/db/models/state.py（零差异守卫）。
+
+CREATE TABLE state_cache_entries (            -- PgExactCache：问答精确缓存（chat:{dept}[:u{uid}]:{q}）
+    id         BIGSERIAL PRIMARY KEY,
+    cache_key  TEXT NOT NULL UNIQUE,
+    dept_id    BIGINT,                          -- 自键前缀解析，仅运维索引用
+    payload    JSONB NOT NULL,                  -- 缓存条目（answer/citations/answerType 同内存版）
+    expire_at  TIMESTAMPTZ NOT NULL             -- 惰性过期（get 顺手删），无后台回收
+);
+CREATE INDEX idx_state_cache_expire ON state_cache_entries (expire_at);
+
+CREATE TABLE state_counters (                 -- 通用计数：daily 日配额 / hit 召回暂存 / bucket 令牌桶（工单 21 预留 refill_at）
+    id         BIGSERIAL PRIMARY KEY,
+    scope      TEXT NOT NULL,
+    ckey       TEXT NOT NULL,
+    n          BIGINT NOT NULL DEFAULT 0,       -- daily=当日已用 / hit=待刷增量 / bucket=剩余令牌（x1000 定点，未落地）
+    day        DATE,                            -- daily 专用（UTC 归属日，跨日重置）
+    refill_at  TIMESTAMPTZ,                     -- bucket 专用
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (scope, ckey)
+);
+
+CREATE TABLE state_auth_guards (              -- 登录滑窗（limiter）+ 登出黑名单（jti）
+    id         BIGSERIAL PRIMARY KEY,
+    guard_type TEXT NOT NULL,                    -- limiter / jti
+    guard_key  TEXT NOT NULL,                    -- "{ip}|{username}" / jti
+    event_at   TIMESTAMPTZ NOT NULL,             -- limiter 同键同秒经 µs 顺延消歧（严格递增）
+    expire_at  TIMESTAMPTZ,                      -- jti=原令牌 exp；过期视同不存在（revoke 顺手治理）
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (guard_type, guard_key, event_at)
+);
+CREATE INDEX idx_state_auth_expire ON state_auth_guards (expire_at) WHERE expire_at IS NOT NULL;
+```
+
+设计意图与约定：
+
+- **共享语义随后端变化**（有等价性测试钉死）：pg 下缓存/日额度/限流窗口/登出黑名单**跨副本互见**（多副本前提，工单 20）；memory 下各实例独立。
+- **hit 暂存-搬运两段式**：问答侧 upsert 暂存（行锁摊散），flush 以 `FOR UPDATE` 快照 → 一条 executemany UPDATE 进 chunks → 按键 DELETE，失败整体回滚滚入下轮（崩溃安全，与内存版契约逐条等价）。
+- **jti 黑名单备份安全含义**：`STATE_BACKEND=pg` 时三表随主库备份（runbook §3.1）——黑名单不入备份 = 恢复后已撤销令牌在 exp 前重新有效。
+- 设计全文：`.scratch/commercial-readiness/design/19-state-externalize-design.md`（v1+§10 评审修订）。
