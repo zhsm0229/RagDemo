@@ -78,11 +78,11 @@ function search(): void {
 
 onMounted(() => void load())
 
-/** 层级一键切换：extended→official=升格（进发版门禁），反之降格 */
+/** 层级一键切换：extended→official=升为正式（进发版门禁），反之降为扩充（术语与按钮一致） */
 async function onSwitchTier(row: EvalQuestionItem): Promise<void> {
   const target: EvalQuestionTier = row.tier === 'official' ? 'extended' : 'official'
   await patchEvalQuestionTier(row.id, target)
-  ElMessage.success(target === 'official' ? '已升格为正式集' : '已降格为扩充集')
+  ElMessage.success(target === 'official' ? '已升为正式集' : '已降为扩充集')
   void load()
 }
 

@@ -10,6 +10,7 @@ import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import { vi } from 'vitest'
 import type {
   EvalImportErrorRow,
+  EvalQuestionItem,
   EvalReport,
   EvalReportDocTypeGroup,
   EvalReportFourMetrics,
@@ -32,6 +33,8 @@ export type MockRun = EvalRunItem & {
 
 export const backend = {
   runs: [] as MockRun[],
+  /** GET /admin/eval-questions? 返回的题库行（空=首用动线落题库 tab） */
+  questions: [] as EvalQuestionItem[],
   nextId: 101,
   /** POST /admin/eval-runs 创建行的初始 total */
   newRunTotal: 0,
@@ -50,6 +53,7 @@ export const backend = {
 
 export function resetBackend(): void {
   backend.runs = []
+  backend.questions = []
   backend.nextId = 101
   backend.newRunTotal = 0
   backend.report = null
@@ -227,8 +231,8 @@ export async function routeFetch(url: string, init: RequestInit = {}): Promise<R
   if (url.startsWith('/api/admin/eval-questions?') && method === 'GET') {
     const q = new URLSearchParams(url.split('?')[1] ?? '')
     return okEnvelope({
-      items: [],
-      total: 0,
+      items: backend.questions,
+      total: backend.questions.length,
       page: Number(q.get('page') ?? 1),
       pageSize: Number(q.get('pageSize') ?? 20),
     })

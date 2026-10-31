@@ -10,6 +10,7 @@
  */
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import {
+  listEvalQuestions,
   listEvalRuns,
   EVAL_QUESTIONS_TEMPLATE_FILENAME,
   EVAL_QUESTIONS_TEMPLATE_URL,
@@ -56,7 +57,17 @@ async function load(): Promise<void> {
   }
 }
 
-onMounted(() => void load())
+onMounted(async () => {
+  void load()
+  // 首用动线（评审 P2）：题库为空时默认落"评测题库"tab——新管理员第一步是导题，
+  // 不是被"发起第一次跑分"空态引导去跑一个空跑分；题库接口失败不打断默认 tab
+  try {
+    const bank = await listEvalQuestions({ page: 1, pageSize: 1 })
+    if (bank.total === 0) tab.value = 'questions'
+  } catch {
+    /* 保持默认跑分 tab */
+  }
+})
 onBeforeUnmount(stopPolling)
 
 /** 任一行 running 即每 10s 刷新列表（状态与准确率收口后自动停止） */

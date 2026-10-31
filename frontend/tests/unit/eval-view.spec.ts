@@ -92,6 +92,35 @@ async function waitUntil(cond: () => boolean, label: string): Promise<void> {
 }
 
 describe('跑分列表与发起', () => {
+  it('题库为空时默认落"评测题库"tab（首用动线：第一步导题而非空跑分，评审 P2）', async () => {
+    // eval-mock 默认题库路由返回空页 → 挂载后应自动切到评测题库 tab
+    const wrapper = await mountEval()
+    await flushAll()
+    const active = wrapper.find('.el-tabs__item.is-active')
+    expect(active.text()).toBe('评测题库')
+  })
+
+  it('题库非空时保持默认"跑分记录"tab（首用动线只对空题库生效）', async () => {
+    backend.questions = [
+      {
+        id: 1,
+        deptCode: 'service',
+        question: '冒烟题',
+        expectedAnswer: '冒烟答案',
+        sourceRef: null,
+        sourceDocId: null,
+        qtype: 'factual',
+        origin: 'manual_import',
+        tier: 'extended',
+        isActive: true,
+        createdAt: '2026-10-31T08:00:00',
+      },
+    ]
+    const wrapper = await mountEval()
+    await flushAll()
+    const active = wrapper.find('.el-tabs__item.is-active')
+    expect(active.text()).toBe('跑分记录')
+  })
   it('挂载即拉列表（page=1 默认 20），行渲染名称/状态 tag/总数正确（可半分）/准确率/时间', async () => {
     doneRun({ name: '9 月回归', correct: 7.5, accuracy: 0.75 })
     runningRun({ name: '进行中的跑分' })

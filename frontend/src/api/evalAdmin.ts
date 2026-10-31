@@ -323,12 +323,13 @@ export function ignoreHardcaseSeed(id: number): Promise<{ id: number; status: st
   })
 }
 
-/** 手动触发合成（§4.2.13）：pending 种子 → LLM 变体入扩充集，返回结果摘要 */
+/** 手动触发合成（§4.2.13）：双通道（种子变体+文档造题）→ 扩充集，返回结果摘要 */
 export interface HardcaseSynthSummary {
   seedsProcessed: number
   synthesized: number
   noGround: number
   skipped: number
+  docChunksSampled: number
 }
 
 export function synthesizeHardcaseSeeds(): Promise<HardcaseSynthSummary> {
