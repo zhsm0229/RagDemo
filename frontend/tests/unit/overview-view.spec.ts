@@ -430,3 +430,30 @@ describe('api 层契约（路径/参数钉死）', () => {
     expect(String(healthStub.mock.calls[0]![0])).toBe('/api/admin/health')
   })
 })
+
+// ---- 概览加载失败错误面板（工单 08：catch 静默 → 内联错误 + 重试入口） ----
+
+describe('概览加载失败错误面板（工单 08）', () => {
+  it('概览接口失败：错误 alert 可见且统计卡隐藏（不渲染默认 0 口径）；点重试恢复', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url) === '/api/admin/overview?days=1') {
+        return errEnvelope(500, '概览服务暂不可用')
+      }
+      return routeFetch(String(url))
+    })
+    const wrapper = await mountOverview()
+    const err = wrapper.find('[data-test="overview-load-err"]')
+    expect(err.exists()).toBe(true)
+    expect(err.text()).toContain('概览服务暂不可用')
+    expect(wrapper.find('[data-test="overview-retry"]').exists()).toBe(true)
+    // 失败 ≠ 数据为零：统计卡随 overview=null 隐藏（"近1天提问"卡标题是唯一带"提问"的口径文案）
+    expect(wrapper.text()).not.toContain('近1天提问')
+    // 后端恢复后点重试：统计卡恢复、错误退场
+    fetchMock.mockImplementation(routeFetch)
+    await wrapper.find('[data-test="overview-retry"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="overview-load-err"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('近1天提问')
+    expect(wrapper.text()).toContain('128')
+  })
+})

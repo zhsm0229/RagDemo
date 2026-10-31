@@ -404,3 +404,29 @@ describe('api 层契约（路径/方法/参数钉死）', () => {
     expect(init!.method).toBe('DELETE')
   })
 })
+
+// ---- 加载失败错误态（工单 08：失败 ≠ 没有数据，错误态先于空态呈现"点击重试"） ----
+
+describe('加载失败错误态（工单 08）', () => {
+  it('加载失败空态显示"加载失败，点击重试"而非"还没有问答对"，重试成功恢复列表', async () => {
+    backend.qaPairs = [qaItem({ question: '恢复用问答对' })]
+    fetchMock.mockImplementation((url: string, init: RequestInit = {}) => {
+      if (String(url).startsWith('/api/admin/qa-pairs?') && (init.method ?? 'GET') === 'GET') {
+        return Promise.reject(new TypeError('Network Error'))
+      }
+      return routeFetch(String(url), init)
+    })
+    const wrapper = await mountQaPairs()
+    expect(wrapper.find('[data-test="qa-pairs-load-error"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('加载失败，点击重试')
+    expect(wrapper.text()).not.toContain('还没有问答对') // 失败 ≠ 没有数据
+    expect(wrapper.text()).not.toContain('没有匹配筛选条件的问答对')
+    // 后端恢复后点重试：列表恢复、错误态退场
+    fetchMock.mockImplementation(routeFetch)
+    await wrapper.find('[data-test="qa-pairs-load-error"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="qa-pairs-load-error"]').exists()).toBe(false)
+    expect(wrapper.findAll('.el-table__row')).toHaveLength(1)
+    expect(wrapper.findAll('.el-table__row')[0]!.text()).toContain('恢复用问答对')
+  })
+})

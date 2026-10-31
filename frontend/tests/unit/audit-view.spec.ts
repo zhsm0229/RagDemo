@@ -284,3 +284,28 @@ describe('api 层契约（路径/参数钉死）', () => {
     )
   })
 })
+
+// ---- 加载失败错误态（工单 08：失败 ≠ 没有数据，错误态先于空态呈现"点击重试"） ----
+
+describe('加载失败错误态（工单 08）', () => {
+  it('加载失败空态显示"加载失败，点击重试"而非"暂无审计记录"，重试成功恢复列表', async () => {
+    backend.rows = [auditItem({ action: 'user.create' })]
+    fetchMock.mockImplementation((url: string, init: RequestInit = {}) => {
+      if (String(url).startsWith('/api/admin/audit-logs?')) {
+        return Promise.reject(new TypeError('Network Error'))
+      }
+      return routeFetch(String(url), init)
+    })
+    const wrapper = await mountAudit()
+    expect(wrapper.find('[data-test="audit-load-error"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('加载失败，点击重试')
+    expect(wrapper.text()).not.toContain('暂无审计记录') // 失败 ≠ 没有数据
+    // 后端恢复后点重试：列表恢复、错误态退场
+    fetchMock.mockImplementation(routeFetch)
+    await wrapper.find('[data-test="audit-load-error"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="audit-load-error"]').exists()).toBe(false)
+    expect(wrapper.findAll('.el-table__row')).toHaveLength(1)
+    expect(wrapper.findAll('.el-table__row')[0]!.text()).toContain('user.create')
+  })
+})

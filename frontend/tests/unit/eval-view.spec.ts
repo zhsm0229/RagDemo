@@ -270,6 +270,11 @@ describe('报告与阈值扫描', () => {
       byQtype: [{ qtype: 'factual', total: 10, accuracy: 0.8 }],
       fourMetrics: fourMetricsFixture(),
       byDocType: docTypeGroupsFixture(),
+      byTier: [
+        { tier: 'official', total: 8, accuracy: 0.75 },
+        { tier: 'extended', total: 2, accuracy: 1 },
+      ],
+      vsPrevious: { previousRunId: 1, previousAccuracy: 0.75, delta: 0.05 },
     }
     const wrapper = await mountEval()
     const drawer = await openDrawer(wrapper)
@@ -317,6 +322,8 @@ describe('报告与阈值扫描', () => {
         answerCorrectness: { value: null, evaluatedCount: 0 },
       },
       byDocType: [],
+      byTier: [],
+      vsPrevious: null,
     }
     const wrapper = await mountEval()
     const drawer = await openDrawer(wrapper)
@@ -481,5 +488,57 @@ describe('api 层契约（路径/方法/参数钉死）', () => {
       data: [{ row: 2, field: '题型', reason: '题型枚举非法' }],
     })
     expect(String(fetchStub.mock.calls[0]![0])).toBe('/api/admin/eval-questions/import')
+  })
+})
+
+// ---- 加载失败错误态（工单 08：失败 ≠ 没有数据，错误态先于空态呈现"点击重试"） ----
+
+describe('加载失败错误态（工单 08）', () => {
+  function rejectList(prefix: string): void {
+    fetchMock.mockImplementation((url: string, init: RequestInit = {}) => {
+      if (String(url).startsWith(prefix)) return Promise.reject(new TypeError('Network Error'))
+      return routeFetch(String(url), init)
+    })
+  }
+
+  it('跑分列表加载失败：显示"加载失败，点击重试"而非"还没有跑分任务"，重试成功恢复列表', async () => {
+    doneRun({ name: '恢复用跑分' })
+    rejectList('/api/admin/eval-runs?')
+    const wrapper = await mountEval()
+    expect(wrapper.find('[data-test="eval-runs-load-error"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('加载失败，点击重试')
+    expect(wrapper.text()).not.toContain('还没有跑分任务') // 失败 ≠ 没有数据
+    // 后端恢复后点重试：列表恢复、错误态退场
+    fetchMock.mockImplementation(routeFetch)
+    await wrapper.find('[data-test="eval-runs-load-error"]').trigger('click')
+    await flushAll()
+    expect(wrapper.find('[data-test="eval-runs-load-error"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('恢复用跑分')
+  })
+
+  it('题库面板加载失败：显示错误态而非"题库为空"空态，重试成功回到空态分支', async () => {
+    rejectList('/api/admin/eval-questions?')
+    const wrapper = await mountEval()
+    expect(wrapper.find('[data-test="eval-questions-load-error"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('加载失败，点击重试')
+    expect(wrapper.text()).not.toContain('题库为空：下载模板并 Excel 导入第一批评测题')
+    fetchMock.mockImplementation(routeFetch)
+    await wrapper.find('[data-test="eval-questions-load-error"]').trigger('click')
+    await flushAll()
+    expect(wrapper.find('[data-test="eval-questions-load-error"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('题库为空：下载模板并 Excel 导入第一批评测题')
+  })
+
+  it('难例池面板加载失败：显示错误态而非"难例池为空"空态，重试成功回到空态分支', async () => {
+    rejectList('/api/admin/hardcase-seeds?')
+    const wrapper = await mountEval()
+    expect(wrapper.find('[data-test="hardcase-seeds-load-error"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('加载失败，点击重试')
+    expect(wrapper.text()).not.toContain('难例池为空：用户拒答与点踩问题会按周自动沉淀入池')
+    fetchMock.mockImplementation(routeFetch)
+    await wrapper.find('[data-test="hardcase-seeds-load-error"]').trigger('click')
+    await flushAll()
+    expect(wrapper.find('[data-test="hardcase-seeds-load-error"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('难例池为空：用户拒答与点踩问题会按周自动沉淀入池')
   })
 })

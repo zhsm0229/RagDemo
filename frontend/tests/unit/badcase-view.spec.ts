@@ -285,3 +285,28 @@ describe('api 层契约（路径/方法/参数钉死）', () => {
     expect(JSON.parse(String(init!.body))).toEqual({ badcaseStatus: '已忽略', note: '重复提问' })
   })
 })
+
+// ---- 加载失败错误态（工单 08：失败 ≠ 没有数据，错误态先于空态呈现"点击重试"） ----
+
+describe('加载失败错误态（工单 08）', () => {
+  it('加载失败空态显示"加载失败，点击重试"而非"没有待处理的 badcase"，重试成功恢复列表', async () => {
+    badcaseItem({ questionPreview: '恢复用 badcase' })
+    fetchMock.mockImplementation((url: string, init: RequestInit = {}) => {
+      if (String(url).startsWith('/api/admin/badcases?') && (init.method ?? 'GET') === 'GET') {
+        return Promise.reject(new TypeError('Network Error'))
+      }
+      return routeFetch(String(url), init)
+    })
+    const wrapper = await mountBadcase()
+    expect(wrapper.find('[data-test="badcases-load-error"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('加载失败，点击重试')
+    expect(wrapper.text()).not.toContain('没有待处理的 badcase') // 失败 ≠ 没有数据
+    // 后端恢复后点重试：列表恢复、错误态退场
+    fetchMock.mockImplementation(routeFetch)
+    await wrapper.find('[data-test="badcases-load-error"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="badcases-load-error"]').exists()).toBe(false)
+    expect(wrapper.findAll('.el-table__row')).toHaveLength(1)
+    expect(wrapper.findAll('.el-table__row')[0]!.text()).toContain('恢复用 badcase')
+  })
+})

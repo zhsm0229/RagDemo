@@ -222,6 +222,26 @@ function recompute(run: MockRun): number {
 
 export async function routeFetch(url: string, init: RequestInit = {}): Promise<Response> {
   const method = init.method ?? 'GET'
+  // 题库/难例池面板随 EvalView 挂载即拉列表（02/03 票）：mock 缺路由会以
+  // "unexpected fetch" 拒绝并留下未处理 rejection——空页数据兜底即可，面板非断言对象
+  if (url.startsWith('/api/admin/eval-questions?') && method === 'GET') {
+    const q = new URLSearchParams(url.split('?')[1] ?? '')
+    return okEnvelope({
+      items: [],
+      total: 0,
+      page: Number(q.get('page') ?? 1),
+      pageSize: Number(q.get('pageSize') ?? 20),
+    })
+  }
+  if (url.startsWith('/api/admin/hardcase-seeds?') && method === 'GET') {
+    const q = new URLSearchParams(url.split('?')[1] ?? '')
+    return okEnvelope({
+      items: [],
+      total: 0,
+      page: Number(q.get('page') ?? 1),
+      pageSize: Number(q.get('pageSize') ?? 20),
+    })
+  }
   if (url.startsWith('/api/admin/eval-runs?') && method === 'GET') {
     const q = new URLSearchParams(url.split('?')[1] ?? '')
     const page = Number(q.get('page') ?? 1)
