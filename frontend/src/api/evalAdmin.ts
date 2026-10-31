@@ -336,6 +336,11 @@ export function synthesizeHardcaseSeeds(): Promise<HardcaseSynthSummary> {
   return post<HardcaseSynthSummary>('/admin/hardcase-seeds/synthesize')
 }
 
+/** 重扫待补语料种子（工单 16）：有引用且 skip 累计型的 no_ground 转回 pending */
+export function rescanHardcaseSeeds(): Promise<{ rescanned: number }> {
+  return post<{ rescanned: number }>('/admin/hardcase-seeds/rescan')
+}
+
 // ---- 评测自动配置（api.md §4.2.14/§4.2.15，评测集自动更新 05） ----
 
 /** 评测自动闭环运行配置（app_settings 持久化，PUT 后重启不丢） */

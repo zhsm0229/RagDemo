@@ -256,3 +256,36 @@ def test_成员无权难例池(client, session) -> None:
         client.patch("/api/admin/hardcase-seeds/1", json={"status": "ignored"}).status_code == 403
     )
     assert client.get("/api/admin/hardcase-seeds").json()["code"] == ERR_FORBIDDEN
+
+
+def test_重扫API_审计读回与member拒(client, session) -> None:
+    """POST /admin/hardcase-seeds/rescan（工单 16）：admin 可调、审计 hardcase.rescan
+    记转回条数（只转有引用且 skip 累计型）；member 403。"""
+    make_user(session, "rescan_admin", "right-one", role="admin")
+    dept_id = session.scalar(select(Department.id).where(Department.code == "service"))
+    session.add(
+        HardcaseSeed(
+            message_id=1,
+            message_created_at=datetime.now(UTC),
+            source_type="feedback_down",
+            dept_id=dept_id,
+            question_text="重扫目标种子",
+            normalized_question="重扫目标种子",
+            answer_snapshot="答案",
+            citations_snapshot=[{"refType": "doc", "refId": 1}],
+            status="no_ground",
+            skip_count=3,
+        )
+    )
+    session.commit()
+    assert login_as(client, "rescan_admin", "right-one").status_code == 200
+
+    resp = client.post("/api/admin/hardcase-seeds/rescan")
+    assert resp.status_code == 200
+    assert resp.json()["data"]["rescanned"] == 1
+    audit = session.scalar(select(AuditLog).where(AuditLog.action == "hardcase.rescan"))
+    assert audit is not None and audit.detail["rescanned"] == 1
+
+    make_user(session, "rescan_member", "right-two", role="member")
+    assert login_as(client, "rescan_member", "right-two").status_code == 200
+    assert client.post("/api/admin/hardcase-seeds/rescan").status_code == 403

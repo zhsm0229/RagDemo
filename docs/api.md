@@ -3,8 +3,8 @@
 > 定位：活文档｜对账：2026-10-07｜同步保障：端点总数标记行由 `tests/unit/test_api_contract.py` 守账（§19.4）
 > 依据 `docs/standards.md` §3（API 接口规范）编写，随代码演进（§19.1 文档随代码）。
 > 覆盖 `app/api/` 当前全部路由：auth 5 个、documents 13 个（documents 11 + rebuild 2）、文档分型 2 个（§2.10g/h）、chat 1 个、conversations 4 个、citations 1 个、messages（feedback）1 个、admin 管理端 38 个（问答对 6、评测 15、提问记录与 badcase 4、检索测试 1、概览与健康度 3（含零召回块下钻）、服务健康 1、用户管理 4、审计查询 2、知识缺口报告 2）、healthz 探针 1 个（`GET /healthz`，docker healthcheck 消费，不设业务章节）。
-> **端点总数：73**（本行由 `tests/unit/test_api_contract.py` 从 FastAPI app 实际路由解析校验：新增/删除端点未同步本行即测试红，计数漂移清零，findings I10）。
-> 最后更新：W5 Task 5 台账翻转（计数 44→47（W5）→48：2026-10-02 新增服务健康卡 1 端点（§4.5.4）；W5 新增知识缺口报告 2 端点，见 §4.9；零召回块下钻 `GET /api/admin/zero-recall-chunks` 1 端点，见 §4.5.3；§4.4.1 docs 项补 hitCount/lastHitAt 历史召回统计两键；2026-10-05 新增文档在线预览 1 端点 §2.10d，chat 引用 citation 增 docId 键 §3.1；2026-10-06 文档契约对账：头部计数改为"端点总数：56"标记行并交契约测试守护（I10）、§2.10c 删除成功响应体更正为 `{id, deleted: true}`（实现为准，I9）、§1.2 补"响应体以实现为准"统一注记；2026-10-06 jti 登出黑名单落地（findings I4）：新增 `POST /api/auth/logout` 1 端点 §2.4a，auth 4→5、总数 56→57；2026-10-06 草稿审核流（agent-evolution #05）：新增 `POST /api/documents/{id}/draft/approve` §2.10e 与 `/draft/reject` §2.10f 共 2 端点，documents 11→13、总数 57→59；2026-10-06 计数对齐实现现状 64：其余增量（memories ×4、agent runs ×1）由并行车道（记忆管理/agent 轨迹）随各自工单补章节登记）；2026-10-06 模板生成首任务（agent-evolution #06）：§5.1 taskType 白名单放开 `template_draft`、补 `save_draft` 工具与 `agent_steps` 逐步轨迹落库说明（无新增端点，总数不变）；2026-10-06 文档分型闭环（metrics-balance 工单 01）：新增 `PATCH /api/admin/documents/{id}/doc-type` §2.10g 与 `POST /api/admin/documents/backfill-doc-type` §2.10h 共 2 端点，文档列表项补 `docType` 键（§2.6），总数 64→66；2026-10-30 评测集自动更新（02 票）：新增 `GET /api/admin/eval-questions` §4.2.9 与 `PATCH /api/admin/eval-questions/{id}/tier` §4.2.10 共 2 端点，评测 8→10、总数 66→68；2026-10-30 评测集自动更新（03 票）：新增难例池三端点 `GET /api/admin/hardcase-seeds` §4.2.11、`PATCH /api/admin/hardcase-seeds/{id}` §4.2.12、`POST /api/admin/hardcase-seeds/synthesize` §4.2.13，评测 10→13、总数 68→71；2026-10-30 评测集自动更新（05 票）：新增 `GET /api/admin/eval-auto/config` §4.2.14 与 `PUT /api/admin/eval-auto/config` §4.2.15 共 2 端点，评测 13→15、总数 71→73。
+> **端点总数：74**（本行由 `tests/unit/test_api_contract.py` 从 FastAPI app 实际路由解析校验：新增/删除端点未同步本行即测试红，计数漂移清零，findings I10）。
+> 最后更新：W5 Task 5 台账翻转（计数 44→47（W5）→48：2026-10-02 新增服务健康卡 1 端点（§4.5.4）；W5 新增知识缺口报告 2 端点，见 §4.9；零召回块下钻 `GET /api/admin/zero-recall-chunks` 1 端点，见 §4.5.3；§4.4.1 docs 项补 hitCount/lastHitAt 历史召回统计两键；2026-10-05 新增文档在线预览 1 端点 §2.10d，chat 引用 citation 增 docId 键 §3.1；2026-10-06 文档契约对账：头部计数改为"端点总数：56"标记行并交契约测试守护（I10）、§2.10c 删除成功响应体更正为 `{id, deleted: true}`（实现为准，I9）、§1.2 补"响应体以实现为准"统一注记；2026-10-06 jti 登出黑名单落地（findings I4）：新增 `POST /api/auth/logout` 1 端点 §2.4a，auth 4→5、总数 56→57；2026-10-06 草稿审核流（agent-evolution #05）：新增 `POST /api/documents/{id}/draft/approve` §2.10e 与 `/draft/reject` §2.10f 共 2 端点，documents 11→13、总数 57→59；2026-10-06 计数对齐实现现状 64：其余增量（memories ×4、agent runs ×1）由并行车道（记忆管理/agent 轨迹）随各自工单补章节登记）；2026-10-06 模板生成首任务（agent-evolution #06）：§5.1 taskType 白名单放开 `template_draft`、补 `save_draft` 工具与 `agent_steps` 逐步轨迹落库说明（无新增端点，总数不变）；2026-10-06 文档分型闭环（metrics-balance 工单 01）：新增 `PATCH /api/admin/documents/{id}/doc-type` §2.10g 与 `POST /api/admin/documents/backfill-doc-type` §2.10h 共 2 端点，文档列表项补 `docType` 键（§2.6），总数 64→66；2026-10-30 评测集自动更新（02 票）：新增 `GET /api/admin/eval-questions` §4.2.9 与 `PATCH /api/admin/eval-questions/{id}/tier` §4.2.10 共 2 端点，评测 8→10、总数 66→68；2026-10-30 评测集自动更新（03 票）：新增难例池三端点 `GET /api/admin/hardcase-seeds` §4.2.11、`PATCH /api/admin/hardcase-seeds/{id}` §4.2.12、`POST /api/admin/hardcase-seeds/synthesize` §4.2.13，评测 10→13、总数 68→71；2026-10-30 评测集自动更新（05 票）：新增 `GET /api/admin/eval-auto/config` §4.2.14 与 `PUT /api/admin/eval-auto/config` §4.2.15 共 2 端点，评测 13→15、总数 71→73；2026-10-31 商用就绪工单 16：新增 `POST /api/admin/hardcase-seeds/rescan` §4.2.16（重扫待补语料种子 1 端点），评测 15→16、总数 73→74。
 
 ## 1. 通用约定
 
@@ -576,6 +576,14 @@ SSE 事件 DTO 字段表（**逐字引自 standards §3 第 6 条**）：
 | 鉴权 | AdminUser |
 | 请求体 | 无。同步执行**双通道**：① pending 且引用可达的种子 → LLM 变体（期望答案从引用块原文提取，无据不造答）；② 各部门抽样知识块（零召回块优先）→ 正向造题。产物均入扩充集（origin 分别为 hardcase_synth / doc_synth），预算取 settings（synth_per_seed / doc_sample_per_dept / weekly_max_questions 两通道共享总量闸） |
 | 成功响应 | `200`，`data: {synthesized, skipped, seedsProcessed, noGround, docChunksSampled}`（合并摘要）；审计 `eval.autosynth`（detail 同摘要，独立二次提交） |
+
+#### 4.2.16 POST /api/admin/hardcase-seeds/rescan — 重扫待补语料种子（商用就绪工单 16）
+
+| 项 | 说明 |
+|----|------|
+| 鉴权 | AdminUser |
+| 请求体 | 无。对 `status=no_ground` 且 `skip_count>0` 且**引用可达**的种子重置失败计数并转回 `pending`（合成通道重新走 grounding 判定）；无引用种子（拒答/qa 直答被踩）保持不动——重扫无判据，等知识缺口补语料 |
+| 成功响应 | `200`，`data: {rescanned}`；审计 `hardcase.rescan`（detail `{rescanned}`）。同款重扫在文档入库成功时按部门自动触发（不审计 hardcase.rescan，入 ingest 日志） |
 
 #### 4.2.14 GET /api/admin/eval-auto/config — 读评测自动配置（评测集自动更新 05）
 

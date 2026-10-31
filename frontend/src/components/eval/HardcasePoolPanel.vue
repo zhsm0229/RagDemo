@@ -11,6 +11,7 @@ import LoadErrorState from '@/components/common/LoadErrorState.vue'
 import {
   ignoreHardcaseSeed,
   listHardcaseSeeds,
+  rescanHardcaseSeeds,
   synthesizeHardcaseSeeds,
   type HardcaseSeedItem,
   type HardcaseSeedStatus,
@@ -22,6 +23,7 @@ const page = ref(1)
 const pageSize = ref(20)
 const loading = ref(false)
 const synthesizing = ref(false)
+const rescanning = ref(false)
 /** 加载失败标记（B11/工单 08）：失败 ≠ 没有数据，空态区呈现"可重试"而非"还没有" */
 const loadError = ref(false)
 const filterStatus = ref<string>('')
@@ -90,6 +92,24 @@ async function onSynthesize(): Promise<void> {
   }
 }
 
+/** 重扫待补语料（工单 16）：有引用且失败累计型 no_ground 转回 pending；确认后执行 */
+async function onRescan(): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      '将"待补语料"中有引用的种子重新转回待合成（清除失败计数），随后可点"生成变体题"重试。确认重扫？',
+      '重扫待补语料',
+      { type: 'info', confirmButtonText: '确认重扫', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  const { rescanned } = await rescanHardcaseSeeds()
+  ElMessage.success(
+    rescanned ? `已转回 ${rescanned} 颗种子为待合成` : '没有可重扫的种子（无引用的种子需先补语料）',
+  )
+  void load()
+}
+
 /** 忽略=不可恢复终态（工单 08，评审要求二次确认）：取消静默返回不发请求 */
 async function onIgnore(row: HardcaseSeedItem): Promise<void> {
   try {
@@ -139,6 +159,7 @@ function formatTime(iso: string): string {
         <el-button type="primary" :loading="synthesizing" @click="onSynthesize"
           >生成变体题</el-button
         >
+        <el-button :loading="rescanning" @click="onRescan">重扫待补语料</el-button>
       </el-tooltip>
     </div>
     <el-table v-loading="loading" :data="items" border stripe>

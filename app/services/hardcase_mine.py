@@ -197,3 +197,29 @@ def collect_hardcase_seeds(session: Session, clock: Clock) -> int:
         )
     session.commit()
     return added
+
+
+def rescan_no_ground(session: Session, dept_id: int | None = None) -> int:
+    """重扫 no_ground 种子（商用就绪工单 16）：有块引用的种子重置失败计数并转回
+    pending——合成通道重新走 grounding 判定（块恢复/补语料后重新获得出题机会）；
+    无引用种子（拒答/qa 直答被踩）保持 no_ground——它们等的是知识缺口补语料，
+    重扫无判据，转回只会被立即打回（noGround 计数空转）。返回转回条数。
+
+    触发点：文档入库成功（ingest 编排 ready 点，按 doc.dept_id）与管理端手动重扫
+    （审计 hardcase.rescan）。UNIQUE(dept_id, normalized_question) 幂等不变。
+    """
+    stmt = select(HardcaseSeed).where(
+        HardcaseSeed.status == "no_ground",
+        HardcaseSeed.skip_count > 0,  # 仅 skip 累计型（采集直接落 no_ground 的 skip_count=0 不动）
+    )
+    if dept_id is not None:
+        stmt = stmt.where(HardcaseSeed.dept_id == dept_id)
+    rescanned = 0
+    for seed in session.scalars(stmt).all():
+        if not _has_citations(seed.citations_snapshot):
+            continue
+        seed.status = "pending"
+        seed.skip_count = 0
+        rescanned += 1
+    session.commit()
+    return rescanned

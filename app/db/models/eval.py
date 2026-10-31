@@ -170,6 +170,11 @@ class HardcaseSeed(Base):
     synth_count: Mapped[int] = mapped_column(
         Integer, server_default=text("0"), comment="已产出变体题数（合成成功后累加）"
     )
+    skip_count: Mapped[int] = mapped_column(
+        Integer,
+        server_default=text("0"),
+        comment="pending 种子合成失败连续累计（≥3 转 no_ground 待补语料；重扫转回清零；预算耗尽不累计）",
+    )
     last_synth_at: Mapped[datetime | None] = mapped_column(
         _ts(), comment="最近一次合成时刻（注入时钟）"
     )

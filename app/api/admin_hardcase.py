@@ -137,6 +137,20 @@ def synthesize(user: AdminUser, db: DbSession) -> dict:
     return {"code": 0, "message": "ok", "data": summary}
 
 
+@router.post("/rescan")
+def rescan_seeds(user: AdminUser, db: DbSession) -> dict:
+    """重扫待补语料种子（工单 16）：有块引用且 skip 累计型的 no_ground 重置计数转回
+    pending（合成通道重新走 grounding 判定）；无引用种子保持不动（重扫无判据）。
+    审计 hardcase.rescan 记转回条数——运营在难例池对"待补语料"列表一键重试。"""
+    from app.services.audit import record_audit
+    from app.services.hardcase_mine import rescan_no_ground
+
+    rescanned = rescan_no_ground(db)
+    record_audit(db, user.id, "hardcase.rescan", "hardcase_seed", None, {"rescanned": rescanned})
+    db.commit()
+    return {"code": 0, "message": "ok", "data": {"rescanned": rescanned}}
+
+
 def record_audit_summary(db: DbSession, actor_id: int, summary: dict) -> None:
     """合成结果审计（独立二次提交：摘要先于审计可知，见模块 docstring）。"""
     from app.services.audit import record_audit

@@ -128,6 +128,18 @@ def process_document(session: Session, deps: IngestDeps, doc_id: int) -> None:
         commit_failed(session, deps.clock, doc, exc)
         return
     commit_ready(session, deps, doc, outcome)
+    # no_ground 种子重扫挂钩（工单 16）：补语料/重传入库成功后，同部门"待补语料"
+    # 种子自动重新获得出题机会；失败不影响入库结果（审计与重扫计数独立）。
+    try:
+        from app.services.hardcase_mine import rescan_no_ground
+
+        rescanned = rescan_no_ground(session, doc.dept_id)
+        if rescanned:
+            logger.info(
+                "入库重扫：doc_id=%s dept=%s 转回 pending %s 颗种子", doc_id, doc.dept_id, rescanned
+            )
+    except Exception:
+        logger.exception("入库重扫失败 doc_id=%s", doc_id)
     logger.info(
         "解析收口 doc_id=%s status=ready 引擎=%s 耗时=%.1fs",
         doc_id,

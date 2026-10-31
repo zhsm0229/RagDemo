@@ -22,6 +22,9 @@ from sqlalchemy.orm import Session
 
 from app.core.clock import Clock
 from app.db.models import Chunk, EvalQuestion, HardcaseSeed
+
+_SEED_SKIP_LIMIT: int = 3  # pending 种子连续失败上限（超过转 no_ground，工单 16）
+
 from app.services.eval_synth_common import (
     _MAX_ANSWER_CHARS,
     _MAX_LLM_TOKENS,
@@ -45,6 +48,18 @@ def _grounding_chunks(session: Session, seed: HardcaseSeed) -> list[Chunk]:
         return []
     stmt = select(Chunk).where(Chunk.id.in_(chunk_ids), Chunk.is_active.is_(True))
     return list(session.scalars(stmt).all())
+
+
+def _register_skip(seed: HardcaseSeed, summary: dict[str, int]) -> None:
+    """合成失败计数（工单 16）：skip_count 累计，达上限转 no_ground（summary 计
+    noGround——转待补语料语义；病态种子不再每周重试空耗 LLM 预算）；引用缺失
+    转移（grounding 判定）不经过此路径、不累计。"""
+    seed.skip_count = (seed.skip_count or 0) + 1
+    if seed.skip_count >= _SEED_SKIP_LIMIT:
+        seed.status = "no_ground"
+        summary["noGround"] += 1
+    else:
+        summary["skipped"] += 1
 
 
 def synthesize_from_seeds(
@@ -93,17 +108,17 @@ def synthesize_from_seeds(
         try:
             raw = "".join(llm.chat_stream(messages, _MAX_LLM_TOKENS))
         except Exception:  # noqa: BLE001 — 上游故障种子保持 pending，不炸批次
-            summary["skipped"] += 1
+            _register_skip(seed, summary)
             continue
         data = extract_json(raw)
         variants = data.get("variants") if isinstance(data, dict) else None
         answer = data.get("expected_answer") if isinstance(data, dict) else None
         if not isinstance(variants, list) or not isinstance(answer, str) or not answer.strip():
-            summary["skipped"] += 1
+            _register_skip(seed, summary)
             continue
         answer = answer.strip()
         if len(answer) > _MAX_ANSWER_CHARS:
-            summary["skipped"] += 1
+            _register_skip(seed, summary)
             continue
 
         source_doc_id = chunks[0].document_id
@@ -140,6 +155,6 @@ def synthesize_from_seeds(
             seed.last_synth_at = now
             summary["seedsProcessed"] += 1
         else:
-            summary["skipped"] += 1  # 全部变体被去重/截断 → 保持 pending 可重试
+            _register_skip(seed, summary)  # 全部变体被去重/截断 → 计失败（超限转 no_ground）
     session.commit()
     return summary
