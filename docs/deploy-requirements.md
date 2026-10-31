@@ -33,6 +33,7 @@ LLM：DeepSeek 云 API（`api.deepseek.com`，OpenAI 兼容）。**本地不部�
 | GPU | 无（可选） | 入门卡 4-8GB 显存（T4/4060 级）跑 GPU 版 TEI | 重排 <1s/问（CPU 的 1/30），规范 §1.5 的 10s SLA 前提即 GPU TEI |
 | 网络 | 外网可达 `api.deepseek.com`（云轨必需） | — | 出网范围见合规确认单 |
 | 系统 | Linux 原生（Ubuntu 22.04+）优于 Windows+WSL2 | — | WSL2 多一层内存/IO 开销 |
+| CPU 架构 | **linux/amd64（x86_64）** | — | 仅 amd64：TEI 官方镜像无 arm64 manifest，arm64 服务器（含国产化 ARM 平台）`docker compose pull` 会直接失败——需换 TEI 基镜像（临时方案见 deploy/mac-setup/README.md §7，正解=自构建 arm64 基镜像后钉版），见 2026-10-31 评审 P2 |
 
 **Mini 主机 24G 内存 + 1TB 磁盘：可正常运行**，内存磁盘均远超需求；唯一要认真选的是 **CPU 型号**（N100 类 4 核小主机重排延迟 30-90s；7840HS/i5-1240P 级 8 核 15-40s；要商用级 10s 内响应须加 GPU TEI）。
 
@@ -150,9 +151,20 @@ UPLOADS_VOLUME=deploy_uploads ./deploy/backup.sh    # 定时备份（pg_dump + u
 | 内存不足 OOM | bootstrap 体检硬门槛；运行期 `recover.sh` 一键恢复，startup-check 错峰装配 |
 | LLM 云轨不可达/超支 | 健康卡 llm 行实时暴露；本地轨切换步骤 §3.2（分钟级） |
 | 版本回退 | rollback.sh（digest 清单在 deploy/releases.md）；迁移仅追加可安全降级应用版本 |
-| 数据丢失 | backup.sh 定时备份 + 恢复演练（RTO≈4min，runbook §5） |
+| 数据丢失 | backup.sh 定时备份 + 周期恢复演练（deploy/verify-restore.sh，runbook §3.4） |
 | 演示模式误上线 | bootstrap prod 体检 TEST_MODE=false 硬校验；帮助页 Q3 教用户辨别 |
+
+## 7. 部署形态边界与已知限制（验收单附件，2026-10-31 工单 12）
+
+以下为**符合设计的已知行为**，签约与验收时按本节对齐，避免上线后按超出形态的预期扯皮：
+
+1. **单实例约束**：应用进程内持有调度器、登录限流窗口、登出黑名单、精确缓存（进程内单例）——多 worker/双容器部署会导致调度重复触发与状态分裂；扩容路径见评审报告 §6 阶段二（状态外置→调度器独立→加副本）。
+2. **重启语义**：进程重启即清空登录限流窗口/登出黑名单/缓存（JWT 本体无状态不受影响）。
+3. **调度任务补偿**：停机跨过周日 04:00/05:00（UTC）触发窗口，重启后由启动补偿自动补跑当周任务（eval_auto_synth_week 标记 + [自动] run 在册判定，同周互斥不重复）；运行中错过 ≤1h 由 misfire_grace_time 兜底。
+4. **CPU 档性能上限**：无 GPU 时 rerank 15-60s/问（超时豁免 120s，known-issues 开放-1）；要商用级 10s 响应须配 GPU 版 TEI（§2 硬件表）。交付口径按 x86+CPU TEI 的实测数字对齐，不按 GPU 口径承诺。
+5. **架构支持**：仅 linux/amd64（§2 系统行）。
+6. **评测自动闭环**：总闸 EVAL_AUTO_ENABLED 缺省关（开启属部署决策）；开启后周日自动合成与跑分的预算/退化阈值经管理端"自动评测设置"在线调整。
 
 ---
 
-*文档对应版本：2026-10-02 构建；数据来源为本机 Docker 实测（镜像大小/内存占用/重排延迟）。硬件或模型变更时同步修订。*
+*文档对应版本：2026-10-02 构建（§7 补充于 2026-10-31）；数据来源为本机 Docker 实测（镜像大小/内存占用/重排延迟）。硬件或模型变更时同步修订。*

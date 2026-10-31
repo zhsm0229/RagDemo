@@ -251,6 +251,7 @@ docker exec ragdemo-pg psql -U rag -d rag -c "SELECT count(*) FROM qa_pairs"
 |---|---|---|---|---|---|---|---|
 | （示例）2026-09-30 | 验证库恢复 | 12 MB | 8 分钟 | 12 分钟 | 20 小时 | 张三 | 示例行：RTO=恢复+冒烟端到端时长，RPO=距上次成功备份的数据窗口；正式记录自 W5 T9 演练起填 |
 | 2026-09-30 | 验证库恢复 | 42 KB（sql.gz）+ 36 KB（uploads） | 36 秒 | ≈4 分钟 | ≈0（演练口径） | T9 测试者（AI） | W5 T9 首次实测：读回断言三表行数/关键行/alembic_version(0003) 与备份时点一致、上传归档字节比对一致、恢复库冒烟（登录/文档列表/问答）通过；RTO=备份定位→恢复→读回→起服务→冒烟端到端，RPO 以灾前即时备份演示（数据窗口 0），声明口径 ≤24h 见 3.5 |
+| 2026-10-31 | 验证库恢复 | 80 KB（sql.gz） | <1 秒 | <1 分钟 | — | 工单 09（AI） | verify-restore.sh 首次脚本化实测（2026-09-30 备份产物）：7 核心表行数读回一致 + alembic 版本核对通过；脚本含 ON_ERROR_STOP 与失败自动清理，周期化运行归部署机调度（README 见 deploy/alerting/） |
 
 - 类型口径：`验证库恢复` = 3.3(a)，常规演练；`生产覆盖演练` = 3.3(b)，需审批与停机窗口。
 
@@ -356,7 +357,7 @@ python tests/fixtures/tools/make_sample_docx.py   # 写出 tests/fixtures/sample
 
 - 跑分结果天然存档于 `eval_runs`：收口即锁定 config 快照 9 字段（model / promptVersion / qaThreshold / refuseThreshold / efSearch / topK / topN / temperature / manifestVersion），防跨跑对比被阈值调整污染；审计 `eval.run` / `eval.judge` 留痕（§23）。
 - **stub 模式口径（T9 实测修订）**：检索部门过滤的结构性保证已验证——边界内语料齐备时双向引用零越界（Run A，dev 库 run 1/2）；空范围时串库组双向 10/10 拒答（Run B，隔离库 rag_test_b run 1/2）。**stub rerank 分为伪随机值，"越视角题 100% 拒答"在边界内有语料时不可作 stub 判据**（Run A 实测 0/20 拒答、以占位文案作答 auto wrong 属预期）；**真实阈值下的拒答边界须在部署机以真实 embedding + 真实语料复测**（届时人力/客服语料都在库，断言恢复为：越视角组 100% 拒答、对照组全中）。
-- **真实模式复测口径（2026-09-30 部署验收实测，runbook §5.5 预设与实际差异勘误）**：试点库实际构成 = 客服手册 + 全员手册（同内容双部门发布）+ 全员对照语料，**hr 语料缺位**——"人力/客服语料都在库"预设不成立，越界断言按机检 chunk→dept 仍可执行（界=[视角部门, 全员]）。实测（真实 TEI bge-m3 + DeepSeek + refuseThreshold=0.55）：**越界引用 0/19** ✓；越视角组拒答 **7/9**（2 例漏拒：rerank 0.6509/0.6578，撞上全员手册「考勤与休假」章——hr 主题语义天然重叠）；对照组实答 2/2 内容正确。**漏拒带（0.65+）与对照命中带（0.63-0.71）重叠，单一 refuseThreshold 无法同时满足"漏拒=0"与"对照全中"**——阈值维持 0.55 不动，漏拒治理走语料侧（hr 主题章节从全员/客服手册剥离或 qa 优先命中），详见 `.superpowers/sdd/2026-09-30-w5-hardening/deploy-acceptance-report.md` §5.2。运维注意：真实跑分对 rerank 吞吐敏感，部署机 `.env` 已调高 TEI 超时（embed 60s / rerank 120s），rerank 批量负载饱和时整题会以 infra error 收口（detail.error 留痕，autoJudgment=pending）——跑分窗口应避开批量解析/embedding 作业。
+- **真实模式复测口径（2026-09-30 部署验收实测，runbook §5.5 预设与实际差异勘误）**：试点库实际构成 = 客服手册 + 全员手册（同内容双部门发布）+ 全员对照语料，**hr 语料缺位**——"人力/客服语料都在库"预设不成立，越界断言按机检 chunk→dept 仍可执行（界=[视角部门, 全员]）。实测（真实 TEI bge-m3 + DeepSeek + refuseThreshold=0.55）：**越界引用 0/19** ✓；越视角组拒答 **7/9**（2 例漏拒：rerank 0.6509/0.6578，撞上全员手册「考勤与休假」章——hr 主题语义天然重叠）；对照组实答 2/2 内容正确。**漏拒带（0.65+）与对照命中带（0.63-0.71）重叠，单一 refuseThreshold 无法同时满足"漏拒=0"与"对照全中"**——阈值维持 0.55 不动，漏拒治理走语料侧（hr 主题章节从全员/客服手册剥离或 qa 优先命中），详见部署验收存档 `docs/archive/acceptance-status-2026-09-30.md` §三（原 `.superpowers/sdd/2026-09-30-w5-hardening/deploy-acceptance-report.md` 未随仓库迁移入库，引用以存档为准——2026-10-31 六角色评审 P1-7 修复）。运维注意：真实跑分对 rerank 吞吐敏感，部署机 `.env` 已调高 TEI 超时（embed 60s / rerank 120s），rerank 批量负载饱和时整题会以 infra error 收口（detail.error 留痕，autoJudgment=pending）——跑分窗口应避开批量解析/embedding 作业。
 - 结果登记表（一行 = 一次跑分；T9 演练已填，库=主库 rag 除注明外）：
 
 | 日期 | run ID | 视角 | 串库组拒答 | 对照组人工判 | accuracy | 执行人 | 备注 |
@@ -475,3 +476,45 @@ app 容器内的 `localhost` 指 app 容器自身——TEI/MinerU/Gotenberg 都�
 
 - 改 `.env.prod` 后需**重建** app 生效（env_file 不随 restart 重读）：`docker compose -f deploy/docker-compose.prod.yml up -d --force-recreate app`。
 - **compose 项目名与卷名口径**：项目名 = compose 文件所在目录名（v5 实测：`-f` 指定时取文件目录、与执行 cwd 无关；`-p`/`COMPOSE_PROJECT_NAME` 可覆盖）。deploy.sh 用 `deploy/docker-compose.prod.yml` → 项目名固定 `deploy`，卷名 `deploy_uploads` / `deploy_pgdata` / `deploy_mineru-models`。**漂移条件**：复制/改名 compose 文件所在目录、或显式 `-p` 与 deploy.sh 口径不一致——会生成第二套卷与容器（数据"消失"实为新卷为空），§3.6 的备份/恢复卷名随之漂移；任何迁移/备份前先 `docker volume ls | grep uploads` 核对实际卷名。
+
+
+## 10. 评测自动闭环运维（F-1019，评测集自动更新）
+
+周任务（应用内 APScheduler，UTC）：**周日 04:00** 合成流水（难例采集 → 点踩种子变体 → 文档抽样造题，job id `eval_auto_synth`）、**周日 05:00** 三视角自动跑分（service/hr/all 各建 `[自动]` run，job id `eval_auto_run`）。总闸与预算存 `app_settings`（key=`eval_auto`），管理端「评测管理 → 自动评测设置」在线调整（PUT 即生效，无需重启）。
+
+### 10.1 手动触发（不等周任务）
+
+```bash
+# 合成流水（采集+合成+造题一体；总闸关闭时零副作用）
+uv run --no-sync python - <<'PY'
+from app.core.clock import get_clock
+from app.core.config import get_settings
+from app.core.assembly import build_llm
+from app.db.base import SessionLocal
+from app.services.eval_auto import run_synth_pipeline
+with SessionLocal() as s:
+    print(run_synth_pipeline(s, get_clock(), get_settings(), llm=build_llm(get_settings(), 0.0)))
+PY
+
+# 三视角自动跑分（同周幂等）
+uv run --no-sync python - <<'PY'
+from app.core.clock import get_clock
+from app.core.config import get_settings
+from app.main import _build_chat_deps
+from app.db.base import SessionLocal
+from app.services.eval_auto_run import run_weekly_eval
+with SessionLocal() as s:
+    print(run_weekly_eval(s, get_clock(), get_settings(), deps=_build_chat_deps(get_settings())))
+PY
+```
+
+### 10.2 核查与排障
+
+- 跑分结果：管理端「评测管理 → 跑分记录」过滤名称 `[自动]` 前缀；报告页看正式/扩充分层与环比。
+- 退化告警：概览「语料健康度」卡片红色提示条（阈值 `eval_auto_regression_pp` 百分点）；明细在 run 的 `detail.regression`。
+- 单视角失败：该视角 run 置 failed（其余视角照常），重跑 = 管理端删除异常 run 后手动触发，或等下周。
+- LLM 配额：合成与跑分共用 DeepSeek 配额；预算三闸（synth_per_seed / doc_sample_per_dept / weekly_max_questions）在设置页调整，`weekly_max_questions` 超限种子自动留待下周。
+
+### 10.3 开关
+
+生产开启：`.env` 加 `EVAL_AUTO_ENABLED=true` 后重建 app（env_file 不随 restart 重读）；运行期临时停用走设置页总闸（立即生效）。
