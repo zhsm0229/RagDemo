@@ -73,7 +73,12 @@ from app.services.agent_tools import (
     SaveDraftDeps,
     SaveDraftTool,
 )
-from app.services.auth import RateLimiterProto, default_limiter
+from app.services.auth import (
+    LOGIN_RATE_MAX_EVENTS,
+    LOGIN_RATE_WINDOW_S,
+    RateLimiterProto,
+    default_limiter,
+)
 from app.services.chat import ChatDeps
 from app.services.chat_cache import (
     ChatCacheProto,
@@ -125,7 +130,7 @@ def _build_state(settings: Settings) -> StateBundle:
             cache=PgExactCache(clock, settings.cache_ttl_s),
             counter=PgDailyCounter(clock),
             hit_counter=PgHitCounter(clock),
-            limiter=PgSlidingWindowLimiter(60, 10, clock),
+            limiter=PgSlidingWindowLimiter(LOGIN_RATE_WINDOW_S, LOGIN_RATE_MAX_EVENTS, clock),
             blacklist=PgJtiBlacklist(clock),
         )
     return StateBundle(

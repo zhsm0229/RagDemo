@@ -110,7 +110,12 @@ class SlidingWindowLimiter:
             self._events.clear()
 
 
-default_limiter = SlidingWindowLimiter(window_seconds=60, max_events=10)
+# 登录限流窗口口径（单一事实源）：main._build_state 的 PG 实现同参数引用此常量
+LOGIN_RATE_WINDOW_S: int = 60
+LOGIN_RATE_MAX_EVENTS: int = 10
+default_limiter = SlidingWindowLimiter(
+    window_seconds=LOGIN_RATE_WINDOW_S, max_events=LOGIN_RATE_MAX_EVENTS
+)
 
 
 def get_user_by_id(session: Session, user_id: int) -> User | None:

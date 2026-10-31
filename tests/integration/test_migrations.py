@@ -241,6 +241,9 @@ def test_all_tables_exist(session):
         "user_memories",
         "agent_runs",
         "agent_steps",
+        "state_cache_entries",  # 状态外置三表（工单 19，0019）
+        "state_counters",
+        "state_auth_guards",
     ]:
         assert t in rows
 
