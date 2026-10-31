@@ -101,25 +101,29 @@ def ignore_seed(
 def synthesize(user: AdminUser, db: DbSession) -> dict:
     """手动触发合成（单次双通道）：点踩种子变体 + 文档抽样造题，产物均入扩充集。
 
-    预算取 settings（eval_auto_synth_per_seed / eval_auto_doc_sample_per_dept /
-    eval_auto_weekly_max_questions，两通道共享全局总量闸）；审计 eval.autosynth 记
-    合并摘要——摘要先于审计可知，审计独立于合成事务二次提交（失败不落审计）。
+    预算走 load_eval_auto_config（app_settings 在线配置，与周任务同一真相源——
+    评审 P2：设置页预算对手动按钮生效，不读 env 缺省）；审计 eval.autosynth 记
+    合并摘要 + trigger="manual"（与周任务 "weekly" 对齐）——审计独立于合成事务
+    二次提交（失败不落审计）。
     """
+    from app.services.eval_auto_config import load_eval_auto_config
+
     settings = get_settings()
+    config = load_eval_auto_config(db, settings)
     llm = build_llm(settings, 0.0)
     seed_summary = eval_synth.synthesize_from_seeds(
         db,
         get_clock(),
         llm=llm,
-        max_per_seed=settings.eval_auto_synth_per_seed,
-        max_total=settings.eval_auto_weekly_max_questions,
+        max_per_seed=config.synth_per_seed,
+        max_total=config.weekly_max_questions,
     )
     chunk_summary = eval_synth.synthesize_from_chunks(
         db,
         get_clock(),
         llm=llm,
-        sample_per_dept=settings.eval_auto_doc_sample_per_dept,
-        max_total=settings.eval_auto_weekly_max_questions - seed_summary["synthesized"],
+        sample_per_dept=config.doc_sample_per_dept,
+        max_total=config.weekly_max_questions - seed_summary["synthesized"],
     )
     summary: dict = {
         "synthesized": seed_summary["synthesized"] + chunk_summary["synthesized"],
@@ -137,4 +141,4 @@ def record_audit_summary(db: DbSession, actor_id: int, summary: dict) -> None:
     """合成结果审计（独立二次提交：摘要先于审计可知，见模块 docstring）。"""
     from app.services.audit import record_audit
 
-    record_audit(db, actor_id, "eval.autosynth", "eval", None, dict(summary))
+    record_audit(db, actor_id, "eval.autosynth", "eval", None, {"trigger": "manual", **summary})

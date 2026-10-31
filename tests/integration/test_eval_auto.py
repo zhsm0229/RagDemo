@@ -132,3 +132,48 @@ def test_配置读写与回落缺省(session) -> None:
     audit = session.scalars(select(AuditLog).where(AuditLog.action == "eval.auto_config")).one()
     assert audit.detail["before"]["enabled"] is False
     assert audit.detail["after"]["synthPerSeed"] == 3
+
+
+def test_load对越界与非法值钳制回落缺省(session) -> None:
+    """读侧钳制（评审 P2）：手改 app_settings 越界值/非法类型时 load 钳到与 PUT 相同
+    值域、解析失败回落 Settings 缺省——私有化环境直改行不炸 GET/周流水，预算闸不失效。"""
+    from app.db.models import AppSetting
+
+    session.add(
+        AppSetting(
+            key="eval_auto",
+            value={
+                "enabled": True,
+                "synthPerSeed": -5,  # 越下界 → 钳到 1
+                "docSamplePerDept": 0,  # 越下界 → 钳到 1
+                "weeklyMaxQuestions": 99999,  # 越上界 → 钳到 5000
+                "regressionPp": "not-a-number",  # 非法类型 → 回落缺省 5.0
+            },
+        )
+    )
+    session.commit()
+
+    config = load_eval_auto_config(session, Settings(jwt_secret="eval-auto-test"))
+    assert config.synth_per_seed == 1
+    assert config.doc_sample_per_dept == 1
+    assert config.weekly_max_questions == 5000
+    assert config.regression_pp == 5.0
+    assert config.enabled is True
+
+
+def test_save审计before与after同为camelCase键(session) -> None:
+    """审计键风格统一（评审 P2）：before 与 after 同为 camelCase（此前 before 走
+    asdict 产出 snake_case，同条审计前后值键名不对齐，审计比对易错）。"""
+    save_eval_auto_config(
+        session,
+        _CLOCK,
+        actor_id=_admin_id(session),
+        enabled=True,
+        synth_per_seed=4,
+        doc_sample_per_dept=10,
+        weekly_max_questions=80,
+        regression_pp=3.5,
+    )
+    audit = session.scalars(select(AuditLog).where(AuditLog.action == "eval.auto_config")).one()
+    assert audit.detail["before"]["synthPerSeed"] == 2  # Settings 缺省（camelCase 键）
+    assert audit.detail["after"]["synthPerSeed"] == 4

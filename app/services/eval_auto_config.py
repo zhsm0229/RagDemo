@@ -6,7 +6,7 @@ save 全量覆写五参数并留审计 eval.auto_config（detail {before, after}
 （row.value 重新赋值触发变更检测，勿原地 mutate）。
 """
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
@@ -30,20 +30,38 @@ class EvalAutoConfig:
 
 
 def load_eval_auto_config(session: Session, settings: Settings | None = None) -> EvalAutoConfig:
-    """读配置：app_settings 行存在则覆盖 Settings 缺省，行缺失全缺省。"""
+    """读配置：app_settings 行存在则覆盖 Settings 缺省，行缺失全缺省。
+
+    读侧钳制（评审 P2）：私有化环境可能手改 app_settings 行——越界值钳到与 PUT
+    相同值域（api/admin_eval_auto.py Field 口径），解析失败回落缺省——手改行不炸
+    GET/周流水，预算闸不因脏数据失效。
+    """
     settings = settings or get_settings()
     row = session.get(AppSetting, _EVAL_AUTO_KEY)
     value: dict = row.value if row is not None else {}
+
+    def _int(key: str, default: int, lo: int, hi: int) -> int:
+        try:
+            return max(lo, min(hi, int(value.get(key, default))))
+        except (TypeError, ValueError):
+            return default
+
+    def _float(key: str, default: float, lo: float, hi: float) -> float:
+        try:
+            return max(lo, min(hi, float(value.get(key, default))))
+        except (TypeError, ValueError):
+            return default
+
     return EvalAutoConfig(
         enabled=bool(value.get("enabled", settings.eval_auto_enabled)),
-        synth_per_seed=int(value.get("synthPerSeed", settings.eval_auto_synth_per_seed)),
-        doc_sample_per_dept=int(
-            value.get("docSamplePerDept", settings.eval_auto_doc_sample_per_dept)
+        synth_per_seed=_int("synthPerSeed", settings.eval_auto_synth_per_seed, 1, 50),
+        doc_sample_per_dept=_int(
+            "docSamplePerDept", settings.eval_auto_doc_sample_per_dept, 1, 500
         ),
-        weekly_max_questions=int(
-            value.get("weeklyMaxQuestions", settings.eval_auto_weekly_max_questions)
+        weekly_max_questions=_int(
+            "weeklyMaxQuestions", settings.eval_auto_weekly_max_questions, 1, 5000
         ),
-        regression_pp=float(value.get("regressionPp", settings.eval_auto_regression_pp)),
+        regression_pp=_float("regressionPp", settings.eval_auto_regression_pp, 0.5, 50.0),
     )
 
 
@@ -61,7 +79,15 @@ def save_eval_auto_config(
 ) -> None:
     """全量覆写配置行 + 审计 eval.auto_config（detail {before, after}，生效值口径）。"""
     settings = settings or get_settings()
-    before = load_eval_auto_config(session, settings)
+    before_config = load_eval_auto_config(session, settings)
+    # before 按与 after 同一 camelCase 组装（同条审计前后值键名对齐，比对不易错）
+    before = {
+        "enabled": before_config.enabled,
+        "synthPerSeed": before_config.synth_per_seed,
+        "docSamplePerDept": before_config.doc_sample_per_dept,
+        "weeklyMaxQuestions": before_config.weekly_max_questions,
+        "regressionPp": before_config.regression_pp,
+    }
     value = {
         "enabled": enabled,
         "synthPerSeed": synth_per_seed,
@@ -83,6 +109,6 @@ def save_eval_auto_config(
         "eval.auto_config",
         "app_setting",
         None,
-        {"before": asdict(before), "after": value},
+        {"before": before, "after": value},
     )
     session.commit()

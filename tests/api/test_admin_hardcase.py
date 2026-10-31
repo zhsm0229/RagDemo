@@ -184,6 +184,47 @@ def test_手动合成出题并留审计(client, session, monkeypatch) -> None:
     assert audit.detail["synthesized"] == 1
 
 
+def test_手动合成预算走app_settings在线配置且审计带trigger键(
+    client, session, monkeypatch
+) -> None:
+    """手动合成与周任务统一配置源（评审 P2：设置页预算对手动按钮无效的口径分叉）：
+    app_settings 配 synthPerSeed=1 / weeklyMaxQuestions=1 → 手动合成最多产 1 题；
+    审计 detail 带 trigger="manual"（与周任务 trigger="weekly" 口径对齐，消费方
+    可统一区分触发来源）。修复前端点读 env 缺省、审计无 trigger 键。"""
+    from app.core.clock import get_clock
+    from app.services.eval_auto_config import save_eval_auto_config
+
+    admin_login(client, session)
+    save_eval_auto_config(
+        session,
+        get_clock(),
+        actor_id=session.scalar(select(User.id).where(User.username == "admin")),
+        enabled=False,
+        synth_per_seed=1,
+        doc_sample_per_dept=5,
+        weekly_max_questions=1,  # 预算闸收紧到 1：验证手动路径真读 app_settings
+        regression_pp=5.0,
+    )
+    chunk = _doc_and_chunk(session)
+    _make_seed(session, "预算分叉的问题", chunk_id=chunk.id)
+    _make_seed(session, "第二个种子不出题", chunk_id=chunk.id)  # 预算 1 → 只出一题
+
+    class _Stub:
+        def chat_stream(self, messages, max_tokens):
+            yield _JSON_OK
+
+    from app.api import admin_hardcase
+
+    monkeypatch.setattr(admin_hardcase, "build_llm", lambda settings, temperature: _Stub())
+
+    resp = client.post("/api/admin/hardcase-seeds/synthesize")
+    assert resp.status_code == 200
+    body = resp.json()["data"]
+    assert body["synthesized"] == 1  # 修复前：env 缺省预算 100 → 两种子各出题（=2）
+    audit = session.scalars(select(AuditLog).where(AuditLog.action == "eval.autosynth")).one()
+    assert audit.detail["trigger"] == "manual"  # 修复前：无 trigger 键
+
+
 def test_合成解析失败不炸接口(client, session, monkeypatch) -> None:
     admin_login(client, session)
     chunk = _doc_and_chunk(session)
