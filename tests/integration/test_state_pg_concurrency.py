@@ -119,7 +119,40 @@ def test_两实例写读互见_共享语义随后端变化(backend: str, clock: 
         assert counter_b.try_consume(7, limit=1) is True  # 各实例独立额度
 
 
-# ---------- R3 flush/add 并发确定性（两个独立 engine + commit 代理插队） ----------
+# ---------- R1 补全（测试复核 P2-1）：limiter/jti 跨实例共享语义 ----------
+
+
+def test_两实例限流与黑名单互见_共享语义随后端变化(backend: str, clock: FakeClock, pg) -> None:
+    """多副本安全核心价值钉死：pg 下实例 A 登录限流事件对实例 B 生效（A hit 满 →
+    B hit 拒）、A 撤销 jti 后 B revoked=True；memory 下两实例互不可见（各 10 次全放行、
+    revoke 不影响对方）——与 cache/counter 用例对称（QC P2-1）。"""
+
+    from app.core.security import JtiBlacklist
+    from app.services.auth import SlidingWindowLimiter
+    from app.services.state_pg_auth import PgJtiBlacklist, PgSlidingWindowLimiter
+
+    if backend == "pg":
+        from sqlalchemy.orm import sessionmaker as _sm
+
+        _factory = _sm(bind=pg, expire_on_commit=False)
+        limiter_a = PgSlidingWindowLimiter(60, 2, clock, session_factory=_factory)
+        limiter_b = PgSlidingWindowLimiter(60, 2, clock, session_factory=_factory)
+        jti_a = PgJtiBlacklist(clock, session_factory=_factory)
+        jti_b = PgJtiBlacklist(clock, session_factory=_factory)
+    else:
+        limiter_a = SlidingWindowLimiter(window_seconds=60, max_events=2, clock=clock)
+        limiter_b = SlidingWindowLimiter(window_seconds=60, max_events=2, clock=clock)
+        jti_a = JtiBlacklist(clock=clock)
+        jti_b = JtiBlacklist(clock=clock)
+
+    # limiter：A 实例 hit 满窗口 → B 实例第 3 次被拒（pg）或不受影响（memory）
+    assert limiter_a.hit("1.2.3.4|user7") is True
+    assert limiter_a.hit("1.2.3.4|user7") is True
+    assert limiter_b.hit("1.2.3.4|user7") is (backend == "memory")
+
+    # jti：A 实例撤销 → B 实例立即拒令（pg）或无感（memory）
+    jti_a.revoke("jti-cross-1", exp=4_000_000_000.0)
+    assert jti_b.revoked("jti-cross-1") is (backend == "pg")
 
 
 def _cleanup_committed(pg, title: str) -> None:

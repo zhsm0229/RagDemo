@@ -119,7 +119,7 @@ compose 中 `${RAGFLOW_IMAGE:-infiniflow/ragflow:v0.19.1}` 的 tag 默认值保�
 
 - 规范指针：standards §18——PostgreSQL 每日 `pg_dump` 全量保留 7 天（备份目录权限 0700）、上传目录每日备份、恢复目标 **RPO ≤ 24h / RTO ≤ 2h**（§18.3）、`.env` 凭据副本托管密码管理器。
 - **安全须知（§18.1）：备份含全部问答与文档内容，访问权限同生产库**——备份只落独立目录（本方案 `./backups`，脚本已 `chmod 700`），禁止放入 Web 可访问路径或全员可见共享位置；`.env`（含密钥）不在备份内，副本托管密码管理器。
-- 备份范围 = 主库 `rag`（容器 `ragdemo-pg`）+ 上传目录：dev=宿主 `./data/uploads`（`STORAGE_DIR` 默认值）；**prod=uploads named volume（`deploy_uploads`），走 §3.6 卷口径——卷内容不在宿主文件系统上，宿主路径备份在 prod 形态下双向落空（备份拿不到数据、恢复落不进卷）**。`ragdemo-pg-test`（`rag_test`，5434 端口）是独立测试实例，**不在备份范围**；RAGFlow 基线环境不做备份（一次性对照数据，销毁重建，见 2.5）。
+- 备份范围 = 主库 `rag`（容器 `ragdemo-pg`）+ 上传目录：dev=宿主 `./data/uploads`（`STORAGE_DIR` 默认值）；**prod=uploads named volume（`deploy_uploads`），走 §3.6 卷口径——卷内容不在宿主文件系统上，宿主路径备份在 prod 形态下双向落空（备份拿不到数据、恢复落不进卷）**。`ragdemo-pg-test`（`rag_test`，5434 端口）是独立测试实例，**不在备份范围**；state_* 三张易失状态表（`state_cache_entries`/`state_counters`/`state_auth_guards`，0019）随主库一并备份——`STATE_BACKEND=pg` 时 jti 黑名单/限流窗口/缓存随恢复留存（登出黑名单不入备份=恢复后已撤销令牌在 exp 前重新有效，安全含义）；memory 后端（缺省）三表为空，备份无实质内容；RAGFlow 基线环境不做备份（一次性对照数据，销毁重建，见 2.5）。
 - 备份统一走 `deploy/backup.sh`（顶部参数化区可按环境覆盖容器名/库名/目录/保留期/卷名 `UPLOADS_VOLUME`），每步带 `[backup]` 时间戳日志，任一步失败非零退出。
 
 ### 3.1 每日自动备份（调度示例）

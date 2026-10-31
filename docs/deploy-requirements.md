@@ -159,7 +159,7 @@ UPLOADS_VOLUME=deploy_uploads ./deploy/backup.sh    # 定时备份（pg_dump + u
 以下为**符合设计的已知行为**，签约与验收时按本节对齐，避免上线后按超出形态的预期扯皮：
 
 1. **实例分工与扩容（2026-10-31 工单 20 改写，原"单实例约束"解除）**：单机缺省形态仍为单 app 容器（调度/自愈/进程内状态同进程，零变化）。scale 拓扑（`deploy/docker-compose.scale.yml`，**前置条件 `STATE_BACKEND=pg`**，未开禁用该文件）解除单实例约束：api 副本（`SCHEDULER_ENABLED=false`，不跑调度、不自愈，gunicorn worker 数经 `WEB_CONCURRENCY` 调整缺省 1）+ scheduler 副本（单副本，跑调度与启动自愈）；多 worker/多副本下调度与启动补偿经 PG 会话级 advisory lock 抢主**恰一 leader**（锁键 `ragdemo:scheduler:leader`，排查 SQL 见 runbook 部署拓扑节）。**自愈仅 scheduler 副本执行**——残余风险（明示）：app 副本在途解析恰逢 scheduler 副本重启会被误标 failed，管理员在列表点重试即可，量级可接受；按实例归属加过滤属触发线后置项。
-2. **重启语义**：memory 后端（缺省）——进程重启即清空登录限流窗口/登出黑名单/缓存/令牌桶水位（JWT 本体无状态不受影响）；pg 后端（`STATE_BACKEND=pg`）——登录限流/登出黑名单/缓存/日限额/召回暂存五件跨重启存续（易失状态随备份卷留存，runbook 备份范围补充中）。令牌桶水位 pg 实现未落地（工单 21 预留）：限流开启时重启清零、突发额度重新可用（memory 桶同口径）。
+2. **重启语义**：memory 后端（缺省）——进程重启即清空登录限流窗口/登出黑名单/缓存/令牌桶水位（JWT 本体无状态不受影响）；pg 后端（`STATE_BACKEND=pg`）——登录限流/登出黑名单/缓存/日限额/召回暂存五件跨重启存续（易失状态随备份卷留存，备份范围见 runbook §3.1）。令牌桶水位 pg 实现未落地（工单 21 预留）：限流开启时重启清零、突发额度重新可用（memory 桶同口径）。
 3. **调度任务补偿**：停机跨过周日 04:00/05:00（UTC）触发窗口，重启后由启动补偿自动补跑当周任务（eval_auto_synth_week 标记 + [自动] run 在册判定，同周互斥不重复；补偿仅在 leader 进程执行）；运行中错过 ≤1h 由 misfire_grace_time 兜底。
 4. **CPU 档性能上限**：无 GPU 时 rerank 15-60s/问（超时豁免 120s，known-issues 开放-1）；要商用级 10s 响应须配 GPU 版 TEI（§2 硬件表）。交付口径按 x86+CPU TEI 的实测数字对齐，不按 GPU 口径承诺。
 5. **架构支持**：仅 linux/amd64（§2 系统行）。
