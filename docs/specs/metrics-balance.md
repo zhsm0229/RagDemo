@@ -45,13 +45,23 @@
 
 ### 3.2 档位表（常量放 `doc_profile.py`，随代码评审冻结）
 
-| profile | 切分（入库期） | top_n（查询期） |
+| profile | 切分（入库期） | 重叠 overlap_len | 子块 child_len | top_n（查询期） |
+|---|---|---|---|---|
+| policy_clause | **条款边界切**：`第X条` 处开新块；单条超 600 字句切；<120 字碎条并入下条（并入后允许超 max_len，同现有"min 优先于 max"先例）；尾块并入前块 | —（条款天然完整） | — | 5 |
+| operation_manual | 标题聚合 min 400 / max 1000 | 100 | — | 6 |
+| table_report | 标题聚合 min 300 / max 1500 | 100 | 400（父子块） | 5 |
+| notice | 标题聚合 min 800 / max 2000（基本整篇） | 100 | 400（父子块） | 3 |
+| general | 标题聚合 min 300 / max 800 | 100 | — | 5 |
+
+**切分策略 A/B（2026-10-28 评审增补）**：A=句级重叠——被句切的多块相邻共享前块尾部（整句优先、字符尾兜底，上限 overlap_len；单块节天然完整不注入），对齐"递归+重叠跑基线"的通用基线。B=父子块（仅大块档）——子块（≤400）进向量库保召回精度，chat 问答折叠后按（document_id, parent_position）拼回父块正文保上下文（`services/context_expand`，迁移 0013）；**引用仍指命中子块**（证据定位精度不降），RET-03/04 检索测试保持子块视角。切块上限放宽为 max_len+overlap_len（内容预算与重叠预算分离）。
+
+**切分策略触发线（未到禁止提前建设，§25 同规）**：
+
+| 策略 | 状态 | 触发线（满足即立项，须附跑分对比） |
 |---|---|---|
-| policy_clause | **条款边界切**：`第X条` 处开新块；单条超 600 字句切；<120 字碎条并入下条（并入后允许超 max_len，同现有"min 优先于 max"先例）；尾块并入前块 | 5 |
-| operation_manual | 标题聚合 min 400 / max 1000 | 6 |
-| table_report | 标题聚合 min 300 / max 1500 | 5 |
-| notice | 标题聚合 min 800 / max 2000（基本整篇） | 3 |
-| general | 标题聚合 min 300 / max 800（=现状） | 5 |
+| 语义切分（相邻句向量断点） | 未引入 | 无标题且无条款编号的长叙述文在评测集占比 >20%，且 Recall 可归因切断受损 |
+| 智能体分块（LLM 定边界） | 未引入 | 条款正则与结构聚合双双失准的新文档类型出现，且算力升 GPU 档 |
+| 表格行组切分 | 未引入 | table_report 档评测显示表格行被切断伤 Correctness |
 
 **条款切分细节（架构师裁决）**：条款块 title_path 取该条所在节的 heading_path（引用溯源前缀与 rerank 文本的构成件，不得为空）；跨节条款按条款起始位置归属所在节。chunker.py 现 149 行，若条款档实现后逼近 300 行红线，条款切分函数拆至 `app/rag/doc_profile.py` 或独立 `clause_chunker.py`。
 
@@ -61,6 +71,7 @@
 
 - 迁移 `0010_document_doc_type`：`documents` 加列 `doc_type VARCHAR(32) NOT NULL DEFAULT 'general'` + CHECK 约束（命名 `documents_doc_type_check`，同 status 先例）+ 中文注释；down 可回滚。
 - 迁移 `0011_eval_source_doc_id`：`eval_questions` 加列 `source_doc_id BIGINT NULL`，FK 显式命名 `eval_questions_source_doc_id_fkey`（documents 只软删，NO ACTION 即可）+ 中文注释。
+- 迁移 `0013_chunks_parent_position`（切分策略 B）：`chunks` 加列 `parent_position INTEGER NULL`（父子块档子块所属父块 0 基序号，NULL=本块即检索单元）+ 部分索引 `idx_chunks_doc_parent (document_id, parent_position) WHERE parent_position IS NOT NULL`；down 先删索引再删列。
 - **现房规**：ORM 模型列 comment 与迁移注释**逐字一致**（autogenerate 零差异守卫依赖，test_migrations.py 同步 EXPECTED_COLUMNS）；本特性新增端点须同步 docs/api.md 标记行与 `tests/unit/test_api_contract.py` 对账。DB 只存 code；camelCase DTO 字段 `docType`，文案映射放 `frontend/src/components/documents/options.ts`（文档域常量，不放 eval 域）。
 
 ### 3.4 入库、存量与端点

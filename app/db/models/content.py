@@ -131,6 +131,12 @@ class Chunk(Base):
         ),
         Index("idx_chunks_dept", "dept_id", postgresql_where=text("is_active")),
         Index("idx_chunks_doc", "document_id"),
+        Index(
+            "idx_chunks_doc_parent",
+            "document_id",
+            "parent_position",
+            postgresql_where=text("parent_position IS NOT NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -141,6 +147,13 @@ class Chunk(Base):
     content_chars: Mapped[int] = mapped_column(Integer)
     page_no: Mapped[int | None] = mapped_column(Integer)  # 引用定位用
     position: Mapped[int] = mapped_column(Integer)  # 块序
+    parent_position: Mapped[int | None] = mapped_column(
+        Integer,
+        comment=(
+            "父块序号（切分策略 B）：父子块档子块所属父块在文档内的 0 基序号，"
+            "命中后据此取兄弟块拼回父块正文；NULL=本块即检索与上下文单元"
+        ),
+    )  # 0013；comment 与迁移逐字一致（autogenerate 零差异守卫依赖，同 doc_type 先例）
     embedding: Mapped[Any] = mapped_column(Vector(1024))  # BGE-M3
     embedding_model: Mapped[str] = mapped_column(Text, server_default=text("'bge-m3'"))
     hit_count: Mapped[int] = mapped_column(Integer, server_default=text("0"))  # F-1011

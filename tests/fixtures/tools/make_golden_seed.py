@@ -60,41 +60,48 @@ def _stream_obj(text: str) -> bytes:
 
 
 def build_clean_pdf() -> bytes:
-    """规整 pdf 种子（admin_handbook_v1.pdf）：2 页 ASCII 文本约 161 字符，越过红线 100 字下限。"""
-    objs = [
-        b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
-        (
-            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R "
-            b"/Resources << /Font << /F1 6 0 R >> >> >>"
-        ),
-        (
-            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 7 0 R "
-            b"/Resources << /Font << /F1 6 0 R >> >> >>"
-        ),
-        _stream_obj(
-            "Employee Handbook Annual Report. Chapter 1 covers the scope and general principles."
-        ),
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-        _stream_obj(
-            "Chapter 2 covers attendance rules. Contact the HR office for expense details."
-        ),
-    ]
-    out = bytearray(b"%PDF-1.4\n")
-    offsets: list[int] = []
-    for number, obj in enumerate(objs, start=1):
-        offsets.append(len(out))
-        out += f"{number} 0 obj\n".encode("ascii") + obj + b"\nendobj\n"
-    xref_pos = len(out)
-    out += f"xref\n0 {len(objs) + 1}\n".encode("ascii")
-    out += b"0000000000 65535 f \n"
-    out += b"".join(f"{offset:010d} 00000 n \n".encode("ascii") for offset in offsets)
-    out += (
-        f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n".encode(
-            "ascii"
-        )
+    """规整 pdf 种子（admin_handbook_v1.pdf）：fpdf2 生成 2 页英文文本约 400 字符。
+
+    生成器用 fpdf2（pdfium 兼容标准结构）而非手写字节 xref：MinerU 的 pdfium 后端
+    对手写 xref 提取为空（2026-10-01 实测红线误触发），pypdf 则两者皆可读。
+    内容余量按 MinerU 提取有损耗预留（清洗后 400+ >> 红线 100）。"""
+    from fpdf import FPDF
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(False)
+    pdf.add_page()
+    pdf.set_font("helvetica", size=12)
+    pdf.cell(0, 10, "Employee Handbook Annual Report 2026", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+    pdf.multi_cell(
+        0,
+        7,
+        "Chapter 1 covers the scope and general principles of corporate governance, "
+        "including the responsibilities of the administrative department and the "
+        "annual review procedure for all company policies.",
+        new_x="LMARGIN",
+        new_y="NEXT",
     )
-    return bytes(out)
+    pdf.multi_cell(
+        0,
+        7,
+        "Chapter 2 covers attendance rules and leave management. Contact the HR office "
+        "for expense reimbursement details, and submit all requests through the OA "
+        "system within ten working days after each business trip.",
+        new_x="LMARGIN",
+        new_y="NEXT",
+    )
+    pdf.add_page()
+    pdf.multi_cell(
+        0,
+        7,
+        "Appendix: travel expense caps are 600/450/350 CNY per night for tier-1, "
+        "tier-2 and other cities respectively. Meal allowances are 100 CNY per day "
+        "in tier-1 cities and 80 CNY elsewhere, subject to host-provided meals.",
+        new_x="LMARGIN",
+        new_y="NEXT",
+    )
+    return bytes(pdf.output())
 
 
 def build_garbled_docx() -> bytes:

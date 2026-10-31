@@ -50,6 +50,7 @@ def commit_ready(
                 content=chunk.content,
                 content_chars=len(chunk.content),
                 position=chunk.position,
+                parent_position=chunk.parent_position,  # 切分策略 B：子块带父块序号（其余档 None）
                 page_no=chunk.page,  # 引用定位（task-6b）：pdf 块所在页，无页码来源 NULL
                 embedding=vector,
             )

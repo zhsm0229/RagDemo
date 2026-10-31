@@ -36,11 +36,18 @@ class DocProfile(StrEnum):
 
 @dataclass(frozen=True)
 class AggregateParams:
-    """标题聚合档参数：min_len/max_len 直传 chunker.split（§3.2 档位表）。"""
+    """标题聚合档参数：min_len/max_len/overlap_len/child_len 直传 chunker.split（§3.2 档位表）。
+
+    overlap_len（切分策略 A）：被句切的多块相邻共享前块尾部的字数上限（整句优先、
+    字符尾兜底），0=不重叠；单块节不注入。child_len（切分策略 B）：非 None 时每块
+    再句切为 ≤child_len 子块——子块进向量库保召回精度，命中后按 parent_position
+    拼回父块保上下文完整（services/context_expand）。"""
 
     min_len: int
     max_len: int
     top_n: int  # 查询期精排保留条数（工单 05 消费）
+    overlap_len: int = 0  # 句级重叠上限（A）；0=旧行为
+    child_len: int | None = None  # 子块切分上限（B）；None=本块即检索单元
 
 
 @dataclass(frozen=True)
@@ -57,10 +64,16 @@ class ClauseParams:
 
 PROFILE_PARAMS: dict[DocProfile, AggregateParams | ClauseParams] = {
     DocProfile.POLICY_CLAUSE: ClauseParams(max_clause_len=600, merge_below=120, top_n=5),
-    DocProfile.OPERATION_MANUAL: AggregateParams(min_len=400, max_len=1000, top_n=6),
-    DocProfile.TABLE_REPORT: AggregateParams(min_len=300, max_len=1500, top_n=5),
-    DocProfile.NOTICE: AggregateParams(min_len=800, max_len=2000, top_n=3),
-    DocProfile.GENERAL: AggregateParams(min_len=300, max_len=800, top_n=5),
+    DocProfile.OPERATION_MANUAL: AggregateParams(
+        min_len=400, max_len=1000, top_n=6, overlap_len=100
+    ),
+    DocProfile.TABLE_REPORT: AggregateParams(
+        min_len=300, max_len=1500, top_n=5, overlap_len=100, child_len=400
+    ),
+    DocProfile.NOTICE: AggregateParams(
+        min_len=800, max_len=2000, top_n=3, overlap_len=100, child_len=400
+    ),
+    DocProfile.GENERAL: AggregateParams(min_len=300, max_len=800, top_n=5, overlap_len=100),
 }
 
 # 查询期 top_n 生效模式标识（§5，评测 config 快照辨识用）：主问答链路恒按 top1

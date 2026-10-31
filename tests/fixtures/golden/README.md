@@ -17,7 +17,7 @@
 
 | kind | 含义 | 期望解析引擎（`expect.engine`，同 `documents.parse_engine`） |
 | --- | --- | --- |
-| `clean` | 规整单栏文档（标题层级清晰、无复杂版式） | docx→`docx`；pdf→`pypdf`（配 MinerU 后→`mineru`） |
+| `clean` | 规整单栏文档（标题层级清晰、无复杂版式） | docx→`docx`；pdf→`pypdf`（钉死进程内路径：文字版预判命中时与管线同判降级，不随 `MINERU_BASE_URL` 漂移） |
 | `dual_col` | 双栏/多栏排版 pdf（阅读顺序易错） | `mineru`（版面分析） |
 | `table` | 表格密集文档（表格占比高） | docx→`docx`；pdf→`mineru` |
 | `scanned` | 扫描件/图片型 pdf（需 OCR） | `mineru`（OCR） |

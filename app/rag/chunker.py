@@ -51,12 +51,15 @@ class OutChunk:
     """输出块：content 为带 `title_path｜` 前缀的正文（供引用溯源），position 为全局序号。
 
     page 为组内首块页码（入库落 chunks.page_no），无页码来源为 None，与 position
-    同为逐块直传字段。"""
+    同为逐块直传字段。parent_position（切分策略 B）：所属父块在 doc 内的 0 基序号
+    （notice/table_report 档 child_len 再切后，子块进向量库、命中按此拼回父块）；
+    None=本块即检索与上下文单元。"""
 
     content: str
     title_path: str
     position: int
     page: int | None = None
+    parent_position: int | None = None
 
 
 @dataclass
@@ -109,6 +112,24 @@ def _pack(text: str, max_len: int) -> list[str]:
     return pieces
 
 
+def _overlap_head(prev_piece: str, overlap_len: int) -> str:
+    """前块尾部作后块重叠头（切分策略 A）：整句从尾回溯装包、末句超预算退字符尾。
+
+    上限恒 overlap_len（无句号文本退字符尾，防表格类整节单"句"把重复量撑爆）；
+    prev_piece 非空时返回值非空——相邻边界恒有承接上下文。"""
+    sentences = _split_sentences(prev_piece)
+    if not sentences:
+        return prev_piece[-overlap_len:]
+    tail = sentences[-1]
+    if len(tail) > overlap_len:
+        return tail[-overlap_len:]
+    for sentence in reversed(sentences[:-1]):
+        if len(tail) + len(sentence) > overlap_len:
+            break
+        tail = sentence + tail
+    return tail
+
+
 def _aggregate(doc: ParsedDoc, min_len: int, max_len: int) -> list[_Group]:
     """贪心聚合：正文 <min_len 的节吸收同级紧邻后继节（合并后 ≤max_len 才吸收）；空白节丢弃。"""
     groups: list[_Group] = []
@@ -132,24 +153,55 @@ def _aggregate(doc: ParsedDoc, min_len: int, max_len: int) -> list[_Group]:
     return groups
 
 
-def split(doc: ParsedDoc, min_len: int = 300, max_len: int = 800) -> list[OutChunk]:
-    """标题层级分块：聚合 → 超长按句切 → 尾块 <min_len 并入前块；position 从 0 连续递增。"""
+def split(
+    doc: ParsedDoc,
+    min_len: int = 300,
+    max_len: int = 800,
+    overlap_len: int = 0,
+    child_len: int | None = None,
+) -> list[OutChunk]:
+    """标题层级分块：聚合 → 超长按句切 → 尾块 <min_len 并入前块 → 可选重叠/子块再切。
+
+    overlap_len（切分策略 A）：>0 且句切出多块时，后块头部注入前块尾部（整句优先、
+    字符尾兜底，块长上限放宽为 max_len+overlap_len——内容预算与重叠预算分离）；
+    单块节天然语义完整，不注入。child_len（切分策略 B）：非 None 时每块再按句装包
+    为 ≤child_len 子块（无重叠——兄弟拼接须逐字还原父块），parent_position 记所属
+    父块序号（doc 内 0 基递增）。position 恒从 0 连续递增（子块档按子块计）。"""
     chunks: list[OutChunk] = []
+    parent_no = 0
     for group in _aggregate(doc, min_len=min_len, max_len=max_len):
         text = group.text
         pieces = [text] if len(text) <= max_len else _pack(text, max_len)
         if len(pieces) > 1 and len(pieces[-1]) < min_len:
             pieces[-2] += pieces[-1]
             pieces.pop()
-        for piece in pieces:
-            chunks.append(
-                OutChunk(
-                    content=f"{group.title_path}｜{piece}",
-                    title_path=group.title_path,
-                    position=len(chunks),
-                    page=group.page,
+        if overlap_len > 0 and len(pieces) > 1:
+            pieces = [pieces[0]] + [
+                _overlap_head(pieces[i - 1], overlap_len) + pieces[i] for i in range(1, len(pieces))
+            ]
+        if child_len is None:
+            for piece in pieces:
+                chunks.append(
+                    OutChunk(
+                        content=f"{group.title_path}｜{piece}",
+                        title_path=group.title_path,
+                        position=len(chunks),
+                        page=group.page,
+                    )
                 )
-            )
+            continue
+        for piece in pieces:
+            for child in _pack(piece, child_len):
+                chunks.append(
+                    OutChunk(
+                        content=f"{group.title_path}｜{child}",
+                        title_path=group.title_path,
+                        position=len(chunks),
+                        page=group.page,
+                        parent_position=parent_no,
+                    )
+                )
+            parent_no += 1
     return chunks
 
 
@@ -252,8 +304,14 @@ def split_clauses(doc: ParsedDoc, params: ClauseParams) -> list[OutChunk]:
 
 
 def split_by_profile(doc: ParsedDoc, params: AggregateParams | ClauseParams) -> list[OutChunk]:
-    """按档位参数分派切分（§3.2 档位表）：聚合档直传 min/max（general 档与既有 split
-    逐字一致），条款档走条款边界；入库管线与 golden 镜像共用本入口。"""
+    """按档位参数分派切分（§3.2 档位表）：聚合档四参直传（general 档 overlap/child 逐字
+    兼容旧行为见档位表），条款档走条款边界；入库管线与 golden 镜像共用本入口。"""
     if isinstance(params, AggregateParams):
-        return split(doc, params.min_len, params.max_len)
+        return split(
+            doc,
+            params.min_len,
+            params.max_len,
+            overlap_len=params.overlap_len,
+            child_len=params.child_len,
+        )
     return split_clauses(doc, params)

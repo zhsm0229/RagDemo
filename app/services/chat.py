@@ -31,6 +31,7 @@ from app.rag.doc_profile import resolve_top_n
 from app.rag.prompt import build_user_memory_block
 from app.rag.retrieval_policy import RetrievalPolicy, resolve_policy
 from app.services.chat_plans import qa_plan, rag_plan, with_trace
+from app.services.context_expand import expand_parent_context
 from app.services.conversations_store import (
     MSG_CONVERSATION_NOT_FOUND,
     MSG_MESSAGE_NOT_FOUND,
@@ -174,6 +175,7 @@ def prepare_turn(
             "refuse", [], rewritten, None, None, None, degraded=degraded
         )  # 拒答不写缓存
         return with_trace(plan, ranked_out)
+    folded = expand_parent_context(db, folded)  # 切分策略 B：命中子块替换为父块正文（引用仍指子块）
     deps.hit_counter.add([hit.chunk_id for hit in folded])  # 仅 rag 路径计数（F-1011）
     chat_system = deps.prompts.chat_system
     if memory_block:

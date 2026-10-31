@@ -123,17 +123,23 @@ def test_表格信号_连续两行双竖线不构成表格() -> None:
 
 
 def test_档位常量_五档参数与spec档位表逐字一致() -> None:
+    """spec §3.2 档位表（切分策略 A/B 后）：overlap_len=聚合档统一 100；child_len 仅
+    notice/table_report（大块档）=400——小段保召回、父块保上下文。"""
     assert PROFILE_PARAMS[DocProfile.POLICY_CLAUSE] == ClauseParams(
         max_clause_len=600, merge_below=120, top_n=5
     )
     assert PROFILE_PARAMS[DocProfile.OPERATION_MANUAL] == AggregateParams(
-        min_len=400, max_len=1000, top_n=6
+        min_len=400, max_len=1000, top_n=6, overlap_len=100
     )
     assert PROFILE_PARAMS[DocProfile.TABLE_REPORT] == AggregateParams(
-        min_len=300, max_len=1500, top_n=5
+        min_len=300, max_len=1500, top_n=5, overlap_len=100, child_len=400
     )
-    assert PROFILE_PARAMS[DocProfile.NOTICE] == AggregateParams(min_len=800, max_len=2000, top_n=3)
-    assert PROFILE_PARAMS[DocProfile.GENERAL] == AggregateParams(min_len=300, max_len=800, top_n=5)
+    assert PROFILE_PARAMS[DocProfile.NOTICE] == AggregateParams(
+        min_len=800, max_len=2000, top_n=3, overlap_len=100, child_len=400
+    )
+    assert PROFILE_PARAMS[DocProfile.GENERAL] == AggregateParams(
+        min_len=300, max_len=800, top_n=5, overlap_len=100
+    )
 
 
 def test_档位常量_general档参数与现状切分默认值逐字一致() -> None:

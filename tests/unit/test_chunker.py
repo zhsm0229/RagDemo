@@ -181,7 +181,9 @@ def test_page_defaults_to_none_without_page_source() -> None:
 
 
 def test_按型分派_general档与既有split逐字一致() -> None:
-    """防回归：general 档经 split_by_profile 输出与既有 split 完全相等（含独立成节与句切尾并）。"""
+    """防回归：general 档经 split_by_profile 输出与 split(overlap_len=档位值) 完全相等。
+
+    （切分策略 A 起general 档带句级重叠：重叠注入只发生在句切多块相邻处。）"""
     doc = ParsedDoc(
         title="员工手册",
         blocks=[
@@ -190,26 +192,26 @@ def test_按型分派_general档与既有split逐字一致() -> None:
             Block(level=1, heading_path=["第3章"], text=_sentences(15)),  # 1500 字：句切+尾块并入
         ],
     )
-    assert [len(c.content.removeprefix(f"{c.title_path}｜")) for c in split(doc)] == [
+    general_params = PROFILE_PARAMS[DocProfile.GENERAL]
+    assert [
+        len(c.content.removeprefix(f"{c.title_path}｜"))
+        for c in split_by_profile(doc, general_params)
+    ] == [
         500,
         500,
         800,
-        700,
+        800,  # 尾块 700 + 重叠头 100（=前块末句，恰等于 overlap_len）
     ]
-    assert split_by_profile(doc, PROFILE_PARAMS[DocProfile.GENERAL]) == split(doc)
+    assert split_by_profile(doc, general_params) == split(
+        doc, overlap_len=general_params.overlap_len
+    )
 
 
-@pytest.mark.parametrize(
-    ("profile", "merged"),
-    [
-        (DocProfile.GENERAL, False),  # min 300：350 字 ≥300 不吸收
-        (DocProfile.OPERATION_MANUAL, True),  # min 400：350 <400 吸收（合并 700 ≤1000）
-        (DocProfile.TABLE_REPORT, False),  # min 300：不吸收
-        (DocProfile.NOTICE, True),  # min 800：350 <800 吸收（合并 700 ≤2000）
-    ],
-)
-def test_按型分派_聚合档min参数生效(profile: DocProfile, merged: bool) -> None:
-    """聚合档 min_len 经 split_by_profile 生效：同级 350 字两节按档位决定是否合并。"""
+def test_按型分派_聚合档min参数生效() -> None:
+    """聚合档 min_len 经 split_by_profile 生效：同级 350 字两节按档位决定是否合并。
+
+    B 后 notice/table_report 带 child_len：合并节/独立节再切子块并带 parent_position
+    （notice 合并 701 字无句号 → 硬切 400+301；table_report 350≤400 各自单子块）。"""
     t1, t2 = "甲" * 350, "乙" * 350
     doc = ParsedDoc(
         title="样本",
@@ -218,26 +220,44 @@ def test_按型分派_聚合档min参数生效(profile: DocProfile, merged: bool
             Block(level=1, heading_path=["二"], text=t2),
         ],
     )
-    chunks = split_by_profile(doc, PROFILE_PARAMS[profile])
-    if merged:
-        assert chunks == [OutChunk(content=f"一｜{t1}\n{t2}", title_path="一", position=0)]
-    else:
-        assert chunks == [
+    expected = {
+        DocProfile.GENERAL: [  # min 300：350 ≥300 不吸收；无子块
             OutChunk(content=f"一｜{t1}", title_path="一", position=0),
             OutChunk(content=f"二｜{t2}", title_path="二", position=1),
-        ]
+        ],
+        DocProfile.OPERATION_MANUAL: [  # min 400：350 <400 吸收（合并 700 ≤1000）；无子块
+            OutChunk(content=f"一｜{t1}\n{t2}", title_path="一", position=0),
+        ],
+        DocProfile.TABLE_REPORT: [  # min 300：不吸收；child 400 → 各自单子块
+            OutChunk(content=f"一｜{t1}", title_path="一", position=0, parent_position=0),
+            OutChunk(content=f"二｜{t2}", title_path="二", position=1, parent_position=1),
+        ],
+        DocProfile.NOTICE: [  # min 800：吸收（700 ≤2000）；合并节硬切子块
+            OutChunk(
+                content=f"一｜{'甲' * 350}\n{'乙' * 49}",
+                title_path="一",
+                position=0,
+                parent_position=0,
+            ),
+            OutChunk(content=f"一｜{'乙' * 301}", title_path="一", position=1, parent_position=0),
+        ],
+    }
+    for profile, want in expected.items():
+        assert split_by_profile(doc, PROFILE_PARAMS[profile]) == want, profile
 
 
 def test_按型分派_聚合档max参数生效() -> None:
-    """1800 字单节：notice（max 2000）整节一块不句切；general（max 800）句切为 800+1000。"""
+    """1800 字单节：general（max 800）句切为 800+1100（700+重叠头 100）；
+    notice（max 2000）整节一块不句切，但 child_len=400 再切为 5 个子块（切分策略 B）。"""
     text = _sentences(18)
     doc = ParsedDoc(title="样本", blocks=[Block(level=1, heading_path=["公告"], text=text)])
-    assert split_by_profile(doc, PROFILE_PARAMS[DocProfile.NOTICE]) == [
-        OutChunk(content=f"公告｜{text}", title_path="公告", position=0)
-    ]
     general = split_by_profile(doc, PROFILE_PARAMS[DocProfile.GENERAL])
     bodies = [c.content.removeprefix("公告｜") for c in general]
-    assert [len(body) for body in bodies] == [800, 1000]  # 尾块 1000 ≥300 不回并
+    assert [len(body) for body in bodies] == [800, 1100]  # 尾块 1000 ≥300 不回并；+重叠头 100
+    notice = split_by_profile(doc, PROFILE_PARAMS[DocProfile.NOTICE])
+    assert [len(c.content.removeprefix("公告｜")) for c in notice] == [400, 400, 400, 400, 200]
+    assert {c.parent_position for c in notice} == {0}  # 单父块：全部子块同父
+    assert [c.position for c in notice] == list(range(5))
 
 
 def test_按型分派_条款档走条款边界切分() -> None:
@@ -248,3 +268,86 @@ def test_按型分派_条款档走条款边界切分() -> None:
     params = PROFILE_PARAMS[DocProfile.POLICY_CLAUSE]
     assert split_by_profile(doc, params) == split_clauses(doc, params)
     assert [c.content for c in split_by_profile(doc, params)] == [f"总则｜{c1}", f"总则｜{c2}"]
+    assert all(c.parent_position is None for c in split_by_profile(doc, params))
+
+
+# ---------- 切分策略 A：句级重叠（overlap_len） ----------
+
+
+def test_句级重叠_相邻块共享前块尾句() -> None:
+    """A：15 句 1500 字句切为 800+700，重叠头=前块末句（恰 100=overlap_len）→ 后块 800。
+
+    重叠只进块头、字符均来自原文（零丢失不等于零重复：拼接含重复是有意行为）；
+    单块节不注入重叠。"""
+    text = _sentences(15)
+    doc = ParsedDoc(title="员工手册", blocks=[Block(level=1, heading_path=["附录"], text=text)])
+    chunks = split(doc, overlap_len=100)
+    bodies = [c.content.removeprefix("附录｜") for c in chunks]
+    assert [len(body) for body in bodies] == [800, 800]
+    assert bodies[0] == _sentences(8)
+    assert bodies[1] == bodies[0][-100:] + _sentences(7)  # 重叠头=前块末句，其余照旧
+    assert all(body.endswith("。") for body in bodies)
+    assert {c.parent_position for c in chunks} == {None}
+
+
+def test_重叠上限_末句超预算退字符尾() -> None:
+    """A 兜底：末句 100 字 > overlap_len=50 → 重叠头取前块字符尾 50 字（封顶防重复爆炸）。"""
+    doc = ParsedDoc(
+        title="员工手册", blocks=[Block(level=1, heading_path=["附录"], text=_sentences(15))]
+    )
+    chunks = split(doc, overlap_len=50)
+    bodies = [c.content.removeprefix("附录｜") for c in chunks]
+    assert bodies[1] == bodies[0][-50:] + _sentences(7)
+
+
+def test_零重叠与缺省逐字一致() -> None:
+    """A 防回归：overlap_len=0 输出与缺省 split 完全相等（旧行为零漂移）。"""
+    doc = ParsedDoc(
+        title="员工手册", blocks=[Block(level=1, heading_path=["附录"], text=_sentences(15))]
+    )
+    assert split(doc, overlap_len=0) == split(doc)
+
+
+# ---------- 切分策略 B：父子块（child_len + parent_position） ----------
+
+
+def test_父子块_兄弟拼接逐字还原父块() -> None:
+    """B：子块按句切无重叠 → 剥前缀拼接与父块原文逐字相等（还原无损是展开的前提）。"""
+    text = _sentences(18)
+    doc = ParsedDoc(title="样本", blocks=[Block(level=1, heading_path=["公告"], text=text)])
+    notice = split_by_profile(doc, PROFILE_PARAMS[DocProfile.NOTICE])
+    rebuilt = "".join(c.content.removeprefix("公告｜") for c in notice)
+    assert rebuilt == text
+
+
+def test_父子块_多节父块序号递增() -> None:
+    """B：两节各 1800 字（≥notice min 800 不互并）→ 两父块各自句内子块，parent_position 0/1。"""
+    blocks = [
+        Block(level=1, heading_path=["一", "1.1"], text=_sentences(18)),
+        Block(level=1, heading_path=["二", "2.1"], text=_sentences(18)),
+    ]
+    notice = split_by_profile(
+        ParsedDoc(title="样本", blocks=blocks), PROFILE_PARAMS[DocProfile.NOTICE]
+    )
+    assert [c.parent_position for c in notice] == [0] * 5 + [1] * 5
+    assert [c.position for c in notice] == list(range(10))
+    assert {c.title_path for c in notice} == {"一 > 1.1", "二 > 2.1"}  # 子块各随父块标题路径
+
+
+def test_无子块档与条款档_parent_position恒None() -> None:
+    """B：child_len 未设的档位（general/operation_manual/条款）parent_position 全 None，
+    语义=本块即检索与上下文单元（context_expand 快路径零查询）。"""
+    general_doc = ParsedDoc(
+        title="员工手册", blocks=[Block(level=1, heading_path=["第1章"], text=_sentences(15))]
+    )
+    assert {
+        c.parent_position for c in split_by_profile(general_doc, PROFILE_PARAMS[DocProfile.GENERAL])
+    } == {None}
+    clause_doc = ParsedDoc(
+        title="制度",
+        blocks=[Block(level=1, heading_path=["总则"], text="第一条 " + "甲" * 145 + "。")],
+    )
+    assert {
+        c.parent_position
+        for c in split_clauses(clause_doc, PROFILE_PARAMS[DocProfile.POLICY_CLAUSE])
+    } == {None}

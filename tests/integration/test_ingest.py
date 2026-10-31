@@ -680,7 +680,8 @@ def test_sensitive_hit_pends_until_confirm(session: Session, tmp_path) -> None:
         [
             (
                 "人事数据",
-                ["员工张三身份证号 11010519491231002X 由人事部专人保管。", _filler("附则", 12)],
+                # 正文 ≤400 字：notice 档 child_len=400 下仍单块（切分策略 B，勿再加大）
+                ["员工张三身份证号 11010519491231002X 由人事部专人保管。", _filler("附则", 9)],
             )
         ]
     )
@@ -838,7 +839,8 @@ def test_unexpected_error_maps_to_failed(session: Session, tmp_path, monkeypatch
         session,
         storage,
         _meta(_dept_id(session), "客服_兜底失败_20260901"),
-        _docx_bytes([("第一章 总则", [_filler("总则", 18)])]),
+        # 正文 ≤400 字：notice 档 child_len=400 下仍单块（切分策略 B，勿再加大）
+        _docx_bytes([("第一章 总则", [_filler("总则", 9)])]),
         "ok.docx",
         DOCX_MIME,
     )
