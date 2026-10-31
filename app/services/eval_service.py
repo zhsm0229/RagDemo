@@ -85,7 +85,22 @@ def import_eval_questions(
     if ref_errors:
         raise XlsxBatchError(ref_errors)
     effective_clock = clock if clock is not None else get_clock()
+    # 库内查重（2026-10-31 工单 17 附带修复）：同部门同题面（归一口径单一事实源
+    # hardcase_mine.normalize_question，与合成通道一致）已存在则跳过——运营重放同批
+    # 文件幂等，不再堆积重复题；跳过数进响应 duplicates 供导入提示展示
+    from app.services.hardcase_mine import normalize_question
+
+    existing = {
+        (dept_id, normalize_question(q))
+        for dept_id, q in db.execute(select(EvalQuestion.dept_id, EvalQuestion.question)).all()
+    }
+    duplicates = 0
     for (_, row), (qtype, expected), source_doc_id in zip(rows, norm_pairs, source_doc_ids):
+        key = (dept_ids[row["部门"]], normalize_question(row["问题"]))
+        if key in existing:
+            duplicates += 1
+            continue
+        existing.add(key)
         db.add(
             EvalQuestion(
                 dept_id=dept_ids[row["部门"]],
@@ -106,7 +121,7 @@ def import_eval_questions(
         clock=effective_clock,
     )
     db.commit()
-    return {"imported": len(rows)}
+    return {"imported": len(rows) - duplicates, "duplicates": duplicates}
 
 
 def _row_errors(rows: list[tuple[int, dict[str, str]]]) -> list[dict]:

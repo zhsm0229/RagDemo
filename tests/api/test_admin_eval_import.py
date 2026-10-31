@@ -138,7 +138,7 @@ def test_导入合规三行_201读回部门映射题型来源落列与审计(cli
     resp = post_import(client, rows)
 
     assert resp.status_code == 201
-    assert resp.json() == {"code": 0, "message": "ok", "data": {"imported": 3}}
+    assert resp.json() == {"code": 0, "message": "ok", "data": {"imported": 3, "duplicates": 0}}
 
     questions = list(session.scalars(select(EvalQuestion).order_by(EvalQuestion.id)).all())
     assert len(questions) == 3
@@ -504,3 +504,28 @@ def test_成员角色访问导入与模板_403(client, session):
     assert resp.status_code == 403
     assert resp.json()["code"] == ERR_FORBIDDEN
     assert client.get("/api/admin/eval-questions/template").status_code == 403
+
+
+def test_重复导入同题_幂等跳过重复行(client, session):
+    """库内查重（2026-10-31 工单 17 附带修复）：同部门同题面（归一后）已存在时跳过
+    该行不计入 imported、响应 data.duplicates 计数——运营重放同批文件不再堆积重复题
+    （对抗用例脚本曾放大此缺陷：同题入库 4 份）。"""
+    admin_login(client, session)
+    rows = [
+        ["客服", "重复导入验证题", "[拒答]", "", "cross_reject"],
+    ]
+    first = post_import(client, rows)
+    assert first.status_code == 201
+    assert first.json()["data"]["imported"] == 1
+
+    again = post_import(client, rows)
+    assert again.status_code == 201
+    assert again.json()["data"]["imported"] == 0
+    assert again.json()["data"]["duplicates"] == 1
+
+    total = session.scalar(
+        select(func.count()).select_from(EvalQuestion).where(
+            EvalQuestion.question == "重复导入验证题"
+        )
+    )
+    assert total == 1  # 库内仅一份
