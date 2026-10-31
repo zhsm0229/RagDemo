@@ -562,3 +562,28 @@ SELECT hashtext('ragdemo:scheduler:leader');           -- 与 pg_locks.objid 对
      跨副本命中）；
   3. `SCHEDULER_ENABLED=false` 的 app 副本重启，日志无自愈行（entrypoint gate 生效）；
   4. leader 容器 `docker kill` 后，存活副本在下一生命周期接管调度（日志出现"调度启动"）。
+
+- **本机预验证记录（2026-11-01，工单 20；与 dev 栈共存窗口，仅动 app/scheduler 两服务）**：
+  - 检查单 1/3 **本机验证 ✓**：三副本 healthy；scheduler 日志恰一份 `Scheduler started`
+    （APScheduler 字面量，即"调度启动"；8 条 Added job 含 start 后补挂的召回计数刷库）；
+    `pg_locks` advisory 恰 1 条且 `objid` 与 `hashtext('ragdemo:scheduler:leader')` 对账一致，
+    `pg_stat_activity` 归属 scheduler 副本 IP；运行期一次性容器对同键 `pg_try_advisory_lock`
+    返回 False。app 副本 gunicorn master+2 worker、scheduler master+1（覆盖文件未给
+    scheduler 设 WEB_CONCURRENCY，按定义如此）。app 副本重启后恰 1 行
+    `[entrypoint] alembic upgrade head`、0 行自愈；对照 scheduler（gate=true）启动有自愈行。
+  - **实现口径修正**（引文案先对代码）：app 副本（`SCHEDULER_ENABLED=false`）**不打印
+    "主锁被持有"**——scheduler.py 选举段整块 gate 在 `scheduler_enabled` 内，false 时静默
+    跳过；该行只在 enabled 且抢锁失败时出现。互斥证明以 pg_locks/pg_stat_activity 归属
+    为准，检查单 1 的"各一份主锁被持有"按此口径理解。
+  - 检查单 2 **部分本机验证 ✓**：登录限流滑动窗口跨副本共享实测（副本 1 第 11 次登录请求
+    429/错误码 2005，副本 2 立即同样 429——state_auth_guards 共享读回）；**问答/agent
+    全链路（需登录态）待部署机**。检查单 4 **待部署机**（本机窗口中止未做）。
+  - **两处部署阻断发现（本机实测，部署前必须解决）**：其一，compose `ports` 合并为**追加**
+    语义——基文件 `8000:8000` 与覆盖 `8000-8003:8000` 并存（`docker compose config` 可
+    复核），按本节命令启动必报 `Bind for 0.0.0.0:8000 failed: port is already allocated`；
+    修复方向（后续工单）：覆盖文件 app.ports 改 `!override`（与既有 `!reset` 同版本线）或
+    走上方独立 project fallback。其二，replicas + 范围端口映射**重启漂移**：`compose restart`
+    后映射从范围低位漂到末端（`docker port` 实证），stop+start 又复位，且 restart 后宿主
+    转发短暂拒绝——部署机需逐副本钉静态端口映射或用独立 project 文件消除漂移面。本机
+    验证经不入库的临时端口覆盖（`ports: !override` 换到空闲段）完成；宿主 8000-8003
+    是否空闲属部署机前置自查项。

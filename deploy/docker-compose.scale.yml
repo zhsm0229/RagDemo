@@ -8,8 +8,9 @@
 services:
   app:
     container_name: !reset null # compose ≥ v2.24：清除基文件固定名（replicas 前提）
-    ports:
-      - "8000-8003:8000" # 副本占连续宿主端口；统一入口/LB 留触发线，不提前建
+    ports: !override # 追加合并语义实测（本机验证 2026-11-01）：基文件 8000:8000 与覆盖并存→绑定冲突，
+      # 必须 !override 整体替换；多副本端口由部署机逐副本钉静态端口或独立 project（runbook §11）
+      - "18000:8000"
     environment:
       SCHEDULER_ENABLED: "false" # api 副本不跑调度不自愈（entrypoint 自愈段同 gate）
       STATE_BACKEND: "pg" # 工单 19 的开关（本文件的前置条件）

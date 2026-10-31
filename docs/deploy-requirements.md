@@ -165,7 +165,26 @@ UPLOADS_VOLUME=deploy_uploads ./deploy/backup.sh    # 定时备份（pg_dump + u
 5. **架构支持**：仅 linux/amd64（§2 系统行）。
 6. **评测自动闭环**：总闸 EVAL_AUTO_ENABLED 缺省关（开启属部署决策）；开启后周日自动合成与跑分的预算/退化阈值经管理端"自动评测设置"在线调整。
 7. **分级限流（2026-10-31 工单 21）**：总闸 `RATE_LIMITER_ENABLED` **缺省关=行为与缺省形态逐字节一致**（灰度由部署决策，纯内部阈值不进 .env.example，见 config.py `rate_*`）；开启后问答平滑 30 次/分钟/用户（突发 10）、agent 平滑 10 次/分钟/用户（突发 4），超速 429 携带 `retryAfterSec`（"操作过于频繁，请稍后重试"）。三层限流（登录滑窗→令牌桶→日配额）独立判定互不回写；单机形态即可开启，scale 拓扑开启需 PG 桶实现（预留未落地）。
+8. **无 MinerU 交付形态**：许可合规（AGPL）驱动的降级交付档，起法/功能差异/验收口径见 §8。
+
+## 8. 无 MinerU 交付形态（许可降级档，2026-11-01 工单 10）
+
+MinerU 为 **AGPL-3.0**（组件许可清单与义务边界技术梳理见 `.scratch/commercial-readiness/design/10-license-compliance-tech.md`，正式结论以法律顾问意见为准）。客户不接受 AGPL 组件随栈交付时按本形态交付：**不构建、不分发 mineru 镜像**，pdf 解析整体走 pypdf 降级路径（`app/rag/parser.py` 选择树：`mineru_base_url` 为空 → `PdfFallbackParser`），app 代码零改动。
+
+**起法**（仓库根执行，叠加覆盖文件 `deploy/docker-compose.nomineru.yml`：mineru 划入 full profile 缺省不起 + app `MINERU_BASE_URL` 强制置空，environment 优先级高于 .env/.env.prod）：
+
+```bash
+docker compose -f deploy/docker-compose.prod.yml -f deploy/docker-compose.nomineru.yml up -d
+# dev 形态把第一个 -f 换成 docker-compose.yml 即可；另在 .env 设 IMAGE_OCR_ENABLED=false
+# （图片 OCR F-1017 依赖 MinerU，降级档必须关）
+```
+
+降级档**不适用**：deploy.sh 内存分档的 mineru 常驻分支（按 <22G 低配档语义运维）、runbook §6 的 mineru 镜像自建与 hash 登记、`deploy/recover.sh mineru` 按需拉起。
+
+**功能差异**（对照 full 形态，逐项对照表见上述设计文档 §3.3）：文字版 pdf **无损**（试点裁定文字版本就直走 pypdf）；扫描件 pdf **拒收**（422「疑似扫描件或空文档，有效内容不足」——如实拒绝不静默造文）；表格/版面结构**有损失**（纯文本流：表格摊平、双栏串行，引用页码仍可用）；图片 OCR 不可用；doc/ppt/xls 老格式文字版可用（Gotenberg 转换链不变）。入库状态 `parseEngine="pypdf"`，仅"故障降级"打「降级解析」标注，配置缺省路径不打标。
+
+**验收口径**：1) `docker compose ... config --services` 不含 mineru 且 app 渲染 `MINERU_BASE_URL: ""`；2) 上传文字版 pdf → 状态「就绪」、`parseEngine=pypdf`、问答引用页码正常；3) 上传扫描件 pdf → 422 带明确中文原因；4) 健康卡 mineru 行允许「不可用」（同 §5 验收清单第 1 条）；5) 回归证据 `test_pdf_without_mineru_uses_pypdf_engine` / `test_mineru_outage_degrades_to_pypdf_annotated` / `test_pdf_fallback_pages_and_engine`（2026-11-01 实测 3 passed）。
 
 ---
 
-*文档对应版本：2026-10-02 构建（§7 补充于 2026-10-31）；数据来源为本机 Docker 实测（镜像大小/内存占用/重排延迟）。硬件或模型变更时同步修订。*
+*文档对应版本：2026-10-02 构建（§7 补充于 2026-10-31，§8 补充于 2026-11-01）；数据来源为本机 Docker 实测（镜像大小/内存占用/重排延迟）。硬件或模型变更时同步修订。*
