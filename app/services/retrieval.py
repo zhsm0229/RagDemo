@@ -29,7 +29,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from psycopg import sql
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
 from app.core.llm import Reranker, UpstreamError, cosine_to_similarity
@@ -235,8 +235,9 @@ def _chunk_search_statement(
     """召回语句（独立成函数供测试编译断言：dept_ids 必经绑定参数占位，无字面量插值）。
 
     强制 JOIN documents（W2 移交项①）：归档（is_active=false）与未就绪
-    （status != 'ready'）文档的 chunk 一律不可见；SELECT 显式取 Chunk.embedding
-    供折叠阶段两两余弦比较，Document.doc_type 供评测 trace 记录候选分型。
+    （status != 'ready'）文档的 chunk 一律不可见；生效日期未到同样排除（工单 22，
+    CURRENT_DATE 数据库时钟）。SELECT 显式取 Chunk.embedding 供折叠阶段两两余弦
+    比较，Document.doc_type 供评测 trace 记录候选分型。
     """
     distance = Chunk.embedding.cosine_distance(query_vec)
     return (
@@ -257,6 +258,9 @@ def _chunk_search_statement(
             Chunk.dept_id.in_(dept_ids),  # F-502 部门隔离：dept_id IN (用户部门, 全员)
             Document.is_active.is_(True),  # W2 移交项①：归档文档不泄漏
             Document.status == "ready",  # W2 移交项①：未就绪文档不泄漏
+            # 生效日期前置闸（工单 22）：未生效文档不可见——CURRENT_DATE 走数据库时钟，
+            # 与到期清扫（expire_due_documents）同 UTC 日期口径，零签名改动
+            Document.effective_date <= func.current_date(),
         )
         .order_by(distance)
         .limit(top_k)

@@ -14,7 +14,7 @@ fixtures 见 tests/conftest.py：session（每测试独立事务，结束整体�
 
 import hashlib
 import math
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import select, text
@@ -53,6 +53,7 @@ def _add_document(
     status: str = "ready",
     is_active: bool = True,
     doc_type: str = "general",
+    effective_date: date | None = None,
 ) -> Document:
     doc = Document(
         title=title,
@@ -62,7 +63,7 @@ def _add_document(
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         size_bytes=16,
         content_hash=hashlib.sha256(title.encode("utf-8")).hexdigest(),
-        effective_date=date(2026, 9, 1),
+        effective_date=effective_date or date(2026, 9, 1),
         owner_name="制度责任人",
         status=status,
         is_active=is_active,
@@ -406,3 +407,34 @@ def test_ef_search_set_local_from_parameter_within_transaction(session: Session)
 
     search_chunks(session, query_vec, [ids["service"]], top_k=5, ef_search=123)
     assert session.execute(text("SHOW hnsw.ef_search")).scalar_one() == "123"
+
+
+# ---------------------------------------------------------------------------
+# 生效日期前置闸（工单 22）：未生效文档不参与检索，生效日当天起可见
+# ---------------------------------------------------------------------------
+
+
+def test_未生效文档不参与检索_生效日当天起可见(session: Session) -> None:
+    """effective_date > 数据库今天 → 召回排除；当天起可见（闸走 CURRENT_DATE，与
+    到期清扫同 UTC 日期口径）。修复前"生效日期"只是元数据承诺，上传即 ready 即可
+    被检索——未来生效的制度文档提前泄漏。"""
+    embedder = StubEmbedder()
+    ids = _dept_ids(session)
+    admin = _admin_id(session)
+    today = datetime.now(UTC).date()
+    future = _add_document(
+        session, ids["service"], admin, "客服_未来生效制度", effective_date=today + timedelta(days=30)
+    )
+    active = _add_document(
+        session, ids["service"], admin, "客服_已生效制度", effective_date=today
+    )
+    text = "客服专属退货流程全文内容"
+    future_chunk = _add_chunk(session, future, text, embedder)
+    active_chunk = _add_chunk(session, active, text, embedder)
+
+    hits = search_chunks(
+        session, embedder.embed([text])[0], [ids["service"], ids["all"]], top_k=10, ef_search=40
+    )
+    hit_ids = {hit.chunk_id for hit in hits}
+    assert active_chunk.id in hit_ids
+    assert future_chunk.id not in hit_ids  # 修复前：未来生效文档照样召回
