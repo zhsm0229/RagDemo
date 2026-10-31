@@ -184,9 +184,7 @@ def test_手动合成出题并留审计(client, session, monkeypatch) -> None:
     assert audit.detail["synthesized"] == 1
 
 
-def test_手动合成预算走app_settings在线配置且审计带trigger键(
-    client, session, monkeypatch
-) -> None:
+def test_手动合成预算走app_settings在线配置且审计带trigger键(client, session, monkeypatch) -> None:
     """手动合成与周任务统一配置源（评审 P2：设置页预算对手动按钮无效的口径分叉）：
     app_settings 配 synthPerSeed=1 / weeklyMaxQuestions=1 → 手动合成最多产 1 题；
     审计 detail 带 trigger="manual"（与周任务 trigger="weekly" 口径对齐，消费方

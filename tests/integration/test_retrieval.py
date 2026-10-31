@@ -423,11 +423,13 @@ def test_未生效文档不参与检索_生效日当天起可见(session: Sessio
     admin = _admin_id(session)
     today = datetime.now(UTC).date()
     future = _add_document(
-        session, ids["service"], admin, "客服_未来生效制度", effective_date=today + timedelta(days=30)
+        session,
+        ids["service"],
+        admin,
+        "客服_未来生效制度",
+        effective_date=today + timedelta(days=30),
     )
-    active = _add_document(
-        session, ids["service"], admin, "客服_已生效制度", effective_date=today
-    )
+    active = _add_document(session, ids["service"], admin, "客服_已生效制度", effective_date=today)
     text = "客服专属退货流程全文内容"
     future_chunk = _add_chunk(session, future, text, embedder)
     active_chunk = _add_chunk(session, active, text, embedder)

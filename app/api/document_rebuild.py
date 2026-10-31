@@ -50,7 +50,7 @@ def rebuild_library(
         rebuild_ready_indexes(db, build_ingest_deps(), user.id)
     else:
         background.add_task(_rebuild_all_in_background, user.id)
-    request.app.state.chat_deps.cache.clear()  # 受理即失效：宁可多一次生成不留旧答案
+    request.app.state.chat_deps.cache.clear()  # 全库重建：全部文档变更，整清（工单 23 保留整清语义）
     return {"code": 0, "message": "ok", "data": {"accepted": accepted}}
 
 
@@ -66,5 +66,5 @@ def rebuild_document(
         ensure_rebuildable(db.get(Document, doc_id))  # 受理段校验，执行段后台同口径复验
         status = "parsing"  # 与 retry 同款即时反馈：后台接管前先示意处理中
         background.add_task(_rebuild_one_in_background, doc_id, user.id)
-    request.app.state.chat_deps.cache.clear()
+    request.app.state.chat_deps.cache.clear_by_ref("doc", doc_id)  # 文档级受理即精准失效（工单 23）
     return {"code": 0, "message": "ok", "data": {"id": doc_id, "status": status}}

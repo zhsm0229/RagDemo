@@ -382,3 +382,48 @@ class TestHitCounterConcurrency:
         db = _CaptureSession()
         assert counter.flush(db) == 1
         assert db.param_groups[0] == [{"chunk_id": 9, "n": 1, "now": NOW}]
+
+
+# ---------------------------------------------------------------------------
+# 按 key 精准失效（工单 23）：clear_by_ref 替代整清——变更只淘汰引用该资源的条目
+# ---------------------------------------------------------------------------
+
+
+def test_clear_by_ref_只删引用目标资源的条目() -> None:
+    """两条缓存分别引用 doc 7 与 doc 9：clear_by_ref("doc", 7) 只删前者，
+    doc 9 条目保留（仍可命中）——文档变更不再拖累全缓存命中率。"""
+    cache = ExactCache(_clock(), ttl_s=300)
+    cache.put("k:doc7", {"answer": "A", "citations": [{"refType": "doc", "refId": 7}]})
+    cache.put("k:doc9", {"answer": "B", "citations": [{"refType": "doc", "refId": 9}]})
+
+    removed = cache.clear_by_ref("doc", 7)
+
+    assert removed == 1
+    assert cache.get("k:doc7") is None
+    assert cache.get("k:doc9") == {"answer": "B", "citations": [{"refType": "doc", "refId": 9}]}
+
+
+def test_clear_by_ref_同条目多引用任一命中即删() -> None:
+    """一条回答引用多资源（doc 7 + qa 3）：按任一被变更资源失效——引用关系是集合。"""
+    cache = ExactCache(_clock(), ttl_s=300)
+    cache.put(
+        "k:mix",
+        {"citations": [{"refType": "doc", "refId": 7}, {"refType": "qa", "refId": 3}]},
+    )
+    assert cache.clear_by_ref("qa", 3) == 1
+    assert cache.get("k:mix") is None
+
+
+def test_clear_by_ref_无citations条目保守删除() -> None:
+    """citations 缺席/空（形态漂移兜底）：保守删除（fail-safe）——宁可多失效不留旧答。"""
+    cache = ExactCache(_clock(), ttl_s=300)
+    cache.put("k:odd", {"answer": "X"})
+    assert cache.clear_by_ref("doc", 7) == 1
+    assert cache.get("k:odd") is None
+
+
+def test_clear_by_ref_无命中返回零且不影响其余() -> None:
+    cache = ExactCache(_clock(), ttl_s=300)
+    cache.put("k:doc9", {"citations": [{"refType": "doc", "refId": 9}]})
+    assert cache.clear_by_ref("doc", 999) == 0
+    assert cache.get("k:doc9") is not None

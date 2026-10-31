@@ -668,8 +668,9 @@ def _seed_document_row(
 
 def test_confirm_clears_exact_cache_and_next_question_regenerates(chat_client, session) -> None:
     """预热精确缓存（同题二问命中，stream_calls=1）→ admin confirm 激活待确认文档 →
-    同题三问不再命中（stream_calls 恢复增长为 2、done.cacheHit=false）：文档状态变化
-    改变可检索事实，TTL 不可依赖（W2 移交②）。"""
+    同题三问不再命中（stream_calls 恢复增长为 2、done.cacheHit=false）：confirm 是
+    "扩展可见性"操作，改变全局可检索事实——保留整清（工单 23 裁决），TTL 不可依赖
+    （W2 移交②）。"""
     user = make_user(session, "cacheconfirm", "right-one", role="member")
     make_user(session, "cacheadmin1", "right-two", role="admin")
     _seed_rag_chunk(session, user)
@@ -694,29 +695,32 @@ def test_confirm_clears_exact_cache_and_next_question_regenerates(chat_client, s
 
 
 def test_retry_clears_exact_cache_and_next_question_regenerates(chat_client, session) -> None:
-    """预热缓存 → admin retry 重跑失败文档（test_mode 同步编排，文件缺失再失败仍
-    200）→ 同题三问不再命中：失效在成功响应前生效，与编排最终状态无关。"""
+    """工单 23 精准失效语义：预置引用失败文档的缓存条目 → admin retry 重跑失败文档
+    （test_mode 同步编排，文件缺失再失败仍 200）→ 引用该文档的条目被精准失效，而
+    引用无关文档的条目保留命中（原整清语义下无关条目也被误清）。失效在成功响应前
+    生效，与编排最终状态无关。"""
     user = make_user(session, "cacheretry", "right-one", role="member")
     make_user(session, "cacheadmin2", "right-two", role="admin")
     _seed_rag_chunk(session, user)
     failed = _seed_failed_doc(session, user)
     _override_reranker_high()
-    assert login_as(chat_client, "cacheretry", "right-one").status_code == 200
-    assert post_chat(chat_client, QUESTION).status_code == 200
-    assert post_chat(chat_client, QUESTION).status_code == 200
-    assert app.state.chat_deps.llm.stream_calls == 1
-
+    # 预置两类条目：引用失败文档的（应被精准失效）+ 引用无关文档的（应保留命中）
+    app.state.chat_deps.cache.put(
+        f"chat:{user.dept_id}:stale-after-retry",
+        {"answer": "旧", "citations": [{"refType": "doc", "refId": failed.id}]},
+    )
+    app.state.chat_deps.cache.put(
+        "chat:9:unrelated-keep",
+        {"answer": "无关", "citations": [{"refType": "doc", "refId": 999999}]},
+    )
     assert login_as(chat_client, "cacheadmin2", "right-two").status_code == 200
     resp = chat_client.post(f"/api/documents/{failed.id}/retry")
 
     assert resp.status_code == 200
     assert resp.json()["data"]["status"] == "failed"  # 编排确实重跑（文件缺失仍失败）
-    assert login_as(chat_client, "cacheretry", "right-one").status_code == 200  # 切回提问者
-    third = post_chat(chat_client, QUESTION)
-
-    assert third.status_code == 200
-    assert _parse_sse(third.text)[-1][1]["cacheHit"] is False
-    assert app.state.chat_deps.llm.stream_calls == 2  # 缓存已被整清：第三问重新生成
+    cache = app.state.chat_deps.cache
+    assert cache.get(f"chat:{user.dept_id}:stale-after-retry") is None  # 引用方被失效
+    assert cache.get("chat:9:unrelated-keep") is not None  # 无关条目保留（精准语义）
 
 
 # ---------------------------------------------------------------------------

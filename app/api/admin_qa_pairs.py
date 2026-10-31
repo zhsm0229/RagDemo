@@ -107,7 +107,8 @@ def import_qa_pairs(
         )
     except XlsxBatchError as exc:
         return _batch_rejected(exc)
-    request.app.state.chat_deps.cache.clear()  # 成功响应前失效：可检索事实已变化
+    # 工单 23：批量导入是纯新增（查重 409 拦重复），新资源无既有缓存条目引用——
+    # 不失效（原整清会让无关条目命中率归零）；既有条目仍指向其原本正确的答案
     return JSONResponse(status_code=201, content={"code": 0, "message": "ok", "data": result})
 
 
@@ -146,7 +147,7 @@ def toggle_qa_pair(
     """停用/启用（QA-05）：service 审计 qa.toggle {from,to} 并提交；成功响应前整清
     精确缓存——停用改变可检索事实，陈旧答案不能等 TTL 自然过期。"""
     pair = qa_pairs_service.toggle_qa_pair(db, qa_id, body.status, user.id)
-    request.app.state.chat_deps.cache.clear()  # 成功响应前失效：宁可多一次生成不留旧答案
+    request.app.state.chat_deps.cache.clear_by_ref("qa", qa_id)  # 精准失效（工单 23）
     return {"code": 0, "message": "ok", "data": {"id": pair.id, "status": pair.status}}
 
 
@@ -159,7 +160,9 @@ def update_qa_pair(
     pair = qa_pairs_service.update_qa_pair(
         db, _request_embedder(request), qa_id, body.question, body.answer, user.id
     )
-    request.app.state.chat_deps.cache.clear()  # 成功响应前失效：新答案立即生效（QA-06）
+    request.app.state.chat_deps.cache.clear_by_ref(
+        "qa", qa_id
+    )  # 新答案立即生效（工单 23 精准失效）
     return {
         "code": 0,
         "message": "ok",
@@ -172,5 +175,5 @@ def delete_qa_pair(qa_id: int, user: AdminUser, db: DbSession, request: Request)
     """软删（QA-07）：service 置 is_active=false（行保留可追溯）并审计 qa.delete；
     成功响应前整清缓存——删除改变可检索事实，陈旧答案不能等 TTL 自然过期。"""
     pair = qa_pairs_service.delete_qa_pair(db, qa_id, user.id)
-    request.app.state.chat_deps.cache.clear()  # 成功响应前失效：宁可多一次生成不留旧答案
+    request.app.state.chat_deps.cache.clear_by_ref("qa", qa_id)  # 精准失效（工单 23）
     return {"code": 0, "message": "ok", "data": {"id": pair.id, "isActive": pair.is_active}}

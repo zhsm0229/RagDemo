@@ -186,7 +186,7 @@ def retry_document(
         doc.status = "parsing"  # 后台接管前先落 parsing：列表即时反馈（DOC-11 状态回 parsing）
         db.commit()
         background.add_task(process_in_background, doc.id)
-    request.app.state.chat_deps.cache.clear()  # 成功响应前失效：宁可多一次生成不留旧答案
+    request.app.state.chat_deps.cache.clear_by_ref("doc", doc_id)  # 成功响应前精准失效（工单 23）
     return {"code": 0, "message": "ok", "data": {"id": doc.id, "status": doc.status}}
 
 
@@ -195,7 +195,9 @@ def confirm_document(doc_id: int, user: AdminUser, db: DbSession, request: Reque
     """待确认激活：管理员确认敏感/近似命中文档 → is_active=True（service 负责审计与提交）。
     成功响应前整清问答精确缓存：激活改变可检索事实，TTL 不可依赖（W3 Task 1）。"""
     doc = ingest_service.confirm_document(db, doc_id, actor_user_id=user.id)
-    request.app.state.chat_deps.cache.clear()  # 成功响应前失效（同 retry，W2 移交②）
+    # confirm 是"扩展可见性"操作（激活文档改变全局可检索面）：保留整清——重新生成
+    # 才能体现新事实；精准失效只用于"收缩/重置"类（delete/retry/rebuild，工单 23）
+    request.app.state.chat_deps.cache.clear()
     return {"code": 0, "message": "ok", "data": {"id": doc.id, "isActive": doc.is_active}}
 
 
@@ -205,7 +207,7 @@ def delete_document(doc_id: int, user: AdminUser, db: DbSession, request: Reques
     成功响应前整清问答精确缓存：删除改变可检索事实，TTL 不可依赖（同 retry/confirm，W2 移交②）。
     权限：AdminUser——语料治理是管理员职责（member 403/2004，评审材料 §1）。"""
     ingest_service.delete_document(db, get_clock(), doc_id, actor_user_id=user.id)
-    request.app.state.chat_deps.cache.clear()  # 成功响应前失效（同 retry，W2 移交②）
+    request.app.state.chat_deps.cache.clear_by_ref("doc", doc_id)  # 精准失效（工单 23）
     return {"code": 0, "message": "ok", "data": {"id": doc_id, "deleted": True}}
 
 
@@ -224,7 +226,7 @@ def approve_draft(
         doc.status = "parsing"  # 后台接管前先落 parsing：列表即时反馈（同 retry 编排）
         db.commit()
         background.add_task(process_in_background, doc.id)
-    request.app.state.chat_deps.cache.clear()  # 成功响应前失效（同 retry/confirm，W2 移交②）
+    request.app.state.chat_deps.cache.clear_by_ref("doc", doc_id)  # 精准失效（工单 23）
     return {
         "code": 0,
         "message": "ok",

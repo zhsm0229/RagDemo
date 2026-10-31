@@ -11,13 +11,13 @@ r"""no_ground 种子闭环测试（商用就绪工单 16）：重试上限 + 语
   重新出题机会（挂钩一行；rescan 语义由本文件用例钉死，ingest 回归由既有套件兜底）。
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.clock import FakeClock
-from app.db.models import AuditLog, Chunk, Department, Document, HardcaseSeed, User
+from app.db.models import Chunk, Department, Document, HardcaseSeed, User
 from app.services.hardcase_mine import rescan_no_ground
 
 _CLOCK = FakeClock("2026-10-31T04:00:00+00:00")
@@ -47,7 +47,7 @@ def _real_chunk(session: Session) -> int:
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         size_bytes=16,
         content_hash=f"rescan-{_dept_id(session)}",
-        effective_date=datetime(2026, 10, 1).date(),
+        effective_date=date(2026, 10, 1),
         owner_name="责任人",
         status="ready",
         is_active=True,
@@ -151,5 +151,3 @@ def test_重扫只转回有引用种子(session: Session) -> None:
     session.expire_all()
     assert cited.status == "pending"
     assert cited.skip_count == 0
-
-

@@ -524,8 +524,8 @@ def test_重复导入同题_幂等跳过重复行(client, session):
     assert again.json()["data"]["duplicates"] == 1
 
     total = session.scalar(
-        select(func.count()).select_from(EvalQuestion).where(
-            EvalQuestion.question == "重复导入验证题"
-        )
+        select(func.count())
+        .select_from(EvalQuestion)
+        .where(EvalQuestion.question == "重复导入验证题")
     )
     assert total == 1  # 库内仅一份

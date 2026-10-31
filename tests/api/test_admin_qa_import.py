@@ -129,18 +129,22 @@ def test_导入合规三行_201读回向量批次与审计(qa_client, session):
     assert audit.actor_user_id == admin_id
 
 
-def test_导入成功后清空问答精确缓存(qa_client, session):
-    """新问答对改变可检索事实：成功响应前整清精确缓存（同 W3 Task 1 文档口径）。"""
+def test_导入为纯新增_不失效无关缓存条目(qa_client, session):
+    """工单 23 语义变更：批量导入是纯新增（查重 409 拦重复）——新资源无既有缓存
+    条目引用，不失效（原整清会让无关条目命中率归零）；既有条目仍指向其原本正确
+    的答案，等 TTL 自然过期或对应资源变更时精准失效。"""
     admin_login(qa_client, session)
     from app.main import app
 
-    app.state.chat_deps.cache.put("缓存问题", {"answer": "陈旧答案"})
-    assert app.state.chat_deps.cache.get("缓存问题") == {"answer": "陈旧答案"}
+    app.state.chat_deps.cache.put(
+        "缓存问题", {"answer": "陈旧答案", "citations": [{"refType": "doc", "refId": 7}]}
+    )
+    assert app.state.chat_deps.cache.get("缓存问题") is not None
 
     resp = post_import(qa_client, [["问题A", "答案A", "enabled"]])
 
     assert resp.status_code == 201
-    assert app.state.chat_deps.cache.get("缓存问题") is None
+    assert app.state.chat_deps.cache.get("缓存问题") is not None  # 无关条目保留命中
 
 
 # ---------- ② 空答案 + 超长答案：恰 2 条错误行零入库（QA-02） ----------

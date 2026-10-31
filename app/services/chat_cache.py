@@ -77,6 +77,31 @@ class ExactCache:
         with self._lock:
             self._entries[key] = (entry, expire_at)
 
+    def clear_by_ref(self, ref_type: str, ref_id: int) -> int:
+        """按引用精准失效（工单 23）：条目 citations 任一元素 (refType, refId) 命中
+        即删；citations 缺席/空的条目保守删除（fail-safe——宁可多失效不留旧答案）。
+        返回删除条数。文档/QA 变更点按资源 id 调用，替代整清以保住无关条目命中率。"""
+        with self._lock:
+            stale = [
+                key
+                for key, (entry, _) in self._entries.items()
+                if self._touches(entry, ref_type, ref_id)
+            ]
+            for key in stale:
+                del self._entries[key]
+            return len(stale)
+
+    @staticmethod
+    def _touches(entry: dict, ref_type: str, ref_id: int) -> bool:
+        """条目是否引用目标资源；citations 形态漂移（缺席/空/非 list）按保守删除。"""
+        citations = entry.get("citations") if isinstance(entry, dict) else None
+        if not isinstance(citations, list) or not citations:
+            return True
+        return any(
+            isinstance(c, dict) and c.get("refType") == ref_type and c.get("refId") == ref_id
+            for c in citations
+        )
+
     def clear(self) -> None:
         """整清全部条目（W3 Task 1）：文档 retry/confirm 改变可检索事实，陈旧答案
         不能等 TTL 自然过期，成功响应前接线调用本方法（app/api/documents.py）。

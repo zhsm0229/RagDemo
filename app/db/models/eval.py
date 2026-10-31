@@ -92,7 +92,9 @@ class EvalRun(Base):
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(Text)  # 如"W4 客服上线前回归"；[自动] 前缀受 0017 部分唯一约束
+    name: Mapped[str] = mapped_column(
+        Text
+    )  # 如"W4 客服上线前回归"；[自动] 前缀受 0017 部分唯一约束
     config: Mapped[Any] = mapped_column(JSONB)  # 阈值快照，防跨跑对比被污染
     status: Mapped[str] = mapped_column(Text, server_default=text("'running'"))
     total: Mapped[int] = mapped_column(Integer)
