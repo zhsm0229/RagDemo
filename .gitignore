@@ -43,3 +43,6 @@ training/
 out/
 frontend/out/
 deploy/.DS_Store
+
+# 拨测脚本容器重启计数状态（check-and-alert.sh 运行态）
+.alert-restart-*
