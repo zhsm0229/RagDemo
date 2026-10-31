@@ -256,7 +256,14 @@ function formatTime(iso: string): string {
       </el-tooltip>
     </div>
 
-    <el-table v-loading="loading" :data="items" border stripe max-height="560" data-test="memory-list">
+    <el-table
+      v-loading="loading"
+      :data="items"
+      border
+      stripe
+      max-height="560"
+      data-test="memory-list"
+    >
       <el-table-column label="内容" min-width="220" show-overflow-tooltip>
         <template #default="{ row }">{{ row.content }}</template>
       </el-table-column>
