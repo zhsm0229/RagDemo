@@ -13,7 +13,9 @@ r"""问答进程内三件套（Task 7，Task 8 编排直接消费）：精确缓
   （executemany 参数绑定、单事务）原子累加 hit_count 并统一置 last_hit_at；
   聚合仅在提交成功后回收，失败轮次滚入下一周期（scheduler.run_hit_flush
   logger.exception 吞掉后自然重试）。
-- 线程安全：三组件均为进程内单例，被 SSE 并发请求线程 + APScheduler flush 线程
+- TokenBucketLimiter（工单 21）：用户×入口的令牌桶平滑限速（三层限流第 2 层），
+  懒补充、拒绝不扣水位；pg 实现随工单 19 预留列落地（本工单只做 memory）。
+- 线程安全：各组件均为进程内单例，被 SSE 并发请求线程 + APScheduler flush 线程
   结构性跨线程触达，与 auth.SlidingWindowLimiter 同先例以 threading.Lock 保护
   （FastAPI 线程池并发）；锁只护内存结构，DB 提交不持锁。
 """
@@ -26,7 +28,7 @@ from typing import Protocol
 from sqlalchemy import Integer, bindparam, update
 from sqlalchemy.orm import Session
 
-from app.core.clock import Clock
+from app.core.clock import Clock, get_clock
 from app.db.models import Chunk
 
 
@@ -247,3 +249,50 @@ class HitCounter:
                 else:
                     del self._counts[row["chunk_id"]]
         return len(rows)
+
+
+class RateBucketProto(Protocol):
+    """令牌桶限流协议面（工单 21）：try_acquire 语义见 TokenBucketLimiter（突发放行/
+    平滑补充、拒绝不扣水位、scope×key 隔离）。参数由调用方按 Settings 分档传入——
+    实现不读配置（协议纯函数化，memory/PG 等价性测试无需动 Settings）；pg 实现随
+    工单 19 预留列（state_counters scope='bucket'）落地，本工单只做 memory。"""
+
+    def try_acquire(self, scope: str, key: str, rate_per_min: int, burst: int) -> bool: ...
+
+    def reset(self) -> None: ...
+
+
+class TokenBucketLimiter:
+    """令牌桶平滑限速：{(scope, key): (水位令牌, 上次补充时刻)}，懒补充（工单 21）。
+
+    线程纪律与同模块三组件一致（threading.Lock 护内存结构，无 IO）；时间经可注入
+    Clock（测试 FakeClock 精确推演），生产 SystemClock。拒绝不扣水位（只补不耗）；
+    每次调用（含拒绝）都推进 last——数学上与"固定原点"等价（tokens 已含截至 last
+    的补充），并防时钟回拨重补与浮点回算误差；进程重启窗口清空（同
+    SlidingWindowLimiter 语义）。
+    """
+
+    def __init__(self, clock: Clock | None = None) -> None:
+        self._clock = clock
+        self._buckets: dict[tuple[str, str], tuple[float, datetime]] = {}
+        self._lock = threading.Lock()
+
+    def try_acquire(self, scope: str, key: str, rate_per_min: int, burst: int) -> bool:
+        """首见键满水位放行（突发额度即 burst）；水位 + 按流逝时长线性补充、封顶
+        burst；水位 <1 拒绝且不扣（只推进 last）。"""
+        now = (self._clock if self._clock is not None else get_clock()).now()
+        with self._lock:
+            tokens, last = self._buckets.get((scope, key), (float(burst), now))
+            elapsed = (now - last).total_seconds()
+            if elapsed > 0:
+                tokens = min(float(burst), tokens + elapsed * rate_per_min / 60.0)
+            if tokens < 1.0:
+                self._buckets[(scope, key)] = (tokens, now)  # 拒绝：只推进 last 防回拨重补
+                return False
+            self._buckets[(scope, key)] = (tokens - 1.0, now)
+            return True
+
+    def reset(self) -> None:
+        """清空全部桶（测试隔离用；生产进程重启等效）。"""
+        with self._lock:
+            self._buckets.clear()

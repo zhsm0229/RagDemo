@@ -216,8 +216,11 @@ def test_build_scheduler_registers_cron_jobs_without_starting() -> None:
     assert (auto_run["day_of_week"], auto_run["hour"], auto_run["minute"]) == ("sun", "5", "0")
 
 
-def test_build_scheduler_starts_in_normal_mode() -> None:
-    """test_mode=False：调度器自启且任务保持注册（测试内即启即停，不等待真实触发）。"""
+def test_build_scheduler_starts_in_normal_mode(monkeypatch) -> None:
+    """test_mode=False：调度器自启且任务保持注册（测试内即启即停，不等待真实触发）。
+    R4 修订（design/20 §10）：启动闸含 advisory lock 抢主——本用例以 monkeypatch 恒
+    True 隔离选举与启动语义（抢锁失败→不 start 由 test_scheduler_leader.py 真库承载）。"""
+    monkeypatch.setattr("app.services.scheduler.try_acquire_leader", lambda settings: True)
     scheduler = build_scheduler(Settings(jwt_secret="scheduler-test", test_mode=False))
     try:
         assert scheduler.running is True

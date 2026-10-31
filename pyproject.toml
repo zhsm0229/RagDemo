@@ -10,6 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi",
     "uvicorn",
+    "gunicorn",  # 多 worker 进程模型（工单 20）：SSE 兼容 uvicorn worker；WEB_CONCURRENCY 缺省 1 ≈ 现形态
     "sqlalchemy",
     "psycopg[binary]",
     "alembic",

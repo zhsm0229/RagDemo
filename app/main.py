@@ -82,9 +82,11 @@ from app.services.chat_cache import (
     ExactCache,
     HitCounter,
     HitCounterProto,
+    RateBucketProto,
+    TokenBucketLimiter,
 )
 from app.services.retrieval import PgVectorStore
-from app.services.scheduler import add_hit_flush_job, build_scheduler
+from app.services.scheduler import add_hit_flush_job, build_scheduler, release_leader
 from app.services.vector_store import VectorStore
 
 
@@ -92,13 +94,15 @@ from app.services.vector_store import VectorStore
 class StateBundle:
     """进程内状态五件套（工单 19 装配载体）：_build_state 的产物，lifespan 挂
     app.state.state_bundle——问答链路（cache/counter/hit_counter）与鉴权路由
-    （limiter/blacklist）显式取用，消除缺省解析的隐式全局。"""
+    （limiter/blacklist）显式取用，消除缺省解析的隐式全局。bucket（工单 21）为
+    可选第六件：memory 分支装配、pg 分支留 TODO（PG 桶未实施），缺省 None 兜底。"""
 
     cache: ChatCacheProto
     counter: DailyCounterProto
     hit_counter: HitCounterProto
     limiter: RateLimiterProto
     blacklist: JtiBlacklistProto
+    bucket: RateBucketProto | None = None
 
 
 def _build_state(settings: Settings) -> StateBundle:
@@ -114,6 +118,9 @@ def _build_state(settings: Settings) -> StateBundle:
         from app.services.state_pg import PgDailyCounter, PgExactCache, PgHitCounter
         from app.services.state_pg_auth import PgJtiBlacklist, PgSlidingWindowLimiter
 
+        # TODO(工单 21 预留)：PG 桶未实施——state_counters scope='bucket'（迁移 0020
+        # 已含 refill_at 列）。scale 拓扑 + 限流同时启用需 PG 桶；缺省
+        # rate_limiter_enabled=false 不阻塞（design/21 §3）。
         return StateBundle(
             cache=PgExactCache(clock, settings.cache_ttl_s),
             counter=PgDailyCounter(clock),
@@ -127,6 +134,7 @@ def _build_state(settings: Settings) -> StateBundle:
         hit_counter=HitCounter(clock),
         limiter=default_limiter,
         blacklist=default_blacklist,
+        bucket=TokenBucketLimiter(clock),  # 常驻惰性对象：总闸关时零消费（守卫短路）
     )
 
 
@@ -164,6 +172,7 @@ def _build_chat_deps(settings: Settings, state: StateBundle | None = None) -> Ch
         settings=settings,
         prompts=prompts,
         store=store,
+        bucket=state.bucket,
     )
 
 
@@ -243,6 +252,7 @@ def _build_agent_deps(settings: Settings, chat_deps: ChatDeps) -> AgentDeps:
         channel=channel,
         react_fallback=settings.agent_model_react_fallback,
         counter=chat_deps.counter,
+        bucket=chat_deps.bucket,  # 共享同一桶实例：同用户跨入口水位一致视图（工单 21）
     )
 
 
@@ -261,15 +271,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.state_bundle = state
     app.state.agent_deps = _build_agent_deps(settings, chat_deps)
     # 启动补偿放后台线程：合成/跑分是分钟-小时级 LLM 任务，同步执行会阻塞 lifespan
-    # （healthz 不就绪、端口不监听——2026-10-31 dev 实测教训）；daemon=True 随进程退出
-    threading.Thread(
-        target=_startup_catchup, args=(settings,), daemon=True, name="eval-catchup"
-    ).start()
+    # （healthz 不就绪、端口不监听——2026-10-31 dev 实测教训）；daemon=True 随进程退出。
+    # 补偿只在 leader 跑（工单 20 §3.2）：幂等但烧 LLM 预算，抢主锁是现成的单写者信号
+    # （N worker 各跑一遍 = N 倍账单）；is_leader 属性缺席按 False 兜底（test_mode 等
+    # 未跑选举的形态零副作用）
+    if getattr(scheduler, "is_leader", False):
+        threading.Thread(
+            target=_startup_catchup, args=(settings,), daemon=True, name="eval-catchup"
+        ).start()
     try:
         yield
     finally:
         if scheduler.running:
             scheduler.shutdown(wait=False)
+        release_leader()  # 先 shutdown 后释放（工单 20 §3.1）：关持锁连接，未抢锁为 no-op
 
 
 def _startup_catchup(settings: Settings) -> None:

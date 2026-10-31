@@ -1,0 +1,41 @@
+# 最小商用拓扑覆盖（工单 20 §6 草案；依赖工单 19/20 已合入）。
+# ⚠️ fail-fast 前置条件：未开 STATE_BACKEND=pg 禁用本文件——多副本 + 进程内状态 = 状态
+# 分裂（登录限流/黑名单/缓存/日限额各持一份）。顶部声明即部署检查项。
+# 用法：docker compose -f docker-compose.yml -f deploy/docker-compose.scale.yml up -d
+# 部署机 compose < v2.24（不支持 !reset 清除 container_name）时退化为独立 project：
+# docker compose -p ragdemo-scale -f <本文件改版>，app 定义整体复制一份去掉
+# container_name——二选一在部署实测钉死并记录 runbook（design/20 §6）。
+services:
+  app:
+    container_name: !reset null # compose ≥ v2.24：清除基文件固定名（replicas 前提）
+    ports:
+      - "8000-8003:8000" # 副本占连续宿主端口；统一入口/LB 留触发线，不提前建
+    environment:
+      SCHEDULER_ENABLED: "false" # api 副本不跑调度不自愈（entrypoint 自愈段同 gate）
+      STATE_BACKEND: "pg" # 工单 19 的开关（本文件的前置条件）
+      WEB_CONCURRENCY: "2"
+    deploy:
+      replicas: 2
+  scheduler: # 同镜像同 CMD：调度在 lifespan 内随开关/抢主启停（build_scheduler 内
+    # advisory lock 抢主，多副本仍恰一 leader；本单副本部署属拓扑级双保险）
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      SCHEDULER_ENABLED: "true"
+      STATE_BACKEND: "pg"
+      DATABASE_URL: postgresql+psycopg://rag:${POSTGRES_PASSWORD:-rag}@pg:5432/rag
+      EMBED_BASE_URL: http://tei-embed:80
+      RERANK_BASE_URL: http://tei-rerank:80
+    env_file:
+      - .env
+    depends_on:
+      app:
+        condition: service_healthy # 迁移由 app 先行，scheduler 晚起避免 alembic 竞态
+    healthcheck: # 复用 app 同款（healthz 无状态，两副本语义一致）
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz', timeout=3).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    restart: unless-stopped

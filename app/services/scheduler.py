@@ -15,6 +15,9 @@ r"""定时任务（W1 Task 15）：到期文档下线清扫 + messages 月分区
   红线 §4.3「禁止 f-string 拼 SQL」字面达成；值为注入时钟 date 算术产物，非请求输入。
 - 调度任务一律用独立 SessionLocal 会话（调度线程无请求会话可依附）；
   settings.test_mode=True 时 build_scheduler 只装配不自启（测试进程不起后台线程）。
+- 调度独立单副本（工单 20）：scheduler_enabled 开关 + PG 会话级 advisory lock 抢主
+  （try_acquire_leader，NullPool 独立引擎持锁连接随进程存活），多副本部署恰一
+  leader；catchup 补偿线程随 leader（main.lifespan 读 is_leader）。
 - agent run 幽灵清扫（A4）：running 且 started_at 超过 agent_run_stale_minutes 的
   agent_runs 置 failed（error="运行超时被清扫"）——正常路径收尾必达终态（services/
   agent_runs finally 兜底），此任务兜的是进程崩溃/断电等"finally 也没跑成"的遗留行，
@@ -40,8 +43,10 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from psycopg import sql
-from sqlalchemy import text, update
+from sqlalchemy import create_engine, text, update
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import NullPool
 
 from app.core.clock import Clock, get_clock
 from app.core.config import Settings, get_settings
@@ -64,6 +69,52 @@ _EVAL_SYNTH_JOB_ID = "eval_auto_synth"
 _EVAL_RUN_JOB_ID = "eval_auto_run"
 _EVAL_RUN_STALE_JOB_ID = "eval_run_stale_sweep"
 _MSG_AGENT_STALE = "运行超时被清扫"  # 落 agent_runs.error 的对外脱敏话术（技术细节只进日志）
+
+# 调度独立单副本（工单 20）：锁键字面量入 docstring/日志便于运维 pg_locks 排查——
+# SELECT * FROM pg_locks WHERE locktype='advisory' 配合 hashtext(key) 对账
+_LEADER_KEY = "ragdemo:scheduler:leader"
+_leader_engine: Engine | None = None  # 持锁连接的独立 NullPool 引擎（生命周期=进程）
+_leader_conn: Connection | None = None  # 连接必须显式引用：NullPool.dispose 是 no-op（实测源码）
+
+
+def try_acquire_leader(settings: Settings) -> bool:
+    """进程级抢主：pg_try_advisory_lock(hashtext(key))，持锁连接随进程生命周期。
+
+    为何不用 SessionLocal 池连接：池连接会被 recycle/归还，锁随连接回收静默丢失 →
+    出现"第二个调度器"；NullPool 独立引擎的连接生命周期=进程，锁不可漂移（宁多一条
+    常驻连接换确定性，design/20 §9.2）。失败路径连接即关、返回 False。"""
+    global _leader_engine, _leader_conn
+    _leader_engine = create_engine(settings.database_url, poolclass=NullPool)
+    _leader_conn = _leader_engine.connect()
+    got = _leader_conn.exec_driver_sql(
+        "SELECT pg_try_advisory_lock(hashtext(%s))",  # 参数绑定，禁拼接（红线 2）
+        (_LEADER_KEY,),
+    ).scalar()
+    if not got:
+        _leader_conn.close()  # 会话级锁随连接关闭释放
+        _leader_conn = None
+        return False
+    return True  # 连接保持打开：锁随连接存活；进程退出 TCP 断开 PG 自动释放
+
+
+def release_leader() -> None:
+    """释放调度主锁：关持锁连接并 dispose 引擎（lifespan finally 先 shutdown 后调用）。
+
+    连接必须显式 close——NullPool.dispose() 是 no-op（实测源码），不关连接锁不释放
+    （design/20 §3"关 NullPool 连接并 dispose 引擎"的字面落实）。异常吞掉留日志——
+    进程退出时 TCP 断开为兜底释放路径；未抢锁过为 no-op（test_mode/开关关进程安全可调）。"""
+    global _leader_engine, _leader_conn
+    conn, _leader_conn = _leader_conn, None
+    engine, _leader_engine = _leader_engine, None
+    if conn is None and engine is None:
+        return
+    try:
+        if conn is not None:
+            conn.close()
+        if engine is not None:
+            engine.dispose()
+    except Exception:
+        logger.exception("调度主锁释放失败（进程退出兜底释放）")
 
 
 def sweep_stale_agent_runs(session: Session, clock: Clock, stale_minutes: int) -> int:
@@ -165,8 +216,10 @@ def build_scheduler(settings: Settings) -> BackgroundScheduler:
 
     分区排在清扫之后，同窗口内先收口到期再补建下月分区；提问记录清理再后一小时
     （03:00），避免与 02:00 清扫同窗口抢库；agent 幽灵清扫错开上述窗口（:45），
-    阈值 15 分钟下最长清扫滞后约 1 小时。settings.test_mode=True 只装配不自启；
-    生产按单实例语义（多 worker 部署时各进程各持一份调度器，属 W4 部署关切）。
+    阈值 15 分钟下最长清扫滞后约 1 小时。settings.test_mode=True 只装配不自启
+    （短路顺序不变，测试进程永不起后台线程）；生产启动闸=scheduler_enabled 开关 +
+    advisory lock 抢主（try_acquire_leader，锁键 'ragdemo:scheduler:leader'），多副本
+    部署恰一 leader——未抢到的进程 running=False，本进程不启动调度（design/20 §3）。
     """
     scheduler = BackgroundScheduler(timezone="UTC")
     # misfire_grace_time=1h + coalesce（商用就绪工单 06）：运行中错峰错过（GC 停顿/
@@ -235,8 +288,21 @@ def build_scheduler(settings: Settings) -> BackgroundScheduler:
         replace_existing=True,
         **_MISFIRE,
     )
-    if not settings.test_mode:
-        scheduler.start()
+    # 启动闸（工单 20）：test_mode 短路顺序不变（测试进程永不起后台线程）+ 开关 +
+    # advisory lock 抢主。抢主放本函数内而非 lifespan：签名/返回类型零破坏，装配与
+    # 选举同处一函数便于审计（design/20 §9.1）；选举失败不拖垮 API 装配（misfire +
+    # catchup 兜底）。is_leader 挂调度器对象供 lifespan 消费（catchup 归属）。
+    is_leader = False
+    if not settings.test_mode and settings.scheduler_enabled:
+        try:
+            is_leader = try_acquire_leader(settings)
+        except Exception:
+            logger.exception("调度主锁获取失败（本进程不启动调度器，misfire+catchup 兜底）")
+        if is_leader:
+            scheduler.start()
+        else:
+            logger.info("调度主锁已被其他实例持有，本进程不启动调度")
+    scheduler.is_leader = is_leader  # type: ignore[attr-defined]  # BackgroundScheduler 可挂属性
     return scheduler
 
 

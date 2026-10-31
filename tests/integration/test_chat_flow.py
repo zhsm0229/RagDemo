@@ -171,7 +171,8 @@ class _RecordingLLM:
 
 def test_turn_plan_and_chat_deps_field_contracts() -> None:
     """TurnPlan 八字段（retrieval_trace 后追加可选 degraded=retrieval-policy §2 计划内
-    演进非放宽；主问答路径恒 False）与 ChatDeps 九字段即接口。"""
+    演进非放宽；主问答路径恒 False）与 ChatDeps 十字段即接口（bucket 为工单 21 计划内
+    追加的可选缝，缺省 None——既有 kwargs 构造零改动）。"""
     assert [f.name for f in fields(TurnPlan)] == [
         "kind",
         "citations",
@@ -192,6 +193,7 @@ def test_turn_plan_and_chat_deps_field_contracts() -> None:
         "settings",
         "prompts",
         "store",
+        "bucket",
     ]
 
 

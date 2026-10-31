@@ -4,13 +4,18 @@
 set -e
 echo "[entrypoint] alembic upgrade head"
 alembic upgrade head
-# 自愈（2026-10-02 事故）：真实模式解析走容器内 BackgroundTasks，不持久化——容器重启
-# 后队列丢失，遗留 parsing 会永久卡住且 UI 无重试入口。启动时统一转 failed+原因，
-# 管理员即可在列表点重试（retry 走新任务，幂等）。
-# 前提：本容器独占其数据库（单机 compose 一库一 app；E2E 隔离库 pg-e2e/rag_e2e 落地后，
-# 共库跑套件的事故形态已消除）——若未来多实例共享同一库，本段会把其他实例正在跑的
-# parsing/running 任务误标 failed，届时须按实例归属加过滤再执行。
-python - <<'PY'
+# 自愈段 gate（工单 20 §5）：仅 SCHEDULER_ENABLED 副本执行。自愈把 parsing/running 一律
+# 置 failed——多副本共库时 app 副本启动自愈会误杀其他副本正在跑的任务；scale 拓扑下
+# scheduler 副本不对外服务、单副本，是最接近"独占"前提的写者。残余风险（明示）：app
+# 副本在途解析恰逢 scheduler 副本重启 → 误标 failed 管理员可重试，量级可接受；按实例
+# 归属加过滤留触发线后置。
+if [ "${SCHEDULER_ENABLED:-true}" = "true" ]; then
+  # 自愈（2026-10-02 事故）：真实模式解析走容器内 BackgroundTasks，不持久化——容器重启
+  # 后队列丢失，遗留 parsing 会永久卡住且 UI 无重试入口。启动时统一转 failed+原因，
+  # 管理员即可在列表点重试（retry 走新任务，幂等）。
+  # 前提：本容器独占其数据库（单机 compose 一库一 app；E2E 隔离库 pg-e2e/rag_e2e 落地后，
+  # 共库跑套件的事故形态已消除；scale 拓扑见上 gate 注释）。
+  python - <<'PY'
 from app.db.base import SessionLocal
 from app.db.models import Document, EvalRun
 s = SessionLocal()
@@ -28,4 +33,5 @@ s.commit()
 s.close()
 print(f'[entrypoint] 自愈：{n} 个中断解析任务、{m} 个中断评测任务已转为可重试')
 PY
+fi
 exec "$@"

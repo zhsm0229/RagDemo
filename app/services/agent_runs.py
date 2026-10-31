@@ -60,7 +60,7 @@ from app.db.base import SessionLocal
 from app.db.models import AgentRun
 from app.services.agent_bridge import build_agent_graph
 from app.services.agent_steps import extract_tool_error, record_tool_step
-from app.services.chat_cache import DailyCounter
+from app.services.chat_cache import DailyCounter, RateBucketProto
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +82,9 @@ class AgentDeps:
     channel: Any  # AgentModelChannel（Protocol 不便标注具体类型，Any 承载）
     react_fallback: bool
     counter: DailyCounter
+    # bucket（工单 21）：与问答共享同一桶实例（counter 共享先例同款，同用户跨入口
+    # 水位一致视图）；缺省 None 兜底接线守卫
+    bucket: RateBucketProto | None = None
 
 
 def _model_name(settings: Settings) -> str:

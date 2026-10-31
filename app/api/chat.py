@@ -2,7 +2,8 @@ r"""SSE 问答流端点（Task 9）：POST /api/chat/stream —— 薄控制器 
 
 时序（brief 钉死）：①参数校验（strip 后 1-2000，422/1003 字段级）→ ②每日限额
 （counter.try_consume 每请求恰一次，改写/生成等内部调用不计数；429/3002 未开流普通
-JSON）→ ③会话归属（conversationId 空新建，否则校验本人且 is_active，404/3003；
+JSON；其前的令牌桶限流见工单 21，总闸缺省关）→ ③会话归属（conversationId 空新建，
+否则校验本人且 is_active，404/3003；
 复用会话若仍是默认题"新会话"/空以首问补题，二轮起已命题不再改，W3 Task 1）→
 ④事务①：user 消息 + assistant 占位行（content=''，nextval 发号）+ 首问标题 +
 updated_at，commit 拿双 id 再开流 → ⑤history（最近 3 轮严格轮次对）+ prepare_turn →
@@ -27,6 +28,7 @@ SSE 线格式化（`event: {name}\ndata: {json}\n\n`，presentation 关切）。
 """
 
 import json
+import math
 from collections.abc import Iterator
 from time import perf_counter
 
@@ -37,7 +39,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import DbSession, ReadyUser
 from app.core.clock import get_clock
-from app.core.errors import ERR_DAILY_LIMITED, ApiError
+from app.core.errors import ERR_DAILY_LIMITED, ERR_RATE_LIMITED, ApiError
 from app.core.llm import UpstreamError
 from app.db.models import Conversation, Message, User
 from app.services.chat import (
@@ -54,6 +56,13 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 _QUESTION_MAX_CHARS = 2000  # §21.5：问题 strip 后 1-2000 字
 _MSG_DAILY_LIMITED = "今日提问次数已达上限，请明天再试"
+_MSG_RATE_LIMITED = "操作过于频繁，请稍后重试"  # 令牌桶限流文案（工单 21，与日配额分档）
+
+
+def _retry_after(rate_per_min: int) -> int:
+    """补足一个令牌的最小时长（秒）：max(1, ceil(60/rate))——配置推导的保守提示而非
+    精确水位倒推（协议保持 bool 纯函数，design/21 §7.3）。"""
+    return max(1, math.ceil(60 / rate_per_min))
 
 
 class ChatStreamRequest(BaseModel):
@@ -137,6 +146,21 @@ def chat_stream(
 ) -> StreamingResponse:
     """问答流式端点：请求阶段完成限额/落库/计划（brief 第 1-5 步），生成器只管流与收尾。"""
     deps: ChatDeps = request.app.state.chat_deps
+    # 令牌桶限流（工单 21，三层第 2 层）：先于日配额——桶拒绝不烧配额、不落占位行；
+    # bucket 缺省 None 兜底（PG 分支未装配），总闸关时短路行为与现状逐字节一致
+    if (
+        deps.settings.rate_limiter_enabled
+        and deps.bucket is not None
+        and not deps.bucket.try_acquire(
+            "chat", str(user.id), deps.settings.rate_chat_per_min, deps.settings.rate_chat_burst
+        )
+    ):
+        raise ApiError(
+            ERR_RATE_LIMITED,
+            _MSG_RATE_LIMITED,
+            429,
+            data={"retryAfterSec": _retry_after(deps.settings.rate_chat_per_min)},
+        )
     if not deps.counter.try_consume(user.id, deps.settings.daily_question_limit):  # 每请求恰一次
         raise ApiError(ERR_DAILY_LIMITED, _MSG_DAILY_LIMITED, 429)
     conversation = _resolve_conversation(db, user, body.conversationId, body.question)

@@ -115,6 +115,22 @@ class Settings(BaseSettings):
         5.0  # 退化告警阈值（百分点）：同口径相邻两轮 accuracy 降幅超过该值即在报告
         # detail 存 regression 标记、健康卡标红
     )
+    # ---- 分级限流（工单 21）：总闸缺省关=行为与现状一致（灰度由部署决策）；纯内部 ----
+    # 阈值不进 .env.example（同 agent_model_* 口径），调整走评审
+    rate_limiter_enabled: bool = (
+        False  # 令牌桶分级限流总闸（三层限流第 2 层）：chat/agent 两入口秒级平滑
+        # 限速；开启需单实例/PG 状态外置口径见 deploy-requirements §7【部署可选：缺省 false】
+    )
+    rate_chat_per_min: int = 30  # 问答平滑速率（次/分钟/用户）
+    rate_chat_burst: int = 10  # 问答突发容量（令牌桶深度）
+    rate_agent_per_min: int = 10  # agent 平滑速率（长任务入口更紧）
+    rate_agent_burst: int = 4  # agent 突发容量
+    # ---- 调度器独立（工单 20）：缺省 true=现形态零变化；scale 拓扑下 api 副本置 false ----
+    scheduler_enabled: bool = (
+        True  # 定时任务与启动补偿的启停开关（build_scheduler 启动闸 + catchup
+        # leader-gate + entrypoint 自愈段共用）：多副本部署时仅调度副本开启，
+        # api 副本置 false【部署可选：缺省 true】
+    )
     test_mode: bool = False
     static_dir: str = (
         ""  # 前端 dist 托管目录（§12.2 生产仅 app 发布 80 端口）：空=不挂载（本机 dev/

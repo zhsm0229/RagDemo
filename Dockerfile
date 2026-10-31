@@ -39,4 +39,9 @@ RUN pip install --no-cache-dir . \
 USER app
 EXPOSE 8000
 ENTRYPOINT ["./entrypoint.sh"]
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# gunicorn 多 worker（工单 20，shell 形式：env 展开需经 shell）：WEB_CONCURRENCY 缺省 1
+# ≈ 现单进程 uvicorn 形态（worker 类同为 uvicorn）。--timeout 0：gunicorn watchdog 对
+# 长 SSE 流有误杀面，async worker 自有心跳，0 关闭并由 compose healthcheck 兜底挂死检出。
+CMD gunicorn app.main:app --workers ${WEB_CONCURRENCY:-1} \
+    --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000 \
+    --timeout 0 --graceful-timeout 60 --access-logfile -

@@ -15,6 +15,7 @@ from app.services.chat_cache import (
     ChatCacheProto,
     DailyCounterProto,
     HitCounterProto,
+    RateBucketProto,
 )
 from app.services.vector_store import VectorStore
 
@@ -49,7 +50,9 @@ class TurnPlan:
 class ChatDeps:
     """问答链路依赖包：Task 8 消费检索/提示词/缓存，Task 9 消费 counter（每日限额）
     与 settings.chat_max_tokens（生成 clamp）；store 为 VectorStore 第六接口
-    （规范/规格审查补齐，实现由装配层选择，见 services/vector_store）。"""
+    （规范/规格审查补齐，实现由装配层选择，见 services/vector_store）。
+    bucket（工单 21）：令牌桶限流可选缝，缺省 None——既有 kwargs 构造（测试/
+    eval_engine.replace）零改动；接线守卫 `bucket is not None` 兜底（PG 桶未实施）。"""
 
     embedder: Embedder
     reranker: Reranker
@@ -60,3 +63,4 @@ class ChatDeps:
     settings: Settings
     prompts: PromptPack
     store: "VectorStore"
+    bucket: RateBucketProto | None = None

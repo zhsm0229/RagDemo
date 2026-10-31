@@ -530,3 +530,35 @@ NFR_USER=<管理账号> NFR_PASS=<口令> python3 deploy/nfr-check.py --quick  #
 - 口径：NFR-01 首 token P50/P95（<3s 达标线见 test-cases TC-NFR）、NFR-02 检索全链
   （<1.5s）、NFR-03 并发稳态成功率与 P95；CPU TEI 与 GPU TEI 各留一份基线。
 - 产物：`nfr-results/nfr-<时间戳>.json`——随版本登记进 deploy/releases.md 对应行。
+
+## 11. 部署拓扑：scale 多副本与调度抢主（工单 20，2026-10-31）
+
+单机缺省形态（`docker compose up -d`）零变化；需要横向扩容时用 scale 覆盖文件
+（**前置条件 `STATE_BACKEND=pg`**，未开禁用——多副本 + 进程内状态 = 状态分裂）：
+
+```bash
+# api 副本 ×2（WEB_CONCURRENCY=2，宿主端口 8000-8003）+ scheduler 副本 ×1（不发布端口）
+docker compose -f docker-compose.yml -f deploy/docker-compose.scale.yml up -d
+```
+
+- **副本分工**：api 副本 `SCHEDULER_ENABLED=false`（不跑调度、entrypoint 跳过自愈）；
+  scheduler 副本同镜像同 CMD，调度与启动补偿随 lifespan 内抢主结果启停。
+- **恰一 leader 仲裁**：各 worker 进程启动时 `pg_try_advisory_lock` 抢主（会话级锁，
+  持锁连接随进程存活）——多副本日志**恰一份**"调度启动"（其余为"调度主锁已被其他
+  实例持有，本进程不启动调度"）。
+- **锁排查 SQL**（怀疑双调度器/锁漂移时）：
+
+```sql
+SELECT * FROM pg_locks WHERE locktype = 'advisory';   -- 会话级锁在册即有持有者
+SELECT hashtext('ragdemo:scheduler:leader');           -- 与 pg_locks.objid 对账
+```
+
+- **健康检查口径**：scheduler 副本复用 app 同款 healthz（无状态，容器内网消费，不发布
+  端口）；compose < v2.24 的部署机退化为独立 project 文件（见覆盖文件头部注释）。
+- **部署验证检查单（归部署机复测窗口，工单 13 检查单延续；R6 归属）**：
+  1. scale 拓扑起双 app 副本 + scheduler 副本，scheduler 日志恰一份"调度启动"，两
+     app 副本日志各一份"主锁被持有"；
+  2. `workers=2` 下问答/agent 全链路回归（PG 态正确：state_counters 共享读回、缓存
+     跨副本命中）；
+  3. `SCHEDULER_ENABLED=false` 的 app 副本重启，日志无自愈行（entrypoint gate 生效）；
+  4. leader 容器 `docker kill` 后，存活副本在下一生命周期接管调度（日志出现"调度启动"）。

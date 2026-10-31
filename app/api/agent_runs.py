@@ -2,7 +2,8 @@ r"""AG-UI agent 流式端点（F-212，工单 #07）：POST /api/agent/runs —�
 
 时序（对齐 /api/chat/stream 先例）：①参数校验（taskType 白名单 + input strip 后 1-2000，
 422/1003 字段级）→ ②并发上限（同用户 running≥2 拒新，A3，429 未开流普通 JSON）→
-③每日限额（复用问答 DailyCounter 同实例同额度，429/3002 未开流普通 JSON）→ ④事务：
+③每日限额（复用问答 DailyCounter 同实例同额度，429/3002 未开流普通 JSON；其间的令牌
+桶限流见工单 21，次序钉死 并发闸→桶→日配额，总闸缺省关）→ ④事务：
 agent_runs 占位行（status=running、input 快照）flush 发号 + commit 后开流 →
 ⑤StreamingResponse（text/event-stream）。
 
@@ -15,6 +16,7 @@ SSE 线格式照搬 chat 先例（`event: <事件名>\ndata: <JSON>\n\n`，事�
 """
 
 import json
+import math
 from collections.abc import Iterator
 from time import perf_counter
 
@@ -35,11 +37,18 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 
 _INPUT_MAX_CHARS = 2000  # §21.5：任务输入 strip 后 1-2000 字（与问答问题同口径）
 _MSG_DAILY_LIMITED = "今日提问次数已达上限，请明天再试"
+_MSG_RATE_LIMITED = "操作过于频繁，请稍后重试"  # 令牌桶限流文案（工单 21，与日配额分档）
 # A3 并发上限：同用户同时至多 2 个 running run（占用生成通道与配额的长任务，放任并发
 # 会挤占问答主链路）。错误码取共享枚举限流语义最近的 ERR_RATE_LIMITED（429 族；
 # ERR_DAILY_LIMITED 专指每日额度，语义不合），消息直述等待/停止二选一的自助路径。
 _MAX_CONCURRENT_RUNS = 2
 _MSG_CONCURRENT_LIMITED = "已有生成任务进行中，请等待完成或停止后再试"
+
+
+def _retry_after(rate_per_min: int) -> int:
+    """补足一个令牌的最小时长（秒）：max(1, ceil(60/rate))——配置推导的保守提示而非
+    精确水位倒推（协议保持 bool 纯函数，design/21 §7.3；与 api/chat 同款）。"""
+    return max(1, math.ceil(60 / rate_per_min))
 
 
 class AgentRunRequest(BaseModel):
@@ -86,6 +95,21 @@ def create_agent_run(
     # 置于每日限额消费之前——被拒请求未消费任何服务，不烧额度。
     if (running or 0) >= _MAX_CONCURRENT_RUNS:
         raise ApiError(ERR_RATE_LIMITED, _MSG_CONCURRENT_LIMITED, 429)
+    # 令牌桶限流（工单 21）：次序钉死 并发闸→桶→日配额（design/21 §6）——被桶拒的
+    # 请求未落占位行、未烧额度；bucket 缺省 None 兜底，总闸关时短路行为与现状一致。
+    if (
+        deps.settings.rate_limiter_enabled
+        and deps.bucket is not None
+        and not deps.bucket.try_acquire(
+            "agent", str(user.id), deps.settings.rate_agent_per_min, deps.settings.rate_agent_burst
+        )
+    ):
+        raise ApiError(
+            ERR_RATE_LIMITED,
+            _MSG_RATE_LIMITED,
+            429,
+            data={"retryAfterSec": _retry_after(deps.settings.rate_agent_per_min)},
+        )
     if not deps.counter.try_consume(user.id, deps.settings.daily_question_limit):  # 每请求恰一次
         raise ApiError(ERR_DAILY_LIMITED, _MSG_DAILY_LIMITED, 429)
     ctx = RunContext(
