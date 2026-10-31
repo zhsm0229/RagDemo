@@ -7,10 +7,10 @@ Excel 物理行号；文件级单一错误（row=0）把 reason 提为 message�
 （同 documents 先例）：体积 seek/tell 先拒 + 扩展名/MIME/魔数三重白名单适用
 部分，坏 zip 不再漏到 500 兜底（评审 Important-2）。
 
-管理面四端点（列表/停用/编辑/软删）成功响应前整清问答精确缓存——问答对的增删
-改与停用都改变可检索事实，陈旧答案不能等 TTL 自然过期（同 W3 Task 1 文档
-retry/confirm 口径）；编辑重嵌取 chat_deps 同一 embedder（与检索同指纹空间，
-禁止另建）。
+管理面写端点（停用/编辑/软删）成功响应前按 qa 维度精准失效问答精确缓存
+（clear_by_ref，工单 23）——问答对的改/停/删都改变可检索事实，陈旧答案不能等
+TTL 自然过期；批量导入为纯新增不失效（新资源无既有条目引用）；编辑重嵌取
+chat_deps 同一 embedder（与检索同指纹空间，禁止另建）。
 """
 
 from typing import Annotated
@@ -144,8 +144,8 @@ def list_qa_pairs(
 def toggle_qa_pair(
     qa_id: int, body: ToggleStatusBody, user: AdminUser, db: DbSession, request: Request
 ) -> dict:
-    """停用/启用（QA-05）：service 审计 qa.toggle {from,to} 并提交；成功响应前整清
-    精确缓存——停用改变可检索事实，陈旧答案不能等 TTL 自然过期。"""
+    """停用/启用（QA-05）：service 审计 qa.toggle {from,to} 并提交；成功响应前按 qa
+    维度精准失效精确缓存（工单 23）——停用改变可检索事实，陈旧答案不能等 TTL 自然过期。"""
     pair = qa_pairs_service.toggle_qa_pair(db, qa_id, body.status, user.id)
     request.app.state.chat_deps.cache.clear_by_ref("qa", qa_id)  # 精准失效（工单 23）
     return {"code": 0, "message": "ok", "data": {"id": pair.id, "status": pair.status}}
@@ -156,7 +156,8 @@ def update_qa_pair(
     qa_id: int, body: EditQaPairBody, request: Request, user: AdminUser, db: DbSession
 ) -> dict:
     """编辑（QA-06）：同导入规则校验 → 单条重嵌问题（chat_deps 同一 embedder）→
-    审计 qa.update {before/after 摘要} → 提交；成功响应前整清缓存，新答案立即生效。"""
+    审计 qa.update {before/after 摘要} → 提交；成功响应前按 qa 维度精准失效缓存
+    （工单 23），新答案立即生效。"""
     pair = qa_pairs_service.update_qa_pair(
         db, _request_embedder(request), qa_id, body.question, body.answer, user.id
     )
@@ -173,7 +174,7 @@ def update_qa_pair(
 @router.delete("/{qa_id}")
 def delete_qa_pair(qa_id: int, user: AdminUser, db: DbSession, request: Request) -> dict:
     """软删（QA-07）：service 置 is_active=false（行保留可追溯）并审计 qa.delete；
-    成功响应前整清缓存——删除改变可检索事实，陈旧答案不能等 TTL 自然过期。"""
+    成功响应前按 qa 维度精准失效缓存（工单 23），陈旧答案不能等 TTL 自然过期。"""
     pair = qa_pairs_service.delete_qa_pair(db, qa_id, user.id)
     request.app.state.chat_deps.cache.clear_by_ref("qa", qa_id)  # 精准失效（工单 23）
     return {"code": 0, "message": "ok", "data": {"id": pair.id, "isActive": pair.is_active}}

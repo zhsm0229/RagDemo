@@ -6,7 +6,8 @@ admin-only（AdminUser 门）；202 异步语义同 documents 上传/retry 先�
 执行便于断言终态，生产 BackgroundTasks 逐文档独立会话（依添加顺序串行，并发=1 与
 入库共用餐票）。全库级先同步受理计数再交后台；受理校验与执行同源
 （services.reindex.ensure_rebuildable），拒绝在受理段即返回，不留无法执行的后台任务。
-成功响应前整清问答精确缓存（重建改变可检索事实，TTL 不可依赖，同 retry 口径）。
+缓存失效（工单 23 语义分级）：全库级整清（全部文档事实重刷，扩展可见性类）；
+文档级受理即按 doc 维度精准失效（clear_by_ref）。TTL 不可依赖，同 retry 口径。
 """
 
 from fastapi import APIRouter, BackgroundTasks, Request

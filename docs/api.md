@@ -2,7 +2,7 @@
 
 > 定位：活文档｜对账：2026-10-07｜同步保障：端点总数标记行由 `tests/unit/test_api_contract.py` 守账（§19.4）
 > 依据 `docs/standards.md` §3（API 接口规范）编写，随代码演进（§19.1 文档随代码）。
-> 覆盖 `app/api/` 当前全部路由：auth 5 个、documents 13 个（documents 11 + rebuild 2）、文档分型 2 个（§2.10g/h）、chat 1 个、conversations 4 个、citations 1 个、messages（feedback）1 个、admin 管理端 38 个（问答对 6、评测 15、提问记录与 badcase 4、检索测试 1、概览与健康度 3（含零召回块下钻）、服务健康 1、用户管理 4、审计查询 2、知识缺口报告 2）、healthz 探针 1 个（`GET /healthz`，docker healthcheck 消费，不设业务章节）。
+> 覆盖 `app/api/` 当前全部路由：auth 5 个、documents 13 个（documents 11 + rebuild 2）、文档分型 2 个（§2.10g/h）、chat 1 个、conversations 4 个、citations 1 个、messages（feedback）1 个、admin 管理端 39 个（问答对 6、评测 16、提问记录与 badcase 4、检索测试 1、概览与健康度 3（含零召回块下钻）、服务健康 1、用户管理 4、审计查询 2、知识缺口报告 2）、memories（长期记忆）4 个、agent-runs（agent 任务）1 个、healthz 探针 1 个（`GET /healthz`，docker healthcheck 消费，不设业务章节）。域枚举行手工对账（2026-11-01）；精确计数以标记行为准。
 > **端点总数：74**（本行由 `tests/unit/test_api_contract.py` 从 FastAPI app 实际路由解析校验：新增/删除端点未同步本行即测试红，计数漂移清零，findings I10）。
 > 最后更新：W5 Task 5 台账翻转（计数 44→47（W5）→48：2026-10-02 新增服务健康卡 1 端点（§4.5.4）；W5 新增知识缺口报告 2 端点，见 §4.9；零召回块下钻 `GET /api/admin/zero-recall-chunks` 1 端点，见 §4.5.3；§4.4.1 docs 项补 hitCount/lastHitAt 历史召回统计两键；2026-10-05 新增文档在线预览 1 端点 §2.10d，chat 引用 citation 增 docId 键 §3.1；2026-10-06 文档契约对账：头部计数改为"端点总数：56"标记行并交契约测试守护（I10）、§2.10c 删除成功响应体更正为 `{id, deleted: true}`（实现为准，I9）、§1.2 补"响应体以实现为准"统一注记；2026-10-06 jti 登出黑名单落地（findings I4）：新增 `POST /api/auth/logout` 1 端点 §2.4a，auth 4→5、总数 56→57；2026-10-06 草稿审核流（agent-evolution #05）：新增 `POST /api/documents/{id}/draft/approve` §2.10e 与 `/draft/reject` §2.10f 共 2 端点，documents 11→13、总数 57→59；2026-10-06 计数对齐实现现状 64：其余增量（memories ×4、agent runs ×1）由并行车道（记忆管理/agent 轨迹）随各自工单补章节登记）；2026-10-06 模板生成首任务（agent-evolution #06）：§5.1 taskType 白名单放开 `template_draft`、补 `save_draft` 工具与 `agent_steps` 逐步轨迹落库说明（无新增端点，总数不变）；2026-10-06 文档分型闭环（metrics-balance 工单 01）：新增 `PATCH /api/admin/documents/{id}/doc-type` §2.10g 与 `POST /api/admin/documents/backfill-doc-type` §2.10h 共 2 端点，文档列表项补 `docType` 键（§2.6），总数 64→66；2026-10-30 评测集自动更新（02 票）：新增 `GET /api/admin/eval-questions` §4.2.9 与 `PATCH /api/admin/eval-questions/{id}/tier` §4.2.10 共 2 端点，评测 8→10、总数 66→68；2026-10-30 评测集自动更新（03 票）：新增难例池三端点 `GET /api/admin/hardcase-seeds` §4.2.11、`PATCH /api/admin/hardcase-seeds/{id}` §4.2.12、`POST /api/admin/hardcase-seeds/synthesize` §4.2.13，评测 10→13、总数 68→71；2026-10-30 评测集自动更新（05 票）：新增 `GET /api/admin/eval-auto/config` §4.2.14 与 `PUT /api/admin/eval-auto/config` §4.2.15 共 2 端点，评测 13→15、总数 71→73；2026-10-31 商用就绪工单 16：新增 `POST /api/admin/hardcase-seeds/rescan` §4.2.16（重扫待补语料种子 1 端点），评测 15→16、总数 73→74。
 
@@ -26,6 +26,9 @@
 `code=0` 成功；非 0 见错误码表（§1.4）。HTTP 状态码用标准语义（§3-3）。
 JSON 键名统一 camelCase（§3-4）；列表响应统一 `{items, total, page, pageSize}`；
 分页统一 `page`（≥1）+ `pageSize`（1-100，默认 20）（§3-5）。
+
+> **问答精确缓存失效总则（工单 23，2026-11-01）**：写操作按"是否改变可检索事实"分级失效——
+> **精准失效**（按 ref 维度：`doc`/`qa`，`clear_by_ref`）适用于收缩/重置类（文档删除/失败重试/单文档重建/草稿审核通过，QA 停用/编辑/软删）；**整清**（`clear()`）适用于扩展可见性类（文档 confirm 激活、全库重建索引——新可见事实需全量重新生成）；**不失效**适用于纯新增（QA 批量导入——新资源无既有条目引用）与不改变可检索事实的操作（docType 修正/回填、草稿驳回）。语义分级裁决见 `app/api/document_admin.py` confirm 注释，TTL 兜底不变。
 
 > **响应体以实现为准**：当前全部端点均未声明 `response_model`（无 Pydantic 出参模型），
 > 本文档"成功响应"描述与代码返回 dict 逐键对齐；若两者出现出入，以实现为准修文档
@@ -60,7 +63,7 @@ POST SSE 须用 fetch + ReadableStream 消费（无 EventSource 自动重连）�
 | 2002 | 401 | 账号已锁定：连续失败达上限触发 15 分钟持久锁，锁定窗口内正确密码同样拒绝 | login |
 | 2003 | 401 | 未登录 / 令牌无效或过期 / 账号已禁用（不区分原因，不给探测空间） | 全部需登录端点 |
 | 2004 | 403 | 已登录但无权限（非 admin 访问管理接口；首登未改密访问业务接口） | AdminUser/ReadyUser 端点 |
-| 2005 | 429 | 登录请求过于频繁（进程内滑动窗口限流） | login |
+| 2005 | 429 | 限流类 429：登录滑动窗口 / agent 并发上限 / 令牌桶分级限流（各端点错误分支详列；重启语义与后端口径见 deploy-requirements §7.2/§7.7） | login / chat / agent |
 | 3001 | 409 | 上传文件与库内已有文档完全重复。**一码双文案**：同步查重命中（F-1001）带已有文档 ID——"文件与已有文档完全重复（已有文档 ID N），如需更新请上传新版本"；并发撞唯一索引（DOC-06）为通用文案——"文件与已有文档重复，请勿重复上传" | POST /api/documents |
 | 3002 | 429 | 单用户每日提问次数已达上限（问答端点开流前拒绝） | POST /api/chat/stream |
 | 3003 | 404 | 会话/消息不存在或无权访问（归属校验 IDOR 防线，§21.8；不区分"不存在"与"无权"）。W3 管理端寻址失败同码：提问记录不存在 / 点踩记录不存在 / 评测任务不存在；documents 域寻址失败同码（I13，2026-10-06 统一）：文档不存在（retry/confirm/rebuild-index/file/preview/images/delete） | chat / conversations / feedback / documents / admin 治理与评测端点 |
@@ -168,7 +171,7 @@ POST SSE 须用 fetch + ReadableStream 消费（无 EventSource 自动重连）�
 |----|------|
 | 鉴权 | AdminUser |
 | 成功响应 | `202`，`data: {id, status}`（test_mode 同步执行响应即终态；生产 BackgroundTasks 逐文档独立会话） |
-| 语义 | 按**现行分块设置**重走解析→红线→清洗→分块→嵌入，单事务内删旧块写新块（原子切换，无无索引窗口）；版本号不变（重建≠新版本）；审计 `document.rebuild {before.chunks, after.chunks, status, isActive}`；成功响应前整清问答精确缓存 |
+| 语义 | 按**现行分块设置**重走解析→红线→清洗→分块→嵌入，单事务内删旧块写新块（原子切换，无无索引窗口）；版本号不变（重建≠新版本）；审计 `document.rebuild {before.chunks, after.chunks, status, isActive}`；受理即按 doc 维度精准失效问答精确缓存（工单 23，见 §1.2 总则） |
 | 错误分支 | `404/3003` 文档不存在（I13 统一）；`422/1003` 仅 ready 可重建（failed 走 §2.7 retry）或已删除 |
 | 审计 | `document.rebuild`（actor=发起管理员；状态机自身另落 document.ready/document.failed） |
 
@@ -177,7 +180,7 @@ POST SSE 须用 fetch + ReadableStream 消费（无 EventSource 自动重连）�
 | 项 | 说明 |
 |----|------|
 | 鉴权 | AdminUser |
-| 成功响应 | `202`，`data: {accepted}`——受理的就绪文档数；后台逐文档独立事务重刷，单文档失败落 failed 不中断批次 |
+| 成功响应 | `202`，`data: {accepted}`——受理的就绪文档数；后台逐文档独立事务重刷，单文档失败落 failed 不中断批次；受理即整清问答精确缓存（全库事实重刷属扩展可见性类，工单 23，见 §1.2 总则） |
 | 错误分支 | `401/2003`；`403/2004` |
 | 审计 | 逐文档 `document.rebuild` |
 
@@ -238,7 +241,7 @@ POST SSE 须用 fetch + ReadableStream 消费（无 EventSource 自动重连）�
 |----|------|
 | 权限 | 仅 admin（AdminUser）；member `403/2004`，未登录 `401/2003` |
 | 背景 | Agent 生成产物一律是草稿（documents.source_type='draft'，登记即 review_status='待审核'；draft 创建走 services/draft_review.create_draft——预检三闸/精确查重与上传同源，FileStorage 落盘，不触发解析）。红线（agent-evolution §五）：**无审核不落地**——草稿 status='pending' 且 is_active=False，检索侧"仅 ready 且 is_active"过滤天然不命中，审核通过前绝不可被检索（tests/integration/test_draft_review.py 读回断言） |
-| 语义 | 待审核 → 已通过（审计 document.draft_approve，与状态变更同事务）→ 立即触发既有解析入库管道（编排同 retry：test_mode 同步，生产置 parsing 挂 BackgroundTasks；预检/查重/敏感扫描全走无旁路）；成功响应前整清问答精确缓存（通过改变可检索事实，W2 移交②） |
+| 语义 | 待审核 → 已通过（审计 document.draft_approve，与状态变更同事务）→ 立即触发既有解析入库管道（编排同 retry：test_mode 同步，生产置 parsing 挂 BackgroundTasks；预检/查重/敏感扫描全走无旁路）；受理即按 doc 维度精准失效问答精确缓存（工单 23，见 §1.2 总则） |
 | 成功响应 | `200`，`data: {id, reviewStatus, status}`（test_mode 下 status 为管道收口终态；生产为 parsing） |
 | 错误分支 | `404/3003`（不存在，I13 统一）；`422/1003` 非 draft 来源审核 / 重复审核（非法迁移 fail-fast） |
 | 契约登记 | 迁移 0007（source_type/review_status/reject_reason，每列中文注释 + CHECK）；前端 DocumentsView「草稿审核」入口（draft+待审核快捷筛选，行内通过 confirm / 驳回 prompt） |
@@ -249,7 +252,7 @@ POST SSE 须用 fetch + ReadableStream 消费（无 EventSource 自动重连）�
 |----|------|
 | 权限 | 仅 admin（AdminUser）；member `403/2004`，未登录 `401/2003` |
 | 请求体 | `{"reason": str}`（1-500 字必填；空串 `422/1003`） |
-| 语义 | 待审核 → 已驳回 + 原因留档（reject_reason，审计 document.draft_reject）；永不触发解析与入库，status 停在 pending；不整清问答缓存（驳回不改变可检索事实） |
+| 语义 | 待审核 → 已驳回 + 原因留档（reject_reason，审计 document.draft_reject）；永不触发解析与入库，status 停在 pending；不失效问答缓存（驳回不改变可检索事实，见 §1.2 总则） |
 | 成功响应 | `200`，`data: {id, reviewStatus, rejectReason}` |
 | 错误分支 | `404/3003`（不存在，I13 统一）；`422/1003` 非 draft 来源 / 非 待审核 状态 / 驳回原因为空 |
 
@@ -260,7 +263,7 @@ POST SSE 须用 fetch + ReadableStream 消费（无 EventSource 自动重连）�
 | 权限 | 仅 admin（AdminUser）；member `403/2004`，未登录 `401/2003` |
 | 背景 | 文档自动分型（metrics-balance §3）：入库管道分块前按结构信号检测五档（policy_clause=制度条款 / table_report=表格报表 / notice=通知公告 / operation_manual=操作手册 / general=通用兜底），随 `documents.doc_type` 落库（迁移 0010，VARCHAR(32) DEFAULT 'general' + 具名 CHECK `documents_doc_type_check`）；检测纯函数在 `app/rag/doc_profile`，golden 镜像独立重算（spec §6） |
 | 请求体 | `{"docType": str}`——仅此一字段（现无其他文档字段编辑端点）；取值限五档 code，枚举外 `422/1003`（"分型取值无效：…"） |
-| 语义 | 覆写 doc_type 并审计 `document.set_doctype`（detail 记 before/after docType）；**编辑不限文档状态**（傻瓜式，改错可改回）；**不清问答精确缓存**（落锤 §3.4：docType 只影响查询期 top_n 档位与报告分组，不改可检索事实） |
+| 语义 | 覆写 doc_type 并审计 `document.set_doctype`（detail 记 before/after docType）；**编辑不限文档状态**（傻瓜式，改错可改回）；**不失效问答精确缓存**（落锤 §3.4：docType 只影响查询期 top_n 档位与报告分组，不改可检索事实，见 §1.2 总则） |
 | 成功响应 | `200`，`data: {id, docType}` |
 | 错误分支 | `404/3003`（不存在，I13 统一）；`422/1003` 枚举外取值 |
 
@@ -269,7 +272,7 @@ POST SSE 须用 fetch + ReadableStream 消费（无 EventSource 自动重连）�
 | 项 | 说明 |
 |----|------|
 | 权限 | 仅 admin（AdminUser）；member `403/2004`，未登录 `401/2003` |
-| 语义 | 对全部 **is_active 且 ready** 文档从 chunks 重算分型（检测输入由 chunks 剥离 `title_path｜` 前缀重组，与入库期口径逐字一致——services/doc_type 适配器）；**覆盖现有值（含手工修正）**；ingest 进行中未 ready 的文档天然不参与；**不清问答缓存**（同 2.10g）；审计 `document.backfill_doctype`（detail 记 updated/byType） |
+| 语义 | 对全部 **is_active 且 ready** 文档从 chunks 重算分型（检测输入由 chunks 剥离 `title_path｜` 前缀重组，与入库期口径逐字一致——services/doc_type 适配器）；**覆盖现有值（含手工修正）**；ingest 进行中未 ready 的文档天然不参与；**不失效问答缓存**（同 2.10g，见 §1.2 总则）；审计 `document.backfill_doctype`（detail 记 updated/byType） |
 | 成功响应 | `200`，`data: {updated, byType}`——updated=分型发生变化的文档数；byType=其中按新分型的计数分布（如 `{"policy_clause": 3}`；无变化时 `{"updated": 0, "byType": {}}`） |
 | 错误分支 | `403/2004`（member）；无业务性 4xx（空集即 0 变化） |
 
@@ -295,7 +298,7 @@ POST SSE 须用 fetch + ReadableStream 消费（无 EventSource 自动重连）�
 | 鉴权 | ReadyUser |
 | 请求体 | `conversationId`（int，可空；空=新建会话，首问标题取 question 前 20 字）、`question`（strip 后 1-2000 字，§21.5） |
 | 成功响应 | `200`，`Content-Type: text/event-stream`，事件序 **citations → token → done**（citations 恒先于 token） |
-| 开流前错误（普通 JSON） | `422/1003` question 长度非法（字段级）；`429/3002` 今日提问次数已达上限（"今日提问次数已达上限，请明天再试"）；`429/2005` 令牌桶限流（工单 21，总闸 `RATE_LIMITER_ENABLED` 缺省关，开启后触发）：`data.retryAfterSec` 为建议等待秒数（"操作过于频繁，请稍后重试"）；`404/3003` 会话不存在或无权访问（含他人会话与已软删会话）；`500/5000` 检索/改写上游失败（prepare 失败时中断占位行被标记，不留幽灵行） |
+| 开流前错误（普通 JSON） | `422/1003` question 长度非法（字段级）；`429/3002` 今日提问次数已达上限（"今日提问次数已达上限，请明天再试"）；`429/2005` 令牌桶分级限流（工单 21，分级限流开启后触发；开关语义见 deploy-requirements §7.7）：`data.retryAfterSec` 为建议等待秒数（"操作过于频繁，请稍后重试"）；`404/3003` 会话不存在或无权访问（含他人会话与已软删会话）；`500/5000` 检索/改写上游失败（prepare 失败时中断占位行被标记，不留幽灵行） |
 | 流中错误 | SSE `error` 事件（生成段失败），不再重复落库 |
 
 SSE 事件 DTO 字段表（**逐字引自 standards §3 第 6 条**）：
@@ -421,7 +424,7 @@ SSE 事件 DTO 字段表（**逐字引自 standards §3 第 6 条**）：
 | 鉴权 | AdminUser |
 | 请求 | multipart/form-data：`file`（.xlsx，≤50MB；扩展名 / Content-Type / 魔数三重校验）；`deptCode`（表单字段，可选，缺省 `all`，枚举 service / hr / all——模板不含部门列，导入部门由此指定，保证检索 `dept_id IN (用户部门, all)` 语义可用） |
 | 行级规则 | 问题非空 ≤2000 字、答案非空 ≤10000 字、状态列枚举 `enabled`/`disabled`（空缺省 enabled）；任何一行不合格整批退回零入库（QA-02/03/08）；单批上限 5000 行 |
-| 成功响应 | `201`，`data: {imported, batchNo}`（batchNo 形如 `QA-YYYYMMDD-XXXX`）；只向量化问题列（答案不向量化，与检索同一 embedder）；成功即整清问答精确缓存 |
+| 成功响应 | `201`，`data: {imported, batchNo}`（batchNo 形如 `QA-YYYYMMDD-XXXX`）；只向量化问题列（答案不向量化，与检索同一 embedder）；导入为纯新增，不失效问答精确缓存（工单 23，见 §1.2 总则） |
 | 错误分支 | `422/1003` 文件超 50MB / 格式不支持或已损坏（三重白名单任一不过）；`422/1003` 行级错误整批退回——message 统一"导入文件存在 N 处错误，已整批退回，未入库"，`data` 为错误行数组 `[{row, field, reason}]`（row 为 Excel 物理行号，表头=1 数据从 2 起）；文件级单一错误（无数据 / 超 5000 行）reason 直接上 message；`422/1003` 部门编码无效 |
 
 #### 4.1.2 GET /api/admin/qa-pairs/template — 模板下载
@@ -443,7 +446,7 @@ SSE 事件 DTO 字段表（**逐字引自 standards §3 第 6 条**）：
 | 项 | 说明 |
 |----|------|
 | 请求体 | `status`（枚举 `enabled`=参与检索 / `disabled`=停用不参与） |
-| 成功响应 | `200`，`data: {id, status}`；停用改变可检索事实，成功响应前整清问答精确缓存；审计 `qa.toggle {from, to}` |
+| 成功响应 | `200`，`data: {id, status}`；停用改变可检索事实，成功响应前按 qa 维度精准失效问答精确缓存（工单 23，见 §1.2 总则）；审计 `qa.toggle {from, to}` |
 | 错误分支 | `422/1003` status 枚举外；`404/1003` 问答对不存在或已软删 |
 
 #### 4.1.5 PUT /api/admin/qa-pairs/{id} — 编辑
@@ -451,14 +454,14 @@ SSE 事件 DTO 字段表（**逐字引自 standards §3 第 6 条**）：
 | 项 | 说明 |
 |----|------|
 | 请求体 | `question`、`answer`（全文；校验同导入规则：问题 1-2000、答案 1-10000 非空） |
-| 成功响应 | `200`，`data: {id, question, answer}`；问题单条重嵌（与检索同一 embedder，同指纹空间）后整清缓存，新答案立即生效；审计 `qa.update {before, after 摘要}` |
+| 成功响应 | `200`，`data: {id, question, answer}`；问题单条重嵌（与检索同一 embedder，同指纹空间）后按 qa 维度精准失效缓存（工单 23，见 §1.2 总则），新答案立即生效；审计 `qa.update {before, after 摘要}` |
 | 错误分支 | `422/1003` 校验失败；`404/1003` 不存在或已软删 |
 
 #### 4.1.6 DELETE /api/admin/qa-pairs/{id} — 删除（软删）
 
 | 项 | 说明 |
 |----|------|
-| 成功响应 | `200`，`data: {id, isActive: false}`；置 is_active=false 退出检索与列表（行保留可追溯），整清缓存；审计 `qa.delete` |
+| 成功响应 | `200`，`data: {id, isActive: false}`；置 is_active=false 退出检索与列表（行保留可追溯），按 qa 维度精准失效缓存（工单 23，见 §1.2 总则）；审计 `qa.delete` |
 | 错误分支 | `404/1003` 不存在或已软删（已删行不可再管理） |
 
 ### 4.2 评测（M6，/api/admin/eval-questions + /api/admin/eval-runs）
@@ -576,14 +579,7 @@ SSE 事件 DTO 字段表（**逐字引自 standards §3 第 6 条**）：
 | 鉴权 | AdminUser |
 | 请求体 | 无。同步执行**双通道**：① pending 且引用可达的种子 → LLM 变体（期望答案从引用块原文提取，无据不造答）；② 各部门抽样知识块（零召回块优先）→ 正向造题。产物均入扩充集（origin 分别为 hardcase_synth / doc_synth），预算取 settings（synth_per_seed / doc_sample_per_dept / weekly_max_questions 两通道共享总量闸） |
 | 成功响应 | `200`，`data: {synthesized, skipped, seedsProcessed, noGround, docChunksSampled}`（合并摘要）；审计 `eval.autosynth`（detail 同摘要，独立二次提交） |
-
-#### 4.2.16 POST /api/admin/hardcase-seeds/rescan — 重扫待补语料种子（商用就绪工单 16）
-
-| 项 | 说明 |
-|----|------|
-| 鉴权 | AdminUser |
-| 请求体 | 无。对 `status=no_ground` 且 `skip_count>0` 且**引用可达**的种子重置失败计数并转回 `pending`（合成通道重新走 grounding 判定）；无引用种子（拒答/qa 直答被踩）保持不动——重扫无判据，等知识缺口补语料 |
-| 成功响应 | `200`，`data: {rescanned}`；审计 `hardcase.rescan`（detail `{rescanned}`）。同款重扫在文档入库成功时按部门自动触发（不审计 hardcase.rescan，入 ingest 日志） |
+| 错误分支 | `401/2003`；`403/2004`。LLM 输出不可解析不视为接口失败（返回 0 题摘要，种子保持 pending 可重试） |
 
 #### 4.2.14 GET /api/admin/eval-auto/config — 读评测自动配置（评测集自动更新 05）
 
@@ -602,7 +598,14 @@ SSE 事件 DTO 字段表（**逐字引自 standards §3 第 6 条**）：
 | 请求体 | 全量覆写：`enabled`（bool，总闸——关=周任务零副作用）、`synthPerSeed`（1-50）、`docSamplePerDept`（1-500）、`weeklyMaxQuestions`（1-5000）、`regressionPp`（0-50，百分点） |
 | 成功响应 | `200`，`data` 回显覆写值；审计 `eval.auto_config`（object_type=app_setting，detail `{before, after}` 生效值口径） |
 | 错误分支 | `422/1003` 数值越界；`401/2003`；`403/2004` |
-| 错误分支 | `401/2003`；`403/2004`。LLM 输出不可解析不视为接口失败（返回 0 题摘要，种子保持 pending 可重试） |
+
+#### 4.2.16 POST /api/admin/hardcase-seeds/rescan — 重扫待补语料种子（商用就绪工单 16）
+
+| 项 | 说明 |
+|----|------|
+| 鉴权 | AdminUser |
+| 请求体 | 无。对 `status=no_ground` 且 `skip_count>0` 且**引用可达**的种子重置失败计数并转回 `pending`（合成通道重新走 grounding 判定）；无引用种子（拒答/qa 直答被踩）保持不动——重扫无判据，等知识缺口补语料 |
+| 成功响应 | `200`，`data: {rescanned}`；审计 `hardcase.rescan`（detail `{rescanned}`）。同款重扫在文档入库成功时按部门自动触发（不审计 hardcase.rescan，入 ingest 日志） |
 
 ### 4.3 提问记录与 badcase 治理（M7，/api/admin/messages、/api/admin/badcases）
 
@@ -797,7 +800,7 @@ DeepAgents 骨架的 agent 任务流式端点。SSE 线格式同 §1.3（`event:
 | 鉴权 | ReadyUser |
 | 请求体 | `taskType`（白名单：`kb_qa` 知识库问答 / `template_draft` 模板草稿生成（agent-evolution #06，2026-10-06），未知 422/1003）、`input`（任务输入，strip 后 1-2000 字，§21.5） |
 | 成功响应 | `200`，`text/event-stream`。事件序 **RUN_STARTED → (STEP_STARTED → TOOL_CALL_START → TOOL_CALL_ARGS → TOOL_CALL_END → STEP_FINISHED)×N → TEXT_MESSAGE_START → TEXT_MESSAGE_CONTENT → TEXT_MESSAGE_END → RUN_FINISHED**；失败以 RUN_ERROR 收尾 |
-| 开流前错误（普通 JSON） | `422/1003` taskType 不在白名单（现支持 `kb_qa` / `template_draft`）/ input 长度非法（字段级）；`429/3002` 今日额度用尽（与问答共享同一计数器，换端点不绕限）；`429/2005` 同一用户已有 2 个进行中任务（并发上限，完成后再发起），或令牌桶限流（工单 21，总闸缺省关，开启后触发，次序在并发闸之后、日配额之前）：`data.retryAfterSec` 为建议等待秒数（"操作过于频繁，请稍后重试"） |
+| 开流前错误（普通 JSON） | `422/1003` taskType 不在白名单（现支持 `kb_qa` / `template_draft`）/ input 长度非法（字段级）；`429/3002` 今日额度用尽（与问答共享同一计数器，换端点不绕限）；`429/2005` 同一用户已有 2 个进行中任务（并发上限，完成后再发起），或令牌桶分级限流（工单 21，分级限流开启后触发，次序在并发闸之后、日配额之前；开关语义见 deploy-requirements §7.7）：`data.retryAfterSec` 为建议等待秒数（"操作过于频繁，请稍后重试"） |
 | 流中错误 | SSE `RUN_ERROR` 事件（`message` 对外脱敏、`code` 为字符串型共享错误码：5001 上游故障 / 5000 兜底意外）；agent_runs 行同步置 failed，不留 running 幽灵行；客户端断连由服务端兜底置 failed |
 
 关键事件载荷（AG-UI 官方键名）：`RUN_STARTED`/`RUN_FINISHED` 带 `thread_id`、`run_id`（RUN_FINISHED 另带 `result.text` 成稿）；`STEP_*` 带 `step_name`（step-N，一次模型迭代一步）；`TOOL_CALL_*` 带 `tool_call_id`、`tool_call_name`（ARGS 的 `delta` 为参数 JSON）；`TEXT_MESSAGE_*` 带 `message_id`、`delta`。检索工具 `knowledge_base_search` 部门范围恒为 `[本人部门, 全员]`（F-502，调用者上下文强制继承，参数携带的部门字段一律无效）。

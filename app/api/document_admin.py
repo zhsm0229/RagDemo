@@ -8,12 +8,12 @@ True）；delete 软删（F-305）；draft/approve|draft/reject（agent-evolutio
 services/draft_review 状态机——通过后触发既有解析入库管道（同 retry 的 test_mode
 分支编排），驳回弹原因、永不入库（红线：无审核不落地，agent-evolution §五）。
 寻址失败 404/3003（findings I13：与全仓"不存在与无权同判"口径统一，文案保持
-"文档不存在"）。状态变化成功响应前整清问答精确缓存
-（request.app.state.chat_deps.cache.clear()，W3 Task 1）：文档状态变化改变可检索
-事实，陈旧答案不能等 TTL 自然过期（W2 移交②；驳回不改变可检索事实，不整清）。
+"文档不存在"）。状态变化改变可检索事实，成功响应前失效问答精确缓存（工单 23 语义
+分级：retry/delete/approve 按 doc 维度精准失效 clear_by_ref；confirm 属扩展可见性
+保留整清 clear()；驳回不改变可检索事实，不失效）。
 分型域（metrics-balance 工单 01）走独立 admin_router（/api/admin/documents，spec §3.4
 钉路径）：PATCH /doc-type 仅此一字段、POST /backfill-doc-type 存量全量重算——分型只
-影响查询期 top_n 档位与报告分组、不改可检索事实，故均不清问答缓存（§3.4 落锤）。
+影响查询期 top_n 档位与报告分组、不改可检索事实，故均不失效问答缓存（§3.4 落锤）。
 """
 
 from typing import Annotated
@@ -174,7 +174,8 @@ def retry_document(
     doc_id: int, user: AdminUser, db: DbSession, background: BackgroundTasks, request: Request
 ) -> dict:
     """失败重试（DOC-11）：仅 failed 可重跑；非测试模式先落 parsing 再交后台接管。
-    成功响应前整清问答精确缓存：重试改变文档可检索事实，TTL 不可依赖（W3 Task 1）。"""
+    成功响应前按 doc 维度精准失效问答精确缓存：重试改变文档可检索事实，TTL 不可依赖
+    （W3 Task 1；工单 23 语义分级）。"""
     doc = db.get(Document, doc_id)
     if doc is None:
         raise ApiError(ERR_NOT_FOUND, _MSG_NOT_FOUND, 404)
@@ -204,7 +205,8 @@ def confirm_document(doc_id: int, user: AdminUser, db: DbSession, request: Reque
 @router.delete("/{doc_id}")
 def delete_document(doc_id: int, user: AdminUser, db: DbSession, request: Request) -> dict:
     """文档删除（F-305，2026-10-06 立项实施）：软删+级联停用 chunks（service 负责审计与提交）。
-    成功响应前整清问答精确缓存：删除改变可检索事实，TTL 不可依赖（同 retry/confirm，W2 移交②）。
+    成功响应前按 doc 维度精准失效问答精确缓存：删除改变可检索事实，TTL 不可依赖
+    （同 retry/approve 口径，W2 移交②；工单 23 语义分级）。
     权限：AdminUser——语料治理是管理员职责（member 403/2004，评审材料 §1）。"""
     ingest_service.delete_document(db, get_clock(), doc_id, actor_user_id=user.id)
     request.app.state.chat_deps.cache.clear_by_ref("doc", doc_id)  # 精准失效（工单 23）
@@ -217,8 +219,9 @@ def approve_draft(
 ) -> dict:
     """草稿审核通过（agent-evolution #05，admin-only）：待审核 → 已通过，审计在 service
     （与状态变更同事务）；随后触发既有解析入库管道——编排与 retry 同构：test_mode 同步
-    执行（响应即可断言终态），生产置 parsing 后挂 BackgroundTasks。成功响应前整清问答
-    精确缓存：通过改变可检索事实（草稿将从不可检索转为可检索），TTL 不可依赖。"""
+    执行（响应即可断言终态），生产置 parsing 后挂 BackgroundTasks。成功响应前按 doc
+    维度精准失效问答精确缓存：通过改变可检索事实（草稿将从不可检索转为可检索），
+    TTL 不可依赖（工单 23 语义分级）。"""
     doc = draft_review.approve_draft(db, get_clock(), doc_id, actor_user_id=user.id)
     if get_settings().test_mode:
         process_document(db, build_ingest_deps(), doc.id)
@@ -240,7 +243,7 @@ def reject_draft(
 ) -> dict:
     """草稿驳回（agent-evolution #05，admin-only）：待审核 → 已驳回 + 原因留档，审计在
     service。驳回不改变可检索事实（草稿本就不可检索，status 停在 pending 永不解析），
-    故不整清问答缓存（口径见模块注释）。"""
+    故不失效问答缓存（口径见模块注释）。"""
     doc = draft_review.reject_draft(
         db, get_clock(), doc_id, actor_user_id=user.id, reason=payload.reason
     )

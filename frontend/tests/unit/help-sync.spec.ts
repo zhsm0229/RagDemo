@@ -34,4 +34,17 @@ describe('帮助引文与界面原文一致（双源守账）', () => {
       expect(helpAdmin, `帮助引文应含「${text}」`).toContain(text)
     }
   })
+
+  it('服务端限流/配额文案原文与帮助引文一致（F4 双源守账）', () => {
+    // 服务端原文直出（LoginView"文案以服务端为准"），帮助引文漂移即红——
+    // 后端原文在 frontend/ 之外，直接按仓库相对路径读源码文本比对
+    const auth = readFileSync('../app/services/auth.py', 'utf-8')
+    const chat = readFileSync('../app/api/chat.py', 'utf-8')
+    const faq = read('help/faq.ts')
+    for (const text of ['登录尝试过于频繁，请稍后再试', '今日提问次数已达上限，请明天再试']) {
+      expect(faq, `帮助引文应含服务端原文「${text}」`).toContain(text)
+    }
+    expect(auth).toContain('登录尝试过于频繁，请稍后再试')
+    expect(chat).toContain('今日提问次数已达上限，请明天再试')
+  })
 })

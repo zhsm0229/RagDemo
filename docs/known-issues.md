@@ -18,7 +18,7 @@ CPU TEI + 本机高负载下：首 token 57.4s（TEI 段 55.3s）、检索 38.2s
 **附带实证**：漏拒题回答含所引块外政策细节 1 例（弱上下文编造）——语料治理后复评归零（硬指标 #4）。
 
 ### 开放-3：eval 跑分逐题 detail 提交失效
-**已修复（W6 T1，commit 12721f9）**：根因=共享 items list + `expire_on_commit=False` 下 flush 相等比较抑制 UPDATE；`flag_modified` 修复 + 逐题进度回归测试。**待部署复验**。复现脚本：`.zcode/accept/repro_detail_stall.py`。
+**已修复（W6 T1，commit 12721f9）**：根因=共享 items list + `expire_on_commit=False` 下 flush 相等比较抑制 UPDATE；`flag_modified` 修复 + 逐题进度回归测试。**待部署复验**。复现脚本 `.zcode/accept/repro_detail_stall.py` 未随仓库迁移（.zcode 台账 gitignored，以时点存档为准）。
 
 ### 开放-4：ingest 侧 StubEmbedder 泄漏（部署级缺陷）
 **已修复（W6 T1，commit a3dd871）**：`documents.py:_build_deps` 走装配工厂（真实 TEI；test_mode 回 Stub）。W2 只接通问答侧、入库侧漏接，测试全在 TEST_MODE 故三个冲刺未暴露——**真实模式部署才发现的典型案例**。
@@ -29,10 +29,10 @@ curl 在 Windows Git Bash 直传中文文件名导致 id=9/10 等 title/original
 
 ### 开放-6：试点库 E2E 残留
 用户并行会话的 E2E 套件直接对试点库跑（users 表 44 行含 e2e-*/小张/停用员/重置员残留 40+；50 份文档含 e2e_* 前缀），且曾改掉 admin 密码。
-**处置**：~~隔离方案待裁决~~ **已落地（2026-10-01 修复波）**——`deploy/docker-compose.e2e-isolated.yml` 三文件叠加隔离栈（pg-e2e 独立实例 + TEST_MODE stub，用法见文件头注释），首轮实测跑通（47 执行/32 过/12 败/3 跳，试点库零接触，跑后试点栈已恢复）；残留清理仍需与你会话协调时机；admin 已重置为 documented 密码。**12 条失败为你会话在途套件的稳定化欠账**（对话框未关/选择器层为主，documents-gov 簇 + admin-pages/chat 反馈弹窗；后端行为面经 API 抽查与落库核验全部正确），trace/截图在 `frontend/e2e/.artifacts/results/`。
+**处置**：~~隔离方案待裁决~~ **已落地（2026-10-01 修复波）**——`deploy/docker-compose.e2e-isolated.yml` 三文件叠加隔离栈（pg-e2e 独立实例 + TEST_MODE stub，用法见文件头注释），首轮实测跑通（47 执行/32 过/12 败/3 跳，试点库零接触，跑后试点栈已恢复）；残留清理仍需与你会话协调时机；admin 已重置为 documented 密码。**12 条失败为你会话在途套件的稳定化欠账**（对话框未关/选择器层为主，documents-gov 簇 + admin-pages/chat 反馈弹窗；后端行为面经 API 抽查与落库核验全部正确），trace/截图在 `frontend/e2e/.artifacts/results/`（artifacts 目录已清理，gitignored，以时点存档为准）。
 
 ### 已修复-7：documents 删除端点（F-305，2026-10-06 实施收口）
-DELETE /api/documents/{id}（admin-only）：软删+级联停用 chunks+审计 document.delete；parsing 态 422；前端删除按钮解除置灰（二次确认）。设计见 docs/specs/2026-10-06-document-delete-review.md；测试 test_document_delete.py。
+DELETE /api/documents/{id}（admin-only）：软删+级联停用 chunks+审计 document.delete；parsing 态 422；前端删除按钮解除置灰（二次确认）。设计见 [docs/archive/2026-10-06-document-delete-review.md](archive/2026-10-06-document-delete-review.md)（快照移档）；测试 test_document_delete.py。
 
 ### 开放-8：前端零散项
 ①KnowledgeGapCard 周切换失败时旧周数据残留（错误可见可重试，cosmetic）；②fmtTime 尚有 6 处内联未收敛（工具已备）；③~~前端 load 无 catch 的 unhandled rejection 统一收口~~（2026-10-07 OverviewView 已收口，余下随触碰偿还）；④~~全仓 lint 红来自并行会话未跟踪的 `frontend/e2e/`（trace 产物）~~（eslint ignore 已配置，M28 已修复）。

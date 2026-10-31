@@ -453,5 +453,5 @@ CREATE INDEX idx_state_auth_expire ON state_auth_guards (expire_at) WHERE expire
 
 - **共享语义随后端变化**（有等价性测试钉死）：pg 下缓存/日额度/限流窗口/登出黑名单**跨副本互见**（多副本前提，工单 20）；memory 下各实例独立。
 - **hit 暂存-搬运两段式**：问答侧 upsert 暂存（行锁摊散），flush 以 `FOR UPDATE` 快照 → 一条 executemany UPDATE 进 chunks → 按键 DELETE，失败整体回滚滚入下轮（崩溃安全，与内存版契约逐条等价）。
-- **jti 黑名单备份安全含义**：`STATE_BACKEND=pg` 时三表随主库备份（runbook §3.1）——黑名单不入备份 = 恢复后已撤销令牌在 exp 前重新有效。
+- **jti 黑名单备份安全含义**：`STATE_BACKEND=pg` 时三表随主库备份（备份范围见 runbook §3）——黑名单不入备份 = 恢复后已撤销令牌在 exp 前重新有效。
 - 设计全文：`.scratch/commercial-readiness/design/19-state-externalize-design.md`（v1+§10 评审修订）。

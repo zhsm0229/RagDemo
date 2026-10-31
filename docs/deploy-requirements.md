@@ -43,9 +43,13 @@ LLM：DeepSeek 云 API（`api.deepseek.com`，OpenAI 兼容）。**本地不部�
 
 `.env` 三键：`LLM_BASE_URL=https://api.deepseek.com/v1`、`LLM_API_KEY=<密钥>`、`LLM_MODEL=deepseek-flash`、`LLM_EFFORT=low`（high 会把 max_tokens 烧在推理上致正文为空——2026-10-01 事故）。优点：质量最优、零算力占用；代价：出网（合规已确认）、按量计费、依赖外网。
 
-### 3.2 本地大模型轨（数据不出内网时）
+### 3.2 本地大模型轨（数据不出内网时，两个场景）
 
 接入点：任何 **OpenAI 兼容端点**（app 侧只改 `.env` 三键，代码零改动；`LLM_EFFORT` 为 DeepSeek 专属参数，本地端点缺席自动不下发）。
+
+**场景 A：迷你主机 / 桌面级试点（Ollama，7B 档）**——运维最轻，试点/演示可接受：
+
+**推理服务选型**：
 
 **推理服务选型**：
 
@@ -85,6 +89,8 @@ docker compose up -d --force-recreate app
 # 4. 验证：服务健康卡 llm 行=正常（探活打 /models）；发一问核对回答与引用
 ```
 
+**场景 B：企业内网 vLLM 档（决策 17）**——企业内网正式轨道：模型选型 **Qwen2.5-32B-Instruct AWQ 起步**（单卡 24G；72B 为效果升级项，需 2×24G），推理服务 **vLLM**（OpenAI 原生，显存管理重、企业级吞吐）。接入方式同本节（OpenAI 兼容端点，app 侧只改 `.env` 三键；内网 vLLM 无鉴权时 `LLM_API_KEY` 可留空）；切换操作步骤见 runbook §8。迷你主机 Ollama 档（场景 A）与企业内网 vLLM 档（场景 B）是**两个独立场景**：前者试点演示可接受，后者为商用内网轨拍板选型，不要混用两档读数。
+
 ## 4. 自动化部署
 
 ### 4.1 一键前置体检（机器判定就绪性，FAIL 即中止）
@@ -98,7 +104,7 @@ bash deploy/bootstrap.sh --check-only   # 干跑：只体检不装配
 | # | 检查项 | 阈值 | 依据 |
 |---|--------|------|------|
 | 1 | Docker daemon | 运行中 | — |
-| 2 | 内存（Docker 可分配） | <11G FAIL；11-22G WARN（mineru 按需）；≥22G 全常驻。阈值唯一常量 **MEM_FULL_MB=22528（22G，以代码为准）**，bootstrap.sh / deploy.sh 同源引用，改阈值须含本表四处一并改 | 实测常驻 ≈10GB；MB 精度防整数截断误报 |
+| 2 | 内存（Docker 可分配） | <11G FAIL；11-22G WARN（mineru 按需）；≥22G 全常驻。阈值以 deploy/bootstrap.sh 常量 **MEM_FULL_MB** 为准（deploy.sh 同源引用，本表为读数快照，2026-10-31 口径 22G） | 实测常驻 ≈10GB；MB 精度防整数截断误报 |
 | 3 | 磁盘（Docker 数据根） | <50G FAIL；<100G WARN | 基础占用 ≈25GB |
 | 4 | CPU 核数 | <8 WARN | 重排延迟翻倍 |
 | 5 | 外网 api.deepseek.com | 不可达 WARN（本地轨可忽略） | 云轨必需 |
@@ -115,7 +121,7 @@ bash deploy/bootstrap.sh        # 体检通过后自动：错峰拉起 pg→embe
 # 内存 ≥22G 时 mineru 自动常驻；否则按需 bash deploy/recover.sh mineru
 ```
 
-装配复用 `deploy/startup-check.sh`（错峰启动防 OOM 互挤 + 等待健康 + 种子冒烟账号 `app.db.e2e_seed`（e2e-admin / E2ePass#2026）+ 冒烟提问），最后打印验收三步（健康卡 / 上传就绪 / 问答带引用）。
+装配复用 `deploy/startup-check.sh`（错峰启动防 OOM 互挤 + 等待健康 + 种子冒烟账号 `app.db.e2e_seed`（账号口令见 manual-test-guide §1.2）+ 冒烟提问），最后打印验收三步（健康卡 / 上传就绪 / 问答带引用）。
 
 ### 4.3 生产机发布（digest 模式）
 
@@ -158,13 +164,13 @@ UPLOADS_VOLUME=deploy_uploads ./deploy/backup.sh    # 定时备份（pg_dump + u
 
 以下为**符合设计的已知行为**，签约与验收时按本节对齐，避免上线后按超出形态的预期扯皮：
 
-1. **实例分工与扩容（2026-10-31 工单 20 改写，原"单实例约束"解除）**：单机缺省形态仍为单 app 容器（调度/自愈/进程内状态同进程，零变化）。scale 拓扑（`deploy/docker-compose.scale.yml`，**前置条件 `STATE_BACKEND=pg`**，未开禁用该文件）解除单实例约束：api 副本（`SCHEDULER_ENABLED=false`，不跑调度、不自愈，gunicorn worker 数经 `WEB_CONCURRENCY` 调整缺省 1）+ scheduler 副本（单副本，跑调度与启动自愈）；多 worker/多副本下调度与启动补偿经 PG 会话级 advisory lock 抢主**恰一 leader**（锁键 `ragdemo:scheduler:leader`，排查 SQL 见 runbook 部署拓扑节）。**自愈仅 scheduler 副本执行**——残余风险（明示）：app 副本在途解析恰逢 scheduler 副本重启会被误标 failed，管理员在列表点重试即可，量级可接受；按实例归属加过滤属触发线后置项。
-2. **重启语义**：memory 后端（缺省）——进程重启即清空登录限流窗口/登出黑名单/缓存/令牌桶水位（JWT 本体无状态不受影响）；pg 后端（`STATE_BACKEND=pg`）——登录限流/登出黑名单/缓存/日限额/召回暂存五件跨重启存续（易失状态随备份卷留存，备份范围见 runbook §3.1）。令牌桶水位 pg 实现未落地（工单 21 预留）：限流开启时重启清零、突发额度重新可用（memory 桶同口径）。
+1. **实例分工与扩容（2026-10-31 工单 20 改写，原"单实例约束"解除）**：单机缺省形态仍为单 app 容器（调度/自愈/进程内状态同进程，零变化）。scale 拓扑（`deploy/docker-compose.scale.yml`，**前置条件 `STATE_BACKEND=pg`**，未开禁用该文件）解除单实例约束：api 副本（`SCHEDULER_ENABLED=false`，不跑调度、不自愈，gunicorn worker 数经 `WEB_CONCURRENCY` 调整缺省 1）+ scheduler 副本（单副本，跑调度与启动自愈）；多 worker/多副本下调度与启动补偿经 PG 会话级 advisory lock 抢主**恰一 leader**（机制、锁排查 SQL 与部署验证检查单见 runbook §11）。**自愈仅 scheduler 副本执行**——残余风险（明示）：app 副本在途解析恰逢 scheduler 副本重启会被误标 failed，管理员在列表点重试即可，量级可接受；按实例归属加过滤属触发线后置项。
+2. **重启语义**：memory 后端（缺省）——进程重启即清空登录限流窗口/登出黑名单/缓存/令牌桶水位（JWT 本体无状态不受影响）；pg 后端（`STATE_BACKEND=pg`）——登录限流/登出黑名单/缓存/日限额/召回暂存五件跨重启存续（易失状态随备份卷留存，备份范围见 runbook §3）。令牌桶水位 pg 实现未落地（工单 21 预留）：限流开启时重启清零、突发额度重新可用（memory 桶同口径）。
 3. **调度任务补偿**：停机跨过周日 04:00/05:00（UTC）触发窗口，重启后由启动补偿自动补跑当周任务（eval_auto_synth_week 标记 + [自动] run 在册判定，同周互斥不重复；补偿仅在 leader 进程执行）；运行中错过 ≤1h 由 misfire_grace_time 兜底。
 4. **CPU 档性能上限**：无 GPU 时 rerank 15-60s/问（超时豁免 120s，known-issues 开放-1）；要商用级 10s 响应须配 GPU 版 TEI（§2 硬件表）。交付口径按 x86+CPU TEI 的实测数字对齐，不按 GPU 口径承诺。
 5. **架构支持**：仅 linux/amd64（§2 系统行）。
 6. **评测自动闭环**：总闸 EVAL_AUTO_ENABLED 缺省关（开启属部署决策）；开启后周日自动合成与跑分的预算/退化阈值经管理端"自动评测设置"在线调整。
-7. **分级限流（2026-10-31 工单 21）**：总闸 `RATE_LIMITER_ENABLED` **缺省关=行为与缺省形态逐字节一致**（灰度由部署决策，纯内部阈值不进 .env.example，见 config.py `rate_*`）；开启后问答平滑 30 次/分钟/用户（突发 10）、agent 平滑 10 次/分钟/用户（突发 4），超速 429 携带 `retryAfterSec`（"操作过于频繁，请稍后重试"）。三层限流（登录滑窗→令牌桶→日配额）独立判定互不回写；单机形态即可开启，scale 拓扑开启需 PG 桶实现（预留未落地）。
+7. **分级限流（2026-10-31 工单 21）**：总闸 `RATE_LIMITER_ENABLED` **缺省关=行为与缺省形态逐字节一致**（灰度由部署决策，纯内部阈值不进 .env.example，见 config.py `rate_*`）；开启后问答平滑 30 次/分钟/用户（突发 10）、agent 平滑 10 次/分钟/用户（突发 4）（缺省读数，以 config.py `rate_*` 为准），超速 429 携带 `retryAfterSec`（"操作过于频繁，请稍后重试"）。三层限流（登录滑窗→令牌桶→日配额）独立判定互不回写；单机形态即可开启，scale 拓扑开启需 PG 桶实现（预留未落地）。
 8. **无 MinerU 交付形态**：许可合规（AGPL）驱动的降级交付档，起法/功能差异/验收口径见 §8。
 
 ## 8. 无 MinerU 交付形态（许可降级档，2026-11-01 工单 10）

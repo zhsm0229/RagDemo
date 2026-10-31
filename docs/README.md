@@ -1,6 +1,6 @@
 # 文档地图（README）
 
-> 定位：活文档（全库文档路由表）｜对账：2026-10-07｜同步保障：评审纪律——新增/移动/归档任何文档必须更新本表（standards §19.7）
+> 定位：活文档（全库文档路由表）｜对账：2026-11-01｜同步保障：评审纪律——新增/移动/归档任何文档必须更新本表（standards §19.7）
 
 本项目文档按**三档生命周期**管理（详见 [standards.md](standards.md) §19）：
 
@@ -23,6 +23,7 @@
 | 开放问题与登记裁决 | [known-issues.md](known-issues.md) | 活 |
 | 手工验收测试步骤与测试账号 | [manual-test-guide.md](manual-test-guide.md) | 活 |
 | P0 用例与自动化层映射 | [e2e-case-matrix.md](e2e-case-matrix.md) | 活 |
+| 商用就绪阶段一评审报告（P0/P1/P2 清单对照基线，工单 01-12 来源） | [2026-10-31-六角色评审报告.md](2026-10-31-六角色评审报告.md) | 快照（在有效期） |
 | 设计基线（功能/库表/流程/演进/用例/原型） | [specs/](specs/)：features / db-design / flows / scaling-plan / test-cases / ui-mockups | 活（基线） |
 | 历史评审报告、验收状态、合规清单、流程偏差 | [archive/](archive/)（文件名带日期，写完即冻结） | 快照 |
 | 冲刺派工单 / 回执 / 评审 diff / 进度账本 | `.superpowers/sdd/` | 台账 |

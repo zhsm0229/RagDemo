@@ -119,7 +119,7 @@ compose 中 `${RAGFLOW_IMAGE:-infiniflow/ragflow:v0.19.1}` 的 tag 默认值保�
 
 - 规范指针：standards §18——PostgreSQL 每日 `pg_dump` 全量保留 7 天（备份目录权限 0700）、上传目录每日备份、恢复目标 **RPO ≤ 24h / RTO ≤ 2h**（§18.3）、`.env` 凭据副本托管密码管理器。
 - **安全须知（§18.1）：备份含全部问答与文档内容，访问权限同生产库**——备份只落独立目录（本方案 `./backups`，脚本已 `chmod 700`），禁止放入 Web 可访问路径或全员可见共享位置；`.env`（含密钥）不在备份内，副本托管密码管理器。
-- 备份范围 = 主库 `rag`（容器 `ragdemo-pg`）+ 上传目录：dev=宿主 `./data/uploads`（`STORAGE_DIR` 默认值）；**prod=uploads named volume（`deploy_uploads`），走 §3.6 卷口径——卷内容不在宿主文件系统上，宿主路径备份在 prod 形态下双向落空（备份拿不到数据、恢复落不进卷）**。`ragdemo-pg-test`（`rag_test`，5434 端口）是独立测试实例，**不在备份范围**；state_* 三张易失状态表（`state_cache_entries`/`state_counters`/`state_auth_guards`，0019）随主库一并备份——`STATE_BACKEND=pg` 时 jti 黑名单/限流窗口/缓存随恢复留存（登出黑名单不入备份=恢复后已撤销令牌在 exp 前重新有效，安全含义）；memory 后端（缺省）三表为空，备份无实质内容；RAGFlow 基线环境不做备份（一次性对照数据，销毁重建，见 2.5）。
+- 备份范围 = 主库 `rag`（容器 `ragdemo-pg`）+ 上传目录：dev=宿主 `./data/uploads`（`STORAGE_DIR` 默认值）；**prod=uploads named volume（`deploy_uploads`），走 §3.6 卷口径——卷内容不在宿主文件系统上，宿主路径备份在 prod 形态下双向落空（备份拿不到数据、恢复落不进卷）**。`ragdemo-pg-test`（`rag_test`，5434 端口）是独立测试实例，**不在备份范围**；state_* 三张易失状态表（`state_cache_entries`/`state_counters`/`state_auth_guards`，0019）随主库一并备份——`STATE_BACKEND=pg` 时 jti 黑名单/限流窗口/缓存随恢复留存（若黑名单不入备份，恢复后已撤销令牌会在 exp 前重新有效——此即纳入备份的安全含义）；memory 后端（缺省）三表为空，备份无实质内容；RAGFlow 基线环境不做备份（一次性对照数据，销毁重建，见 2.5）。
 - 备份统一走 `deploy/backup.sh`（顶部参数化区可按环境覆盖容器名/库名/目录/保留期/卷名 `UPLOADS_VOLUME`），每步带 `[backup]` 时间戳日志，任一步失败非零退出。
 
 ### 3.1 每日自动备份（调度示例）
@@ -381,7 +381,7 @@ python tests/fixtures/tools/make_sample_docx.py   # 写出 tests/fixtures/sample
 | BAAI/bge-reranker-v2-m3 | rerank（logit→sigmoid 应用侧归一） | main@（待登记 revision） | hf-mirror.com | 待部署机登记 | — | — |
 | MinerU 2.5.4 pipeline 模型族 | PDF 版面/表格/OCR（CPU ONNX） | mineru==2.5.4（ModelScope 源） | modelscope | 待首次拉起后登记 | — | — |
 | deepseek-flash（云） | 生成 | DeepSeek-V4.1-Flash | api.deepseek.com（云 API，无本地工件） | 不适用（云侧） | 2026-09-29 | — |
-| 内网 LLM（预案） | 生成（合规=禁出网时） | Qwen2.5-32B-Instruct AWQ | 待定 | 待定 | — | — |
+| 内网 LLM（预案，企业内网 vLLM 档） | 生成（合规=禁出网时） | Qwen2.5-32B-Instruct AWQ（选型依据见 deploy-requirements §3.2b/决策 17） | 待定 | 待定 | — | — |
 
 本地/部署机模型目录：`./data/tei-models/`（docker/download_models.py 预热，hf-mirror +
 HF_HUB_DISABLE_XET=1）。升级操作：改 download_models.py 钉的 revision → 重建索引（红线③）→
@@ -397,7 +397,7 @@ HF_HUB_DISABLE_XET=1）。升级操作：改 download_models.py 钉的 revision 
 | 上传 409 | 精确查重 F-1001（content_hash 命中已存在文档） | 属预期行为：复用已有文档或先停用旧版 |
 | 上传后"疑似扫描件或空文档" | 解析红线（§10.3）：有效字符 < max(100, 原文×10%) | 文本型 PDF 走 pypdf 降级仍失败=扫描件，需 MinerU（本机未部署时属预期）；核对 parse_error 字段 |
 | 登录 401"剩余尝试次数 N" | failed_attempts 累计（§5.4 持久锁） | admin 解锁或等 locked_until 过期；连续失败源于自动化时，重跑 e2e_seed 复位口令后再跑 |
-| 登录 429 | 滑动窗口（60s/10 次·IP+用户名，进程内） | 等窗口滑出或重启 app 容器（窗口态不持久） |
+| 登录 429 | 滑动窗口（60s/10 次·IP+用户名） | 等窗口滑出；重启仅 memory 后端（缺省）有效——pg 后端（`STATE_BACKEND=pg`）窗口跨副本存续，重启不清（deploy-requirements §7.2） |
 | alembic 迁移失败拒启 | entrypoint fail-fast（§12.2-3） | 看容器日志定位迁移脚本；禁止手改库结构（§4.5），修复迁移后重起 |
 
 ## 8. 合规轨道切换（决策 3 双轨：云 API ↔ 内网模型）
@@ -408,7 +408,7 @@ HF_HUB_DISABLE_XET=1）。升级操作：改 download_models.py 钉的 revision 
 |----|--------------|--------|
 | LLM_BASE_URL | https://api.deepseek.com/v1 | http://<内网vLLM-IP>:8000/v1 |
 | LLM_API_KEY | DeepSeek key | 内网 vLLM 无鉴权时可留空 |
-| LLM_MODEL | deepseek-flash | Qwen2.5-32B-Instruct AWQ |
+| LLM_MODEL | deepseek-flash | Qwen2.5-32B-Instruct AWQ（选型见 deploy-requirements §3.2b） |
 
 步骤：①合规书面结论回填 [docs/archive/compliance-checklist-2026-09-30.md](archive/compliance-checklist-2026-09-30.md) 第五节 → ②内网轨需
 GPU（≥1×24G）+ vLLM 就绪 → ③改 `.env` 三键重启 app → ④跑评测集对比（§17.3，无对比不
@@ -460,8 +460,8 @@ app 容器内的 `localhost` 指 app 容器自身——TEI/MinerU/Gotenberg 都�
 | MINERU_BASE_URL | MinerU 解析地址（见 9.1 DNS 口径） | 可选。**填了=全部 pdf 走 MinerU，服务未拉起时 pdf 解析失败（可重试）**；留空=全部 pdf 走 pypdf 降级（扫描件解析不出，"疑似扫描件"拒收） | 常驻/按需形态均推荐填 `http://mineru:8000`（可用性由 mineru 容器启停控制，健康卡如实暴露）；试点接受全量降级则留空 |
 | MINERU_TIMEOUT_S | MinerU 解析超时（秒） | 可选 | `300` |
 | IMAGE_OCR_ENABLED | 内嵌图片 OCR（F-1017） | 可选，开启前提=MINERU_BASE_URL 已配且 mineru 在跑 | `false` |
-| EMBED_TIMEOUT_S | embedding 超时（秒） | 可选；部署机实测放宽口径见 §5.5 | `10`（部署机实测 `60`） |
-| RERANK_TIMEOUT_S | rerank 超时（秒） | 可选；真实跑分对 rerank 吞吐敏感（§5.5） | `10`（部署机实测 `120`） |
+| EMBED_TIMEOUT_S | embedding 超时（秒） | 可选；部署机实测放宽口径见 §5.5 | `60` |
+| RERANK_TIMEOUT_S | rerank 超时（秒） | 可选；真实跑分对 rerank 吞吐敏感（§5.5） | `120` |
 | LLM_EFFORT | 推理力度（DeepSeek 专属） | 可选：`high` 会把 max_tokens 烧在推理上致正文空（2026-10-01 事故） | `low` |
 | LLM_TIMEOUT_S | LLM 超时（秒） | 可选 | `60` |
 | CHAT_MAX_TOKENS | 回答 max_tokens 服务端上限 | 可选 | `4096` |
@@ -527,8 +527,8 @@ NFR_USER=<管理账号> NFR_PASS=<口令> python3 deploy/nfr-check.py          #
 NFR_USER=<管理账号> NFR_PASS=<口令> python3 deploy/nfr-check.py --quick  # 冒烟（01/02 各 10 轮）
 ```
 
-- 口径：NFR-01 首 token P50/P95（<3s 达标线见 test-cases TC-NFR）、NFR-02 检索全链
-  （<1.5s）、NFR-03 并发稳态成功率与 P95；CPU TEI 与 GPU TEI 各留一份基线。
+- 口径：NFR-01 首 token P50/P95、NFR-02 检索全链、NFR-03 并发稳态成功率与 P95（三者达标线均见
+  test-cases TC-NFR，不在本表复写数字）；CPU TEI 与 GPU TEI 各留一份基线。
 - 产物：`nfr-results/nfr-<时间戳>.json`——随版本登记进 deploy/releases.md 对应行。
 
 ## 11. 部署拓扑：scale 多副本与调度抢主（工单 20，2026-10-31）
