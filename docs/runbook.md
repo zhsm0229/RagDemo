@@ -518,3 +518,15 @@ PY
 ### 10.3 开关
 
 生产开启：`.env` 加 `EVAL_AUTO_ENABLED=true` 后重建 app（env_file 不随 restart 重读）；运行期临时停用走设置页总闸（立即生效）。
+### 10.4 交付前性能取证（商用就绪工单 15）
+
+交付/升版前在**目标部署机**跑一轮 NFR 取证并归档（验收证据链，数字可复现）：
+
+```bash
+NFR_USER=<管理账号> NFR_PASS=<口令> python3 deploy/nfr-check.py          # 全量（含 20 并发×2min）
+NFR_USER=<管理账号> NFR_PASS=<口令> python3 deploy/nfr-check.py --quick  # 冒烟（01/02 各 10 轮）
+```
+
+- 口径：NFR-01 首 token P50/P95（<3s 达标线见 test-cases TC-NFR）、NFR-02 检索全链
+  （<1.5s）、NFR-03 并发稳态成功率与 P95；CPU TEI 与 GPU TEI 各留一份基线。
+- 产物：`nfr-results/nfr-<时间戳>.json`——随版本登记进 deploy/releases.md 对应行。
