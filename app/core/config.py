@@ -11,7 +11,12 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 480
     storage_dir: str = "./data/uploads"
     embed_base_url: str = "http://localhost:8081"  # TEI
-    embed_timeout_s: int = 10
+    embed_timeout_s: int = (
+        60  # embed 超时（2026-11-01 由 10 上调，known-issues 开放-1 同款豁免）：10s 按
+        # 单条查询向量化设的纪律值，但入库批量（分批 ≤256 条）在 CPU TEI 上队列堆积
+        # 实测单批 4-8s+排队可超 10s（三份模板草稿批量入库 ReadTimeout 事故）；查询期
+        # 单条 <1s 不受影响，TEI 故障时失败变慢由熔断/重试兜底。GPU 后回调（同 rerank）
+    )
     embed_batch_chars: int = 1200  # 入库嵌入分批的字符预算/批：TEI --max-batch-tokens 2048
     # （防 OOM 特意调低，见 runbook）下单请求超限即 422——2026-10-02 大文档全量单请求全败根因；
     # BGE tokenizer 中文≈1字1token，1200 留 40% 余量。0=不分批（仅测试用）
