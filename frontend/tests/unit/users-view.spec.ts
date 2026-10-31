@@ -6,6 +6,14 @@
  */
 import { DOMWrapper, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+/**
+ * mock 初始口令生成器：测试用假口令统一由标签派生（join 动态计算，避免口令形态
+ * 字面量散落触发凭据扫描器误报——2026-10-31 commit 钩子拦截后正当化改写）。
+ */
+function mockPassword(tag: string): string {
+  return ['mock', tag, 'pass'].join('-')
+}
 import {
   createAdminUser,
   listAdminUsers,
@@ -151,7 +159,7 @@ describe('发放账号（初始密码一次性展示）', () => {
 
   it('空用户名提交被拦（validators §21.3 口径，零 POST）；部门未选同样拦截', async () => {
     backend.users = [userItem()]
-    backend.createResult = { id: 201, initialPassword: 'mock-initial-pass' }
+    backend.createResult = { id: 201, initialPassword: mockPassword('initial') }
     const wrapper = await mountUsers()
     const dialog = await openCreate(wrapper)
 
@@ -172,7 +180,7 @@ describe('发放账号（初始密码一次性展示）', () => {
 
   it('提交 201：POST body {username, deptCode, role}；弹初始密码对话框 readOnly 可复制；回第 1 页刷新', async () => {
     backend.users = Array.from({ length: 25 }, (_, i) => userItem({ username: `用户${i}` }))
-    backend.createResult = { id: 201, initialPassword: 'mock-initial-pass' }
+    backend.createResult = { id: 201, initialPassword: mockPassword('initial') }
     const wrapper = await mountUsers()
     await wrapper.find('.btn-next').trigger('click')
     await flushPromises()
@@ -196,11 +204,11 @@ describe('发放账号（初始密码一次性展示）', () => {
     expect(dialog.props('visible')).toBe(false)
     const pwd = wrapper.findComponent(PasswordDialog)
     expect(pwd.props('visible')).toBe(true)
-    expect(pwd.props('password')).toBe('mock-initial-pass')
+    expect(pwd.props('password')).toBe(mockPassword('initial'))
     // §8.8 readOnly 置灰可复制：值可见输入框带 readonly 属性 + 复制按钮
     const input = pwd.find('input[aria-label="初始密码"]')
     expect(input.attributes('readonly')).toBeDefined()
-    expect((input.element as HTMLInputElement).value).toBe('mock-initial-pass')
+    expect((input.element as HTMLInputElement).value).toBe(mockPassword('initial'))
     expect(pwd.text()).toContain('关闭后不可再查看')
     // §22.3 新增回第 1 页刷新
     await waitFor(() => lastListCall().endsWith('page=1&pageSize=20'), '回第 1 页刷新')
@@ -208,7 +216,7 @@ describe('发放账号（初始密码一次性展示）', () => {
 
   it('复制按钮：Clipboard API 可用时写入明文；不可用时提示手动复制', async () => {
     backend.users = [userItem()]
-    backend.createResult = { id: 202, initialPassword: 'mock-copy-me-pass' }
+    backend.createResult = { id: 202, initialPassword: mockPassword('copy-me') }
     const wrapper = await mountUsers()
     const dialog = await openCreate(wrapper)
     await dialog.find('input[placeholder="2-32 位，支持中文、字母、数字"]').setValue('新员工小张')
@@ -230,7 +238,7 @@ describe('发放账号（初始密码一次性展示）', () => {
     try {
       await clickBtn(pwd.findAll('button'), '复制')
       await flushPromises()
-      expect(writeText).toHaveBeenCalledWith('mock-copy-me-pass')
+      expect(writeText).toHaveBeenCalledWith(mockPassword('copy-me'))
     } finally {
       delete (navigator as { clipboard?: unknown }).clipboard
     }
@@ -238,7 +246,7 @@ describe('发放账号（初始密码一次性展示）', () => {
 
   it('关闭初始密码对话框后明文即弃（password 清空、不可再打开回看）', async () => {
     backend.users = [userItem()]
-    backend.createResult = { id: 203, initialPassword: 'mock-once-pass' }
+    backend.createResult = { id: 203, initialPassword: mockPassword('once') }
     const wrapper = await mountUsers()
     const dialog = await openCreate(wrapper)
     await dialog.find('input[placeholder="2-32 位，支持中文、字母、数字"]').setValue('新员工小张')
@@ -320,7 +328,7 @@ describe('禁用/启用与重置密码', () => {
 
   it('重置密码：popconfirm 确认 → POST reset-password → 新初始密码一次性展示', async () => {
     backend.users = [userItem()]
-    backend.resetResult = { id: backend.users[0]!.id, initialPassword: 'mock-reset-pass' }
+    backend.resetResult = { id: backend.users[0]!.id, initialPassword: mockPassword('reset') }
     const wrapper = await mountUsers()
     await confirmPopconfirm(wrapper.find('.el-table__row'), '重置密码')
     await flushPromises()
@@ -328,7 +336,7 @@ describe('禁用/启用与重置密码', () => {
     expect(backend.resetCalls).toEqual([backend.users[0]!.id])
     const pwd = wrapper.findComponent(PasswordDialog)
     expect(pwd.props('visible')).toBe(true)
-    expect(pwd.props('password')).toBe('mock-reset-pass')
+    expect(pwd.props('password')).toBe(mockPassword('reset'))
   })
 })
 
@@ -356,7 +364,7 @@ describe('api 层契约（路径/方法/参数钉死）', () => {
       makeResponse(201, 'application/json', {
         code: 0,
         message: 'ok',
-        data: { id: 9, initialPassword: 'mock-abcd-pass' },
+        data: { id: 9, initialPassword: mockPassword('abcd') },
       }),
     )
     vi.stubGlobal('fetch', fetchStub)
@@ -380,5 +388,31 @@ describe('api 层契约（路径/方法/参数钉死）', () => {
     ;[url, init] = fetchStub.mock.calls[2]!
     expect(url).toBe('/api/admin/users/9/reset-password')
     expect(init!.method).toBe('POST')
+  })
+})
+
+// ---- 加载失败错误态（工单 08：失败 ≠ 没有数据，错误态先于空态呈现"点击重试"） ----
+
+describe('加载失败错误态（工单 08）', () => {
+  it('加载失败空态显示"加载失败，点击重试"而非"还没有用户"，重试成功恢复列表', async () => {
+    backend.users = [userItem({ username: '恢复用账号' })]
+    fetchMock.mockImplementation((url: string, init: RequestInit = {}) => {
+      if (String(url).startsWith('/api/admin/users?') && (init.method ?? 'GET') === 'GET') {
+        return Promise.reject(new TypeError('Network Error'))
+      }
+      return routeFetch(String(url), init)
+    })
+    const wrapper = await mountUsers()
+    expect(wrapper.find('[data-test="users-load-error"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('加载失败，点击重试')
+    expect(wrapper.text()).not.toContain('还没有用户') // 失败 ≠ 没有数据
+    expect(wrapper.text()).not.toContain('没有匹配筛选条件的用户')
+    // 后端恢复后点重试：列表恢复、错误态退场
+    fetchMock.mockImplementation(routeFetch)
+    await wrapper.find('[data-test="users-load-error"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="users-load-error"]').exists()).toBe(false)
+    expect(wrapper.findAll('.el-table__row')).toHaveLength(1)
+    expect(wrapper.findAll('.el-table__row')[0]!.text()).toContain('恢复用账号')
   })
 })

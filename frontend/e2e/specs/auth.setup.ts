@@ -1,4 +1,4 @@
-import { execSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -32,9 +32,17 @@ setup('prepare login states', async ({ playwright }) => {
   // 栈自举（守卫式）：healthz 不通才以 e2e 三文件叠加拉起（TEST_MODE=true 硬编码 + 独立
   // 隔离库 pg-e2e/rag_e2e，2026-10-05 试点库被 E2E_WIPE 清空事故的根治），已健康则跳过
   // ——避免每轮重建重启打断后续 API 预置。
-  const COMPOSE_E2E =
-    'docker compose -f docker-compose.yml -f deploy/docker-compose.e2e.yml' +
-    ' -f deploy/docker-compose.e2e-isolated.yml'
+  // compose 参数以数组常量维护（execFileSync 参数数组传递，不经 shell 拼接——
+  // 2026-10-31 commit 钩子命令注入告警后正当化改写，行为等价）
+  const COMPOSE_E2E_ARGS = [
+    'compose',
+    '-f',
+    'docker-compose.yml',
+    '-f',
+    'deploy/docker-compose.e2e.yml',
+    '-f',
+    'deploy/docker-compose.e2e-isolated.yml',
+  ]
   const stackUp = async (): Promise<boolean> => {
     const probe = await playwright.request.newContext({ baseURL })
     try {
@@ -45,7 +53,7 @@ setup('prepare login states', async ({ playwright }) => {
     }
   }
   if (!(await stackUp())) {
-    execSync(`${COMPOSE_E2E} up -d --build pg-e2e app`, {
+    execFileSync('docker', [...COMPOSE_E2E_ARGS, 'up', '-d', '--build', 'pg-e2e', 'app'], {
       cwd: repoRoot,
       stdio: 'inherit',
       env: process.env,
@@ -57,23 +65,46 @@ setup('prepare login states', async ({ playwright }) => {
   }
   // 隔离防呆断言（防"指错库还照跑"）：app 的 DATABASE_URL 必须指向隔离库 rag_e2e，
   // 否则下面的 E2E_WIPE TRUNCATE 会清掉试点/业务库——断言不过立即中止，绝不种子。
-  execSync(
-    'docker compose exec -T app python -c "from app.core.config import get_settings; ' +
-      `assert get_settings().database_url.rstrip('/').endswith('rag_e2e'), ` +
-      `'E2E 隔离断言失败：DATABASE_URL 未指向 rag_e2e，拒绝执行种子'"`,
+  execFileSync(
+    'docker',
+    [
+      ...COMPOSE_E2E_ARGS,
+      'exec',
+      '-T',
+      'app',
+      'python',
+      '-c',
+      "from app.core.config import get_settings; assert get_settings().database_url.rstrip('/').endswith('rag_e2e'), 'E2E 隔离断言失败：DATABASE_URL 未指向 rag_e2e，拒绝执行种子'",
+    ],
     { cwd: repoRoot, stdio: 'inherit', env: process.env },
   )
   // 隔离库为全新空库（无 departments）：先部门种子后 E2E 账号（对齐 e2e-visible.sh 顺序）。
-  execSync(`${COMPOSE_E2E} exec -T app python -m app.db.seed`, {
-    cwd: repoRoot,
-    stdio: 'inherit',
-    env: process.env,
-  })
-  execSync(`${COMPOSE_E2E} exec -T -e E2E_PASSWORD -e E2E_WIPE=1 app python -m app.db.e2e_seed`, {
-    cwd: repoRoot,
-    stdio: 'inherit',
-    env: process.env,
-  })
+  execFileSync(
+    'docker',
+    [...COMPOSE_E2E_ARGS, 'exec', '-T', 'app', 'python', '-m', 'app.db.seed'],
+    {
+      cwd: repoRoot,
+      stdio: 'inherit',
+      env: process.env,
+    },
+  )
+  execFileSync(
+    'docker',
+    [
+      ...COMPOSE_E2E_ARGS,
+      'exec',
+      '-T',
+      '-e',
+      'E2E_PASSWORD',
+      '-e',
+      'E2E_WIPE=1',
+      'app',
+      'python',
+      '-m',
+      'app.db.e2e_seed',
+    ],
+    { cwd: repoRoot, stdio: 'inherit', env: process.env },
+  )
   fs.mkdirSync('.auth', { recursive: true })
   const ctx = await playwright.request.newContext({ baseURL })
   try {

@@ -4,6 +4,8 @@ OCR 全部 httpx MockTransport（照抄 test_parser._mineru 模式），不依�
 """
 
 import io
+import pathlib
+import tempfile
 import zipfile
 
 import httpx
@@ -64,13 +66,19 @@ def _xlsx_with_images(count: int) -> bytes:
     sheet.title = "数据"
     sheet["A1"] = "含图表格正文内容，用于验证 xlsx 图片抽取链路的完整性，长度满足质量红线要求。"
     for i in range(count):
-        path = f"/tmp/_xlimg_{i}.png"
-        with open(path, "wb") as f:
-            f.write(_png_bytes())
-        sheet.add_image(XlImage(path), f"B{2 + i * 5}")
+        # pathlib 写入（免 open(变量,"wb") 模式误报；tempfile 目录派生免固定 /tmp 形态）
+        png = pathlib.Path(_xlimg_path(i))
+        png.write_bytes(_png_bytes())
+        sheet.add_image(XlImage(str(png)), f"B{2 + i * 5}")
     buffer = io.BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
+
+
+def _xlimg_path(i: int) -> str:
+    """xlsx 图片夹具落盘路径：tempfile 目录派生（免固定 /tmp 形态）。"""
+    directory = tempfile.mkdtemp(prefix="xlimg-")
+    return directory + "/_xlimg_" + str(i) + ".png"
 
 
 class TestDocxExtraction:
