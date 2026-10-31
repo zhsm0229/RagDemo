@@ -125,7 +125,14 @@ def _build_state(settings: Settings) -> StateBundle:
 
         # TODO(工单 21 预留)：PG 桶未实施——state_counters scope='bucket'（迁移 0020
         # 已含 refill_at 列）。scale 拓扑 + 限流同时启用需 PG 桶；缺省
-        # rate_limiter_enabled=false 不阻塞（design/21 §3）。
+        # rate_limiter_enabled=false 不阻塞（design/21 §3）。两开关同时开时令牌桶
+        # 静默失效——至少告警，避免运维误以为第二层在生效（spec 评审 C3）。
+        if settings.rate_limiter_enabled:
+            logging.getLogger(__name__).warning(
+                "STATE_BACKEND=pg 且 RATE_LIMITER_ENABLED=true：令牌桶 PG 实现未落地，"
+                "分级限流第二层不生效（登录滑窗与日配额不受影响）；scale 拓扑建议先关总闸，"
+                "待 PG 桶（工单 21 预留）落地后开启"
+            )
         return StateBundle(
             cache=PgExactCache(clock, settings.cache_ttl_s),
             counter=PgDailyCounter(clock),
