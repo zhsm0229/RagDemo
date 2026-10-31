@@ -76,6 +76,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # 先清理系统来源 run（triggered_by=NULL）：NOT NULL 收紧在存在 NULL 行时会中断
+    # （评审 P2——私有化交付常伴降级回退诉求，回滚演练归部署机复测窗口工单 13）；
+    # 自动 run 可弃（正式集人工 run 不受影响）
+    op.execute("DELETE FROM eval_runs WHERE triggered_by IS NULL")
     op.alter_column("eval_runs", "triggered_by", existing_type=sa.BigInteger(), nullable=False)
     op.drop_index("idx_eval_questions_tier", table_name="eval_questions")
     op.drop_constraint("eval_questions_tier_check", "eval_questions", type_="check")

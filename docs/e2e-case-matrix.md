@@ -4,20 +4,28 @@
 > 每 MR）/ **E2E-L2**（Playwright @real，TEI+LLM 真链路，部署机每日/里程碑）/ **手工**。
 > 本矩阵只管 P0（50 条）；P1 里程碑全量回归、P2 手工（test-cases.md §自动化归属）。
 
-## 已落地的 E2E 用例（frontend/e2e/specs/）
+## 已落地的 E2E 用例（frontend/e2e/specs/，2026-10-31 对账：15 spec / 51 用例）
 
-| spec | 用例 | test-cases 编号 | 层 | 断言要点 |
-|------|------|----------------|----|----------|
-| auth.spec | 正确凭据登录 + 管理导航可见 | AUTH-01 | L1 | 落 /chat；"用户管理"可见 |
-| auth.spec | 错误凭据被拒 | AUTH-01b（配套） | L1 | 停留 /login |
-| auth.spec | 首登强制改密 | AUTH-04 | L1 | 守卫拦业务页；改密后进 /chat |
-| documents.spec | 上传 docx 同步解析就绪 | DOC-01/02 | L1 | 弹窗关闭；行"● 就绪" |
-| documents.spec | 空状态引导 | DOC-04 配套 | L1 | 仅空库执行，否则 skip |
-| chat.spec | 新会话 + 种子问答对直答 + 引用 | CHAT-01/02 | L1 | cite-card-[1]；qa 命中相似度 1 |
-| chat-real.spec | 无关问题逐字拒答 | CHAT-09 | **L2** | 逐字"知识库中未找到相关内容" |
-| chat-real.spec | 真实检索命中引用 | DOC-RAG | **L2** | cite-card + rerank 分 |
-| security.spec | member 管理面守卫 | SEC-01 | L1 | /admin 重定向；管理菜单隐藏 |
-| security.spec | 串库提问拒答（单向冒烟） | SEC-03 | **L2** | 逐字拒答 |
+| spec | 用例数 | 覆盖（test-cases 编号或场景） | 层 |
+|------|-------|------------------------|----|
+| auth.spec | 3 | AUTH-01 登录/拒错/首登改密 | L1 |
+| auth-lock.spec | 2 | AUTH-02/03 锁定与解锁 | L1 |
+| anonymous.spec | 2 | 匿名守卫（未登录重定向） | L1 |
+| chat.spec | 1 | CHAT-01/02 新会话+qa 直答+引用 | L1 |
+| chat-input.spec | 3 | CHAT-03/04 输入边界/停止按钮 | L1 |
+| chat-cache-manage.spec | 2 | 缓存命中与管理员清缓存 | L1 |
+| chat-feedback.spec | 3 | 点踩反馈与 badcase 联动 | L1 |
+| documents.spec | 2 | DOC-01/02 上传就绪 + 空态引导 | L1 |
+| documents-gov.spec | 14 | 文档治理全矩阵（分型/待确认/到期/软删/版本/草稿审核） | L1 |
+| qa-pairs.spec | 3 | FAQ 导入/启停/编辑 | L1 |
+| users-admin.spec | 4 | 发放/禁用/重置/守卫 | L1 |
+| admin-pages.spec | 6 | 管理页可达性与角色守卫矩阵 | L1 |
+| agent-run.spec | 1 | 模板生成 AG-UI 事件流冒烟 | L1 |
+| chat-real.spec | 2 | CHAT-09 逐字拒答 + 真实检索命中 | **L2 @real** |
+| security.spec | 3 | SEC-01 管理面守卫 + SEC-03 串库拒答 | L1+**L2** |
+
+**真实语义缺口（L2 @real 仅 3 条）**：CHAT-04 停止按钮真流中断、文档到期自动下线 UI、
+记忆页、多轮历史浏览——归属工单 13 部署机复测窗口与后续 L2 扩容（交付体检命令绑定）。
 
 ## L1 层的确定性边界（为什么部分断言只在上层做）
 

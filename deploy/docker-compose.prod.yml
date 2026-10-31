@@ -34,7 +34,7 @@ services:
       start_period: 60s
 
   pg:
-    image: pgvector/pgvector:pg15 # §12.2 钉 15+（HNSW/分区下限），禁止 latest
+    image: pgvector/pgvector@sha256:47af0b65960b14f1c6945aa4ccae37836c632e9a6fe0eea9160936e616e5b2e9 # pg15（§12.2 钉 15+）；digest 2026-10-31 由 tag pg15 钉取（工单 14）
     container_name: ragdemo-pg
     environment:
       POSTGRES_USER: rag
@@ -51,7 +51,7 @@ services:
       retries: 10
 
   tei-embed:
-    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.2
+    image: ghcr.io/huggingface/text-embeddings-inference@sha256:16230cd8f679ae5f8a51d585033628b1c0d45cd70c2bc9b0d208170d71218fdb # cpu-1.9.2（工单 14 digest 钉版）
     container_name: ragdemo-tei-embed
     command: ["--model-id", "/data/bge-m3", "--pooling", "cls", "--max-batch-tokens", "2048"]
     volumes:
@@ -66,7 +66,7 @@ services:
       start_period: 10m
 
   tei-rerank:
-    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.2
+    image: ghcr.io/huggingface/text-embeddings-inference@sha256:16230cd8f679ae5f8a51d585033628b1c0d45cd70c2bc9b0d208170d71218fdb # cpu-1.9.2（工单 14 digest 钉版）
     container_name: ragdemo-tei-rerank
     command: ["--model-id", "/data/bge-reranker-v2-m3", "--max-batch-tokens", "2048"]
     volumes:
@@ -101,7 +101,7 @@ services:
       start_period: 15m
 
   gotenberg:
-    image: gotenberg/gotenberg:8 # 老格式（doc/ppt/xls）LibreOffice 自动转换（F-1015），仅内网
+    image: gotenberg/gotenberg@sha256:13672f317b443c793e972b1bd2155ec62a3e7b6891b411e8196442cc053ee5f5 # 老格式转换（F-1015），仅内网；工单 14 digest 钉版（原浮动 :8 会大版本内 silent 升级）
     container_name: ragdemo-gotenberg
     command: ["gotenberg", "--api-timeout=120s"]
     mem_limit: 1g # 转换并发=1，LibreOffice 单实例峰值 ~500MB

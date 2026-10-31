@@ -207,7 +207,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.agent_deps = _build_agent_deps(settings, chat_deps)
     # 启动补偿放后台线程：合成/跑分是分钟-小时级 LLM 任务，同步执行会阻塞 lifespan
     # （healthz 不就绪、端口不监听——2026-10-31 dev 实测教训）；daemon=True 随进程退出
-    threading.Thread(target=_startup_catchup, args=(settings,), daemon=True, name="eval-catchup").start()
+    threading.Thread(
+        target=_startup_catchup, args=(settings,), daemon=True, name="eval-catchup"
+    ).start()
     try:
         yield
     finally:
@@ -320,7 +322,9 @@ def _mount_spa(app: FastAPI) -> None:
     index.html 无 hash，必须 no-cache 强制协商校验——否则浏览器启发式缓存旧壳，
     发新版后用户仍加载旧 JS（2026-10-02 zip 按钮旧文案事故的根因之一）。
     """
-    static_dir = os.getenv("STATIC_DIR", "")
+    # STATIC_DIR 走 Settings（评审 P2：os.getenv 不读 .env——宿主裸跑形态会把配置写
+    # 进 .env 而静默不挂载；并入 pydantic 后一处读法，容器 ENV 注入形态不受影响）
+    static_dir = get_settings().static_dir
     if not static_dir or not (Path(static_dir) / "index.html").is_file():
         return
     root = Path(static_dir)

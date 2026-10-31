@@ -34,5 +34,12 @@ def autogenerate_include_object(
     return not is_unmanaged_partition
 
 
-engine = create_engine(get_settings().database_url, pool_pre_ping=True)
+# 连接池按部署形态可调（评审 P2：缺省 5+10 低于同步端点线程池 40 上限，高并发排队；
+# 生产按并发档位经 .env 调大，压测口径见工单 15 NFR 取证）
+engine = create_engine(
+    get_settings().database_url,
+    pool_pre_ping=True,
+    pool_size=get_settings().db_pool_size,
+    max_overflow=get_settings().db_max_overflow,
+)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)

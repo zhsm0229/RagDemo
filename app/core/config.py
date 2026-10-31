@@ -45,6 +45,13 @@ class Settings(BaseSettings):
         True  # rerank 熔断总闸（retrieval-policy §3）：手动关闭恒 closed 不记失败
     )
     cache_ttl_s: int = 300  # 问答结果缓存 TTL（秒）
+    db_pool_size: int = (
+        5  # SQLAlchemy 连接池常驻连接数（评审 P2：缺省维持现值零变化；多副本/高并发
+        # 部署按并发档位调大——上限=同步端点线程池，配合 max_overflow 突发缓冲）
+    )
+    db_max_overflow: int = (
+        10  # 连接池突发溢出上限（超出 pool_size 的临时连接数）；压测后与 pool_size 一并标定
+    )
     retriever_top_k: int = 20  # 向量检索候选数 top_k
     rerank_top_n: int = 5  # 重排后保留条数 top_n
     chunk_dedup_sim: float = 0.98  # 检索结果去重相似度阈值
@@ -102,6 +109,11 @@ class Settings(BaseSettings):
         # detail 存 regression 标记、健康卡标红
     )
     test_mode: bool = False
+    static_dir: str = (
+        ""  # 前端 dist 托管目录（§12.2 生产仅 app 发布 80 端口）：空=不挂载（本机 dev/
+        # CI test_mode）；容器经 ENV 注入 /srv/ragdemo/static。原 os.getenv 直读不进
+        # .env 解析（评审 P2 形态差异），并入 Settings 后一处读法
+    )
 
 
 @lru_cache

@@ -66,12 +66,12 @@ function pctText(value: number): string {
 /** 概览卡标题随窗口切换（M31："近1天"口径与切档按钮文案一致，不用"今日"） */
 const questionsLabel = computed(() => (days.value === 1 ? '近1天提问' : '近7天提问'))
 
-/** 待处理跳转：不带条件进文档管理（待确认文档数量少，进页即可见） */
 /** 评测退化提示跳转：评测管理页（评测集自动更新 08 票） */
 function gotoEval(): void {
   void router.push('/admin/eval')
 }
 
+/** 待处理跳转：不带条件进文档管理（待确认文档数量少，进页即可见） */
 function gotoDocuments(): void {
   void router.push({ name: 'kb-documents' })
 }
