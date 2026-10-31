@@ -11,7 +11,11 @@ from dataclasses import dataclass
 from app.core.assembly import PromptPack
 from app.core.config import Settings
 from app.core.llm import Embedder, LLMProvider, Reranker
-from app.services.chat_cache import DailyCounter, ExactCache, HitCounter
+from app.services.chat_cache import (
+    ChatCacheProto,
+    DailyCounterProto,
+    HitCounterProto,
+)
 from app.services.vector_store import VectorStore
 
 
@@ -50,9 +54,9 @@ class ChatDeps:
     embedder: Embedder
     reranker: Reranker
     llm: LLMProvider
-    cache: ExactCache
-    counter: DailyCounter
-    hit_counter: HitCounter
+    cache: ChatCacheProto
+    counter: DailyCounterProto
+    hit_counter: HitCounterProto
     settings: Settings
     prompts: PromptPack
     store: "VectorStore"

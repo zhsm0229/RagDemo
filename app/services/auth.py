@@ -10,6 +10,7 @@ locked_until，进程重启不丢），锁 15 分钟，锁定窗口内正确密�
 
 import threading
 from datetime import datetime, timedelta
+from typing import Protocol
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -67,6 +68,16 @@ def evaluate_login(attempts: int, max_attempts: int = MAX_LOGIN_ATTEMPTS) -> str
     return ACTION_REJECT
 
 
+class RateLimiterProto(Protocol):
+    """登录限流协议面（工单 19）：hit/reset 语义见 SlidingWindowLimiter（窗口内达上限
+    拒绝且不落事件、reset 清空），pg 实现由 state_pg_auth.PgSlidingWindowLimiter 提供；
+    装配层经 StateBundle 显式传参（main.py），模块级 default_limiter 保留为 memory 缺省。"""
+
+    def hit(self, key: str) -> bool: ...
+
+    def reset(self) -> None: ...
+
+
 class SlidingWindowLimiter:
     """进程内滑动窗口限流器：同一键在 window_seconds 内最多 max_events 次。
 
@@ -112,7 +123,7 @@ def login(
     username: str,
     password: str,
     ip: str | None,
-    limiter: SlidingWindowLimiter | None = None,
+    limiter: RateLimiterProto | None = None,
     max_attempts: int = MAX_LOGIN_ATTEMPTS,
     clock: Clock | None = None,
 ) -> tuple[User, str]:

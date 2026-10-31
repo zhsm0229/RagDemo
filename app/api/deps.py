@@ -38,10 +38,15 @@ def get_current_user(request: Request, db: DbSession) -> User:
     """Cookie → decode（exp 按可注入时钟）→ 查库 is_active → 注入用户。
 
     无 cookie / 令牌无效或过期 / 用户不存在或已禁用：一律 401/2003 同文案
-    （§5.6 禁用即时生效；不区分原因，不给探测空间）。
+    （§5.6 禁用即时生效；不区分原因，不给探测空间）。黑名单取 lifespan 装配的
+    state_bundle（工单 19 显式传参，登出即时失效对鉴权路径默认生效）。
     """
     token = request.cookies.get(COOKIE_NAME)
-    payload = decode_token(token, get_settings().jwt_secret) if token else None
+    payload = (
+        decode_token(token, get_settings().jwt_secret, request.app.state.state_bundle.blacklist)
+        if token
+        else None
+    )
     if payload is None:
         raise ApiError(ERR_UNAUTHENTICATED, _MSG_UNAUTHENTICATED, 401)
     user = get_user_by_id(db, payload.user_id)

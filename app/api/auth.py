@@ -41,9 +41,12 @@ def _user_payload(user: User) -> dict:
 
 @router.post("/login")
 def login(body: LoginRequest, request: Request, db: DbSession) -> JSONResponse:
-    """登录：成功 Set-Cookie(jwt, httpOnly, SameSite=Lax, 8h)；失败经全局异常处理器。"""
+    """登录：成功 Set-Cookie(jwt, httpOnly, SameSite=Lax, 8h)；失败经全局异常处理器。
+    限流器取 lifespan 装配的 state_bundle（工单 19 显式传参，后端随 Settings 选择）。"""
     ip = request.client.host if request.client else None
-    user, token = auth_service.login(db, body.username, body.password, ip)
+    user, token = auth_service.login(
+        db, body.username, body.password, ip, limiter=request.app.state.state_bundle.limiter
+    )
     response = JSONResponse(content={"code": 0, "message": "ok", "data": _user_payload(user)})
     response.set_cookie(
         COOKIE_NAME,
@@ -61,8 +64,11 @@ def logout(request: Request) -> JSONResponse:
 
     不设登录门（CurrentUser）：令牌缺失/已失效也照常 200 清 Cookie（幂等），
     登出是客户端意图操作，拒绝只会让旧 Cookie 清不掉，亦防借登出探测令牌有效性。
+    黑名单取 lifespan 装配的 state_bundle（工单 19 显式传参）。
     """
-    auth_service.logout(request.cookies.get(COOKIE_NAME))
+    auth_service.logout(
+        request.cookies.get(COOKIE_NAME), blacklist=request.app.state.state_bundle.blacklist
+    )
     response = JSONResponse(content={"code": 0, "message": "ok", "data": None})
     response.delete_cookie(COOKIE_NAME, httponly=True, samesite="lax")  # 属性与登录下发一致
     return response

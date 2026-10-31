@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -45,6 +46,12 @@ class Settings(BaseSettings):
         True  # rerank 熔断总闸（retrieval-policy §3）：手动关闭恒 closed 不记失败
     )
     cache_ttl_s: int = 300  # 问答结果缓存 TTL（秒）
+    state_backend: Literal["memory", "pg"] = (
+        "memory"  # 进程内状态后端（工单 19）：memory=进程内字典（单实例，缺省）/
+        # pg=外置三张 state_* 表（问答缓存/日限额/召回暂存/登录限流/登出黑名单，
+        # 跨实例共享，工单 20 多副本前置）。test_mode 恒 memory（测试 reset() 契约
+        # 建立在进程内语义上）。【部署可选：缺省 memory】
+    )
     db_pool_size: int = (
         5  # SQLAlchemy 连接池常驻连接数（评审 P2：缺省维持现值零变化；多副本/高并发
         # 部署按并发档位调大——上限=同步端点线程池，配合 max_overflow 突发缓冲）

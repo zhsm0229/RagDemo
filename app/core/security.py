@@ -10,6 +10,7 @@ import math
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Protocol
 from uuid import uuid4
 
 import bcrypt
@@ -33,6 +34,19 @@ class TokenPayload:
     dept_id: int
     jti: str
     exp: float
+
+
+class JtiBlacklistProto(Protocol):
+    """jti 登出黑名单协议面（工单 19）：revoke/revoked/reset 语义见 JtiBlacklist
+    （条目 TTL=令牌剩余有效期、过期视同不存在），pg 实现由 state_pg_auth.PgJtiBlacklist
+    提供。协议留 core（core 不能反向 import services——五层单向依赖），由 services 层
+    实现属向下依赖，合法。"""
+
+    def revoke(self, jti: str, exp: float) -> None: ...
+
+    def revoked(self, jti: str) -> bool: ...
+
+    def reset(self) -> None: ...
 
 
 class JtiBlacklist:
@@ -107,7 +121,7 @@ def create_token(
 
 
 def decode_token(
-    token: str, secret: str, blacklist: JtiBlacklist | None = None
+    token: str, secret: str, blacklist: JtiBlacklistProto | None = None
 ) -> TokenPayload | None:
     """校验签名与 exp 与登出黑名单；无效/过期/已登出（jti 命中）返回 None。
 

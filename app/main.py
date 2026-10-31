@@ -9,6 +9,7 @@ import os
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +64,7 @@ from app.core.llm import (
     StubLLMProvider,
     StubReranker,
 )
+from app.core.security import JtiBlacklistProto, default_blacklist
 from app.core.tools import ToolRegistry
 from app.services.agent_runs import AgentDeps
 from app.services.agent_tools import (
@@ -71,20 +73,71 @@ from app.services.agent_tools import (
     SaveDraftDeps,
     SaveDraftTool,
 )
+from app.services.auth import RateLimiterProto, default_limiter
 from app.services.chat import ChatDeps
-from app.services.chat_cache import DailyCounter, ExactCache, HitCounter
+from app.services.chat_cache import (
+    ChatCacheProto,
+    DailyCounter,
+    DailyCounterProto,
+    ExactCache,
+    HitCounter,
+    HitCounterProto,
+)
 from app.services.retrieval import PgVectorStore
 from app.services.scheduler import add_hit_flush_job, build_scheduler
 from app.services.vector_store import VectorStore
 
 
-def _build_chat_deps(settings: Settings) -> ChatDeps:
+@dataclass
+class StateBundle:
+    """进程内状态五件套（工单 19 装配载体）：_build_state 的产物，lifespan 挂
+    app.state.state_bundle——问答链路（cache/counter/hit_counter）与鉴权路由
+    （limiter/blacklist）显式取用，消除缺省解析的隐式全局。"""
+
+    cache: ChatCacheProto
+    counter: DailyCounterProto
+    hit_counter: HitCounterProto
+    limiter: RateLimiterProto
+    blacklist: JtiBlacklistProto
+
+
+def _build_state(settings: Settings) -> StateBundle:
+    """状态五件装配（工单 19）：test_mode 恒 memory（conftest reset() 测试基建建立在
+    进程内语义上）；state_backend=pg 外置三张 state_* 表（跨实例共享，工单 20 多副本
+    前置）。clock 用 SystemClock 直连：状态五件是进程级单例，不随测试拨动全局可注入
+    时钟而换实例（TTL 与限额口径在进程生命周期内稳定，原 _build_chat_deps 口径上收）。
+    limiter/blacklist 的 memory 分支复用模块级单例：conftest 的 reset() 契约建立在
+    同一对象上（api 测试隔离零改动），生产路由经 bundle 显式传参后不再触达缺省解析。"""
+    backend = "memory" if settings.test_mode else settings.state_backend
+    clock = SystemClock()
+    if backend == "pg":
+        from app.services.state_pg import PgDailyCounter, PgExactCache, PgHitCounter
+        from app.services.state_pg_auth import PgJtiBlacklist, PgSlidingWindowLimiter
+
+        return StateBundle(
+            cache=PgExactCache(clock, settings.cache_ttl_s),
+            counter=PgDailyCounter(clock),
+            hit_counter=PgHitCounter(clock),
+            limiter=PgSlidingWindowLimiter(60, 10, clock),
+            blacklist=PgJtiBlacklist(clock),
+        )
+    return StateBundle(
+        cache=ExactCache(clock, settings.cache_ttl_s),
+        counter=DailyCounter(clock),
+        hit_counter=HitCounter(clock),
+        limiter=default_limiter,
+        blacklist=default_blacklist,
+    )
+
+
+def _build_chat_deps(settings: Settings, state: StateBundle | None = None) -> ChatDeps:
     """问答链路依赖包装配（Task 9）：test_mode → Stub 三件套，否则 TEI / OpenAI 兼容
     真实现（build_llm 非 test_mode 且 llm_base_url 空即 RuntimeError 拒启，§6.4）。
     提示词包先装载：温度随模板同版本化（§17.4），pack.temperature 传入 LLM 装配——
     manifest 改温度在装配期生效，不允许与 provider 缺省值静默脱钩。
-    进程内缓存/每日限额/召回计数用 SystemClock 直连：它们是进程级单例，不随测试拨动
-    全局可注入时钟而换实例（TTL 与限额口径在进程生命周期内稳定）。"""
+    state 缺省自建：scheduler 周评测与启动补偿调用点零改动（工单 19）；lifespan
+    传入 _build_state 产物，问答与鉴权路由共享同一份状态。"""
+    state = state or _build_state(settings)
     prompts = load_prompt_pack()
     if settings.test_mode:
         embedder: Embedder = StubEmbedder()
@@ -101,14 +154,13 @@ def _build_chat_deps(settings: Settings) -> ChatDeps:
     # VectorStore 第六接口在装配层选择实现（services 层协议不进 core/assembly——
     # 五层单向依赖）；pg 实现无状态不随 test_mode 变化（stub 的是向量产物，检索恒打真库）
     store: VectorStore = PgVectorStore()
-    clock = SystemClock()
     return ChatDeps(
         embedder=embedder,
         reranker=reranker,
         llm=llm,
-        cache=ExactCache(clock, settings.cache_ttl_s),
-        counter=DailyCounter(clock),
-        hit_counter=HitCounter(clock),
+        cache=state.cache,
+        counter=state.counter,
+        hit_counter=state.hit_counter,
         settings=settings,
         prompts=prompts,
         store=store,
@@ -200,10 +252,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     由装配方持有并注入 add_hit_flush_job，调度刷库与请求侧 add 共享同一份聚合）；
     test_mode 只装配不自启，退出关停。"""
     settings = get_settings()
-    chat_deps = _build_chat_deps(settings)  # 先装配问答依赖：§6.4 fail-fast 不留已启调度器
+    # 状态五件先行：问答依赖与鉴权路由共享同一 bundle（工单 19 接线三处显式传参）
+    state = _build_state(settings)
+    chat_deps = _build_chat_deps(settings, state)  # 先装配问答依赖：§6.4 fail-fast 不留已启调度器
     scheduler = build_scheduler(settings)
     add_hit_flush_job(scheduler, chat_deps.hit_counter, settings.cache_ttl_s)
     app.state.chat_deps = chat_deps
+    app.state.state_bundle = state
     app.state.agent_deps = _build_agent_deps(settings, chat_deps)
     # 启动补偿放后台线程：合成/跑分是分钟-小时级 LLM 任务，同步执行会阻塞 lifespan
     # （healthz 不就绪、端口不监听——2026-10-31 dev 实测教训）；daemon=True 随进程退出

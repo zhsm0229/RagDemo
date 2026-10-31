@@ -3,7 +3,8 @@
 原 app/db/models.py 超 300 行红线（standards §1.4-4，约束 app/ 生产代码），按域拆分：
 catalog（departments/users）、content（documents/chunks/qa_pairs/document_images）、
 chat（conversations/messages）、eval（eval_questions/eval_runs）、memory（user_memories）、
-ops（audit_logs）、types（Vector 列类型与 _ts 时间戳工厂）。各类声明逐字保留。
+ops（audit_logs）、state（state_cache_entries/state_counters/state_auth_guards，工单 19）、
+types（Vector 列类型与 _ts 时间戳工厂）。各类声明逐字保留。
 
 建表唯一入口是 Alembic 迁移（alembic/versions/0001_init.py，DDL 逐字照抄 spec）；
 各文件中的 FK / UNIQUE / CHECK / Index 声明与迁移产物逐一同名（具名 FK 与 PG 默认
@@ -25,6 +26,7 @@ from app.db.models.content import Chunk, Document, DocumentImage, QaPair
 from app.db.models.eval import EvalQuestion, EvalRun, HardcaseSeed
 from app.db.models.memory import UserMemory
 from app.db.models.ops import AppSetting, AuditLog
+from app.db.models.state import StateAuthGuard, StateCacheEntry, StateCounter
 from app.db.models.types import Vector
 
 __all__ = [
@@ -42,6 +44,9 @@ __all__ = [
     "HardcaseSeed",
     "Message",
     "QaPair",
+    "StateAuthGuard",
+    "StateCacheEntry",
+    "StateCounter",
     "User",
     "UserMemory",
     "Vector",

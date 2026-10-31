@@ -21,12 +21,47 @@ r"""问答进程内三件套（Task 7，Task 8 编排直接消费）：精确缓
 import copy
 import threading
 from datetime import date, datetime, timedelta
+from typing import Protocol
 
 from sqlalchemy import Integer, bindparam, update
 from sqlalchemy.orm import Session
 
 from app.core.clock import Clock
 from app.db.models import Chunk
+
+
+class ChatCacheProto(Protocol):
+    """问答精确缓存协议面（工单 19）：方法签名与 ExactCache 逐字一致，装配层据
+    Settings.state_backend 选择 memory/pg 实现（state_pg.PgExactCache），编排层
+    （chat/eval/admin）只依赖本协议，不感知后端形态。"""
+
+    def make_key(
+        self, dept_id: int, question_normalized: str, user_suffix: str | None = None
+    ) -> str: ...
+
+    def get(self, key: str) -> dict | None: ...
+
+    def put(self, key: str, entry: dict) -> None: ...
+
+    def clear_by_ref(self, ref_type: str, ref_id: int) -> int: ...
+
+    def clear(self) -> None: ...
+
+
+class DailyCounterProto(Protocol):
+    """每日限额协议面（工单 19）：try_consume 语义见 DailyCounter（恰限放行、
+    超限拒绝且不计数、跨日重置、按 user 隔离），pg 实现由 state_pg.PgDailyCounter 提供。"""
+
+    def try_consume(self, user_id: int, limit: int) -> bool: ...
+
+
+class HitCounterProto(Protocol):
+    """召回计数聚合协议面（工单 19）：add 攒批 / flush 刷库语义见 HitCounter
+    （聚合不丢、失败滚入），pg 实现由 state_pg.PgHitCounter 提供。"""
+
+    def add(self, chunk_ids: list[int]) -> None: ...
+
+    def flush(self, db: Session) -> int: ...
 
 
 class ExactCache:
@@ -93,12 +128,19 @@ class ExactCache:
 
     @staticmethod
     def _touches(entry: dict, ref_type: str, ref_id: int) -> bool:
-        """条目是否引用目标资源；citations 形态漂移（缺席/空/非 list）按保守删除。"""
+        """条目是否引用目标资源；citations 形态漂移（缺席/空/非 list）按保守删除。
+
+        refId 统一按文本比较（工单 19 修订 R2）：PG 侧 JSONB 经 c->>'refId' 文本
+        归一（int 7 与 "7" 同命中），内存版同步 str() 归一——两后端失效语义一致，
+        否则同一份缓存按后端不同而漏删/多删。
+        """
         citations = entry.get("citations") if isinstance(entry, dict) else None
         if not isinstance(citations, list) or not citations:
             return True
         return any(
-            isinstance(c, dict) and c.get("refType") == ref_type and c.get("refId") == ref_id
+            isinstance(c, dict)
+            and c.get("refType") == ref_type
+            and str(c.get("refId")) == str(ref_id)
             for c in citations
         )
 
