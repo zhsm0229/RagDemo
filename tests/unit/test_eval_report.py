@@ -64,6 +64,13 @@ def _build(items: list[dict]) -> dict:
     with (
         patch.object(eval_report, "_dept_codes", return_value={1: "service"}),
         patch.object(eval_report, "_doc_types", return_value={11: "general", 12: "notice"}),
+        # 07 票新增两缝：题 tier 映射（全 official，覆盖测试用题号 1-20）与环比（无前轮 null）
+        patch.object(
+            eval_report,
+            "_question_tiers",
+            return_value={i: "official" for i in range(1, 21)},
+        ),
+        patch.object(eval_report, "_previous_comparison", return_value=None),
     ):
         return eval_report.build_report(None, run)  # type: ignore[arg-type]
 

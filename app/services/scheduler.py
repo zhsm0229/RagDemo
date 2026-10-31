@@ -60,6 +60,9 @@ _PARTITIONS_JOB_ID = "ensure_month_partitions"
 _RETENTION_JOB_ID = "message_retention_cleanup"
 _HIT_FLUSH_JOB_ID = "flush_hit_counter"
 _AGENT_STALE_JOB_ID = "agent_run_stale_sweep"
+_EVAL_SYNTH_JOB_ID = "eval_auto_synth"
+_EVAL_RUN_JOB_ID = "eval_auto_run"
+_EVAL_RUN_STALE_JOB_ID = "eval_run_stale_sweep"
 _MSG_AGENT_STALE = "运行超时被清扫"  # 落 agent_runs.error 的对外脱敏话术（技术细节只进日志）
 
 
@@ -77,6 +80,29 @@ def sweep_stale_agent_runs(session: Session, clock: Clock, stale_minutes: int) -
             error=_MSG_AGENT_STALE,
             finished_at=clock.now(),
             updated_at=clock.now(),
+        )
+    )
+    session.commit()
+    return int(result.rowcount or 0)
+
+
+_MSG_EVAL_RUN_STALE = "运行超时自动收口（幽灵清扫）"  # 落 eval_runs.detail.error 的脱敏话术
+
+
+def sweep_stale_eval_runs(session: Session, clock: Clock, stale_minutes: int) -> int:
+    """评测 run 幽灵清扫任务体（商用就绪工单 06）：running 且 created_at 超过阈值
+    → failed。崩溃遗留的 running 占住 [自动] 幂等键（同周在册即跳过），本周三视角
+    跑分静默缺失——清扫后 catchup 补跑可达。单条条件 UPDATE（agent 幽灵清扫同款），
+    返回清扫条数。"""
+    from app.db.models import EvalRun
+
+    cutoff = clock.now() - timedelta(minutes=stale_minutes)
+    result = session.execute(
+        update(EvalRun)
+        .where(EvalRun.status == "running", EvalRun.created_at < cutoff)
+        .values(
+            status="failed",
+            detail={"error": _MSG_EVAL_RUN_STALE},
         )
     )
     session.commit()
@@ -143,12 +169,17 @@ def build_scheduler(settings: Settings) -> BackgroundScheduler:
     生产按单实例语义（多 worker 部署时各进程各持一份调度器，属 W4 部署关切）。
     """
     scheduler = BackgroundScheduler(timezone="UTC")
+    # misfire_grace_time=1h + coalesce（商用就绪工单 06）：运行中错峰错过（GC 停顿/
+    # 前序任务超时占线程）的触发在 1h 内补跑且多轮合并为一轮——与"同周幂等"互补，
+    # 前者管运行中错过、后者管停机跨窗口（catchup）
+    _MISFIRE = {"misfire_grace_time": 3600, "coalesce": True}
     scheduler.add_job(
         _run_sweeps_job,
         CronTrigger(day="*", hour="2", minute="0", timezone="UTC"),
         id=_SWEEPS_JOB_ID,
         name="到期文档下线清扫",
         replace_existing=True,
+        **_MISFIRE,
     )
     scheduler.add_job(
         _run_partitions_job,
@@ -156,6 +187,7 @@ def build_scheduler(settings: Settings) -> BackgroundScheduler:
         id=_PARTITIONS_JOB_ID,
         name="messages 月分区补建",
         replace_existing=True,
+        **_MISFIRE,
     )
     scheduler.add_job(
         _run_retention_job,
@@ -163,6 +195,7 @@ def build_scheduler(settings: Settings) -> BackgroundScheduler:
         id=_RETENTION_JOB_ID,
         name="提问记录两段式清理",
         replace_existing=True,
+        **_MISFIRE,
     )
     scheduler.add_job(
         _run_agent_stale_job,
@@ -170,6 +203,37 @@ def build_scheduler(settings: Settings) -> BackgroundScheduler:
         id=_AGENT_STALE_JOB_ID,
         name="agent 运行幽灵清扫",
         replace_existing=True,
+        **_MISFIRE,
+    )
+    # 评测集自动更新（05 票）：周日 04:00 合成流水（采集→难例合成→文档造题），
+    # 错峰既有 02:00/02:30/03:00 窗口；总闸 app_settings.eval_auto.enabled 关时零副作用
+    scheduler.add_job(
+        _run_eval_synth_job,
+        CronTrigger(day_of_week="sun", hour="4", minute="0", timezone="UTC"),
+        id=_EVAL_SYNTH_JOB_ID,
+        name="评测自动合成流水",
+        replace_existing=True,
+        **_MISFIRE,
+    )
+    # 评测集自动更新（06 票）：周日 05:00 三视角自动跑分（排在合成流水之后，新题
+    # 当轮即被跑分覆盖）；同一总闸，任务体幂等（同周同视角 run 在册即跳过）
+    scheduler.add_job(
+        _run_eval_auto_job,
+        CronTrigger(day_of_week="sun", hour="5", minute="0", timezone="UTC"),
+        id=_EVAL_RUN_JOB_ID,
+        name="周评测自动跑分",
+        replace_existing=True,
+        **_MISFIRE,
+    )
+    # 评测 run 幽灵清扫（工单 06）：每小时 15 分（错开 agent 清扫的 :45），崩溃遗留
+    # running 置 failed 释放 [自动] 幂等键；阈值 eval_run_stale_minutes
+    scheduler.add_job(
+        _run_eval_run_stale_job,
+        CronTrigger(day="*", hour="*", minute="15", timezone="UTC"),
+        id=_EVAL_RUN_STALE_JOB_ID,
+        name="评测 run 幽灵清扫",
+        replace_existing=True,
+        **_MISFIRE,
     )
     if not settings.test_mode:
         scheduler.start()
@@ -252,3 +316,56 @@ def _run_agent_stale_job() -> None:
         swept = sweep_stale_agent_runs(session, get_clock(), get_settings().agent_run_stale_minutes)
     if swept:
         logger.info("agent run 幽灵清扫：%d 行 running 超龄置 failed", swept)
+
+
+def _run_eval_synth_job() -> None:
+    """cron 任务体（05 票）：独立会话执行评测自动合成流水；LLM 用 temperature=0
+    第二实例（与人工评测判分同款口径）。总闸关时任务体零副作用直接返回；
+    失败经 logger.exception 吞掉不拖垮调度线程（下轮周任务重试）。"""
+    settings = get_settings()
+    try:
+        from app.core.assembly import build_llm
+        from app.services.eval_auto import run_synth_pipeline
+
+        with SessionLocal() as session:
+            summary = run_synth_pipeline(
+                session, get_clock(), settings, llm=build_llm(settings, 0.0)
+            )
+    except Exception:
+        logger.exception("评测自动合成流水执行失败（下轮周任务重试）")
+        return
+    if summary.get("enabled"):
+        logger.info("评测自动合成流水完成：%s", summary)
+
+
+def _run_eval_auto_job() -> None:
+    """cron 任务体（06 票）：独立会话建三视角 `[自动]` run 并逐一执行引擎；deps 由
+    main._build_chat_deps 装配（延迟导入防循环）。总闸关时任务体返回空列表零副作用；
+    失败经 logger.exception 吞掉（失败视角已在任务体内置 failed，见 eval_auto_run）。"""
+    settings = get_settings()
+    try:
+        from app.main import _build_chat_deps
+        from app.services.eval_auto_run import run_weekly_eval
+
+        with SessionLocal() as session:
+            run_ids = run_weekly_eval(
+                session, get_clock(), settings, deps=_build_chat_deps(settings)
+            )
+    except Exception:
+        logger.exception("周评测自动跑分执行失败（下轮周任务重试）")
+        return
+    if run_ids:
+        logger.info("周评测自动跑分：本轮新建 run %s", run_ids)
+
+
+def _run_eval_run_stale_job() -> None:
+    """评测 run 幽灵清扫 wrapper：阈值实时读 settings（改配置无需重装调度器）。"""
+    settings = get_settings()
+    try:
+        with SessionLocal() as session:
+            swept = sweep_stale_eval_runs(session, get_clock(), settings.eval_run_stale_minutes)
+    except Exception:
+        logger.exception("评测 run 幽灵清扫执行失败")
+        return
+    if swept:
+        logger.info("评测 run 幽灵清扫：置 failed %s 条", swept)

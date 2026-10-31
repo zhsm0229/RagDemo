@@ -82,6 +82,25 @@ class Settings(BaseSettings):
         # 须 ≥ 长任务合法时长（agent_model_timeout_s=300s/轮 × 多轮迭代 + 工具重试），
         # 15min 会把在途的模板生成误杀（2026-10-07 实测教训）
     )
+    eval_run_stale_minutes: int = (
+        120  # 评测 run 幽灵清扫阈值（分钟，商用就绪工单 06）：running 且 created_at
+        # 超过此时长的 eval_runs 视为崩溃遗留幽灵行，定时任务置 failed——running 占住
+        # [自动] 幂等键会让本周三视角跑分静默缺失。≥ 跑分合法时长（题量 × 单题
+        # rerank+LLM 最长链路），部署机按题量调大
+    )
+    # ---- 评测集自动更新（评测自动闭环）：总闸缺省关=行为与现状一致；预算项运行时 ----
+    # 读取（改配置无需重装调度器），纯内部阈值不进 .env.example（同 agent_model_* 口径）
+    eval_auto_enabled: bool = (
+        False  # 评测自动闭环总闸：难例合成流水（周日 04:00）与三视角自动跑分（周日
+        # 05:00）的启停开关；部署稳定后经 .env 覆盖开启【部署可选：缺省 false】
+    )
+    eval_auto_synth_per_seed: int = 2  # 每个难例种子最多合成的变体题数（LLM 预算闸一）
+    eval_auto_doc_sample_per_dept: int = 20  # 文档造题通道每部门每周抽样知识块数（预算闸二）
+    eval_auto_weekly_max_questions: int = 100  # 每周自动新增评测题总量上限（预算闸三）
+    eval_auto_regression_pp: float = (
+        5.0  # 退化告警阈值（百分点）：同口径相邻两轮 accuracy 降幅超过该值即在报告
+        # detail 存 regression 标记、健康卡标红
+    )
     test_mode: bool = False
 
 

@@ -62,6 +62,7 @@ EXPECTED_COLUMNS: dict[str, list[str]] = {
         "content_chars",
         "page_no",
         "position",
+        "parent_position",  # 0013（切分策略 B）：父子块父块序号，notice/table_report 档子块非空
         "embedding",
         "embedding_model",
         "hit_count",

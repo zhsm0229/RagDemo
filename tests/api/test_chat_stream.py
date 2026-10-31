@@ -27,6 +27,7 @@ from app.core.llm import DEFAULT_CHAT_CHUNKS, StubEmbedder, StubLLMProvider, Stu
 from app.db.models import Chunk, Conversation, Department, Document, Message, QaPair, User
 from app.main import app
 from app.rag.prompt import REFUSAL_TEXT
+from app.services.chat import TurnPlan
 from tests.conftest import login_as
 
 QUESTION = "公司年假有多少天"
@@ -716,3 +717,87 @@ def test_retry_clears_exact_cache_and_next_question_regenerates(chat_client, ses
     assert third.status_code == 200
     assert _parse_sse(third.text)[-1][1]["cacheHit"] is False
     assert app.state.chat_deps.llm.stream_calls == 2  # 缓存已被整清：第三问重新生成
+
+
+# ---------------------------------------------------------------------------
+# 客户端断开收尾（2026-10-31 评审 P1-5，工单 07——修复前两用例均红）
+# 先例：tests/api/test_agent_runs.py::test_generator_close_sweeps_failed_no_ghost
+# （gen.close() = Starlette 断连向生成器注入 GeneratorExit 的等价形态）
+# ---------------------------------------------------------------------------
+
+
+def _placeholder_pair(session: Session, user: User) -> Message:
+    """请求阶段占位行直插（同 app/api/chat.py _persist_placeholder 事务①形态）。"""
+    conv = Conversation(user_id=user.id, dept_id=user.dept_id, title="断开收尾测试")
+    session.add(conv)
+    session.flush()
+    placeholder = Message(
+        conversation_id=conv.id,
+        user_id=user.id,
+        dept_id=user.dept_id,
+        role="assistant",
+        content="",
+        is_active=True,
+    )
+    session.add(placeholder)
+    session.flush()
+    return placeholder
+
+
+def _rag_plan() -> TurnPlan:
+    """最小 rag 计划：citations 空表 + Stub 产段流。"""
+    return TurnPlan(
+        kind="rag",
+        citations=[],
+        rewritten_question=QUESTION,
+        llm_messages=[{"role": "user", "content": QUESTION}],
+        cache_entry=None,
+        cache_key=None,
+    )
+
+
+def test_客户端断开时占位行被置inactive不留幽灵(chat_client, session) -> None:  # type: ignore[no-untyped-def]
+    """客户端断连（生成器被 close）：GeneratorExit 必须触发 interrupt_turn 收尾，
+    占位行置 is_active=false——修复前 GeneratorExit 是 BaseException 绕过两个 except
+    分支，占位行 is_active=true 空正文永久残留（幽灵行污染多轮改写与概览分母）。"""
+    from app.services.chat_stream import event_stream
+
+    user = make_user(session, "cutchat", "right-one", "member")
+    placeholder = _placeholder_pair(session, user)
+
+    gen = event_stream(app.state.chat_deps, _rag_plan(), placeholder.id, 0.0)
+    assert next(gen)[0] == "citations"
+    second = next(gen)  # 推进到 token（挂起点进入 _stream_generate 内部）
+    assert second[0] == "token"
+    gen.close()  # 模拟 Starlette 断连：GeneratorExit 在挂起的 yield token 点注入
+
+    session.expire_all()
+    row = session.scalar(select(Message).where(Message.id == placeholder.id))
+    assert row is not None
+    assert row.is_active is False  # 修复前 True（幽灵）
+    assert row.content == ""  # 无正文写入（中断收尾不落半截内容）
+
+
+def test_正常完成后close不误伤已落库回答(chat_client, session) -> None:  # type: ignore[no-untyped-def]
+    """done 事件已产出（finalize 已提交）后生成器被 close：不能把已完成的回答误置
+    inactive——settled 标志必须在 yield done 之前置位，防 finally 兜底误伤。"""
+    from app.services.chat_stream import event_stream
+
+    user = make_user(session, "cutchat2", "right-one", "member")
+    placeholder = _placeholder_pair(session, user)
+
+    gen = event_stream(app.state.chat_deps, _rag_plan(), placeholder.id, 0.0)
+    assert next(gen)[0] == "citations"
+    events: list[str] = []
+    for name, _payload in gen:
+        events.append(name)
+        if name == "done":
+            break
+    assert "done" in events
+    gen.close()  # 挂在 yield done 点被关闭
+
+    session.expire_all()
+    row = session.scalar(select(Message).where(Message.id == placeholder.id))
+    assert row is not None
+    assert row.is_active is True
+    assert row.content != ""  # finalize 正文完好

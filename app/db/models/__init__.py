@@ -22,14 +22,15 @@ from app.db.models.agent import AgentRun, AgentStep
 from app.db.models.catalog import Department, User
 from app.db.models.chat import Conversation, Message
 from app.db.models.content import Chunk, Document, DocumentImage, QaPair
-from app.db.models.eval import EvalQuestion, EvalRun
+from app.db.models.eval import EvalQuestion, EvalRun, HardcaseSeed
 from app.db.models.memory import UserMemory
-from app.db.models.ops import AuditLog
+from app.db.models.ops import AppSetting, AuditLog
 from app.db.models.types import Vector
 
 __all__ = [
     "AgentRun",
     "AgentStep",
+    "AppSetting",
     "AuditLog",
     "Chunk",
     "Conversation",
@@ -38,6 +39,7 @@ __all__ = [
     "DocumentImage",
     "EvalQuestion",
     "EvalRun",
+    "HardcaseSeed",
     "Message",
     "QaPair",
     "User",

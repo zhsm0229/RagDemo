@@ -185,8 +185,9 @@ def test_ensure_month_partitions_creates_next_three_months(
 
 
 def test_build_scheduler_registers_cron_jobs_without_starting() -> None:
-    """装配断言：四任务按 cron 注册（每日 02:00 清扫、每日 03:00 提问记录清理、每月 1 日
-    02:30 分区、每小时 45 分 agent 幽灵清扫）；test_mode 不自启。"""
+    """装配断言：任务按 cron 注册（每日 02:00 清扫、每日 03:00 提问记录清理、每月 1 日
+    02:30 分区、每小时 45 分 agent 幽灵清扫、周日 04:00 评测自动合成、周日 05:00
+    周评测自动跑分）；test_mode 不自启。"""
     scheduler = build_scheduler(Settings(jwt_secret="scheduler-test", test_mode=True))
     assert scheduler.running is False
     jobs = {job.id: job for job in scheduler.get_jobs()}
@@ -195,6 +196,9 @@ def test_build_scheduler_registers_cron_jobs_without_starting() -> None:
         "message_retention_cleanup",
         "ensure_month_partitions",
         "agent_run_stale_sweep",
+        "eval_run_stale_sweep",
+        "eval_auto_synth",
+        "eval_auto_run",
     }
     sweeps = {field.name: str(field) for field in jobs["run_due_sweeps"].trigger.fields}
     assert (sweeps["hour"], sweeps["minute"], sweeps["day"]) == ("2", "0", "*")
@@ -206,6 +210,10 @@ def test_build_scheduler_registers_cron_jobs_without_starting() -> None:
     assert (parts["day"], parts["hour"], parts["minute"]) == ("1", "2", "30")
     stale = {field.name: str(field) for field in jobs["agent_run_stale_sweep"].trigger.fields}
     assert (stale["day"], stale["hour"], stale["minute"]) == ("*", "*", "45")
+    synth = {field.name: str(field) for field in jobs["eval_auto_synth"].trigger.fields}
+    assert (synth["day_of_week"], synth["hour"], synth["minute"]) == ("sun", "4", "0")
+    auto_run = {field.name: str(field) for field in jobs["eval_auto_run"].trigger.fields}
+    assert (auto_run["day_of_week"], auto_run["hour"], auto_run["minute"]) == ("sun", "5", "0")
 
 
 def test_build_scheduler_starts_in_normal_mode() -> None:
@@ -218,6 +226,9 @@ def test_build_scheduler_starts_in_normal_mode() -> None:
             "message_retention_cleanup",
             "ensure_month_partitions",
             "agent_run_stale_sweep",
+            "eval_run_stale_sweep",
+            "eval_auto_synth",
+            "eval_auto_run",
         }
     finally:
         scheduler.shutdown(wait=False)

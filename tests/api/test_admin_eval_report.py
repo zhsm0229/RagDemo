@@ -246,6 +246,8 @@ def test_report分组与手工计算一致_人工判优先于auto(client, sessio
         "byQtype",
         "fourMetrics",  # metrics-balance 工单 07 计划内演进（spec §4.4/§6）
         "byDocType",
+        "byTier",  # 评测集自动更新 07 票：正式/扩充分层
+        "vsPrevious",  # 07 票：同口径相邻轮环比
     }
     assert data["status"] == "done"
     assert data["totals"] == {"total": 5, "correct": 2.5, "accuracy": 0.5, "pendingCount": 0}

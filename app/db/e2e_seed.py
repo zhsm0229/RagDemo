@@ -1,13 +1,16 @@
 r"""E2E 造数种子（幂等 upsert）：给 Playwright L1 层提供固定凭据与确定性数据。
 
 为什么不用 seed.py：主种子 admin 密码随机且首登强制改密（§5.2），自动化需要
-可复现凭据。本模块两条路径的口径（2026-10-05 试点库被 E2E_WIPE 清空事故根治）：
+可复现凭据。本模块两条路径的口径（2026-10-05 试点库被 E2E_WIPE 清空事故根治；
+2026-10-31 工单 04 收口公开口令管理员后门——评审 P0-2）：
 - 硬复位路径（E2E_WIPE=1 TRUNCATE）只允许 E2E 隔离库（rag_e2e / *_e2e 后缀），
   main() 入口防呆强制，无豁免开关——豁免即事故重演；
-- 无 wipe 的幂等 upsert 路径不受库名限制：startup-check.sh 在试点库播 e2e-*
-  冒烟账号是有意设计（幂等、可重复装配、不清理业务数据）。
+- 无 wipe 的幂等 upsert 路径分两档：E2E 隔离库照旧（幂等重置口令，保证用例可
+  重复）；非隔离库（试点/业务库）必须 PILOT_CONFIRM=1 且 E2E_PASSWORD 显式设置
+  才放行，且已存在账号的口令/首登改密标记不回写（防"改了也会被装回"），
+  新建账号一律 must_change_password=TRUE。
 
-- e2e-admin：管理员（全员部门，免首登改密）——常规冒烟身份
+- e2e-admin：管理员（全员部门）——常规冒烟身份（测试库免首登改密；试点库强制改密）
 - e2e-fresh：管理员，must_change_password=TRUE——AUTH-04 首登改密流专用
 - e2e-hr / e2e-svc：人力/客服 member——串库双向与权限矩阵冒烟
 - 一条种子问答对（问题与测试提问逐字一致）：TEST_MODE 下 StubEmbedder 按 sha256
@@ -15,7 +18,8 @@ r"""E2E 造数种子（幂等 upsert）：给 Playwright L1 层提供固定凭�
   语义检索验证归 L2 真实链路）
 
 用法（app 容器内或本机 venv，DATABASE_URL 指向目标库）：
-    python -m app.db.e2e_seed        # 口令取 E2E_PASSWORD，缺省 E2ePass#2026
+    python -m app.db.e2e_seed        # 测试库：口令缺省 E2ePass#2026
+    PILOT_CONFIRM=1 E2E_PASSWORD=... python -m app.db.e2e_seed   # 试点库显式放行
 """
 
 import os
@@ -27,7 +31,10 @@ from app.core.security import hash_password
 from app.db.base import SessionLocal
 from app.db.models import Department, Document, QaPair, User
 
-E2E_PASSWORD: str = os.environ.get("E2E_PASSWORD", "E2ePass#2026")
+
+def _seed_password() -> str:
+    """种子口令运行时读取：仅 E2E 隔离库允许缺省值（非隔离库由 main() 防呆强制显式）。"""
+    return os.environ.get("E2E_PASSWORD", "E2ePass#2026")
 
 
 def _reset_lock_state(session) -> None:
@@ -49,13 +56,26 @@ def _retire_previous_docs(session) -> None:
     )
 
 
-def _upsert_user(session, username: str, role: str, dept_code: str, *, must_change: bool) -> None:
+def _upsert_user(
+    session,
+    username: str,
+    role: str,
+    dept_code: str,
+    *,
+    must_change: bool,
+    preserve_credentials: bool = False,
+) -> None:
     dept_id = session.scalars(select(Department.id).where(Department.code == dept_code)).first()
     user = session.scalars(select(User).where(User.username == username)).first()
+    if user is not None and preserve_credentials:
+        # 试点/业务库已存在账号：口令与首登改密标记不回写（"改了也会被装回"后门消除，
+        # 评审 P0-2）；仅同步激活态
+        user.is_active = True
+        return
     if user is None:
         user = User(username=username, dept_id=dept_id, role=role)
         session.add(user)
-    user.password_hash = hash_password(E2E_PASSWORD)
+    user.password_hash = hash_password(_seed_password())
     user.must_change_password = must_change
     user.is_active = True
 
@@ -191,24 +211,96 @@ _FIXTURE_TEMPLATES: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 
+def _read_password_stdin() -> None:
+    """--password-stdin：口令经 stdin 传入（不经命令行与 shell 字面量，工单 04 正道）。
+
+    读取后写入进程环境，与 E2E_PASSWORD env 同源；试点装配脚本据此避开 -e KEY=值
+    内联形态。无 --password-stdin 参数时不消费 stdin（e2e 隔离库 env 口径不变）。
+    """
+    if "--password-stdin" not in sys.argv:
+        return
+    offered = sys.stdin.readline().rstrip("\n")
+    if offered:
+        os.environ["E2E_PASSWORD"] = offered
+
+
+def _pilot_guard() -> bool:
+    """非隔离库 upsert 防呆（工单 04）：返回 pilot_mode。
+
+    隔离库（rag_e2e / *_e2e 后缀）返回 False 行为不变；非隔离库必须 PILOT_CONFIRM=1
+    且 E2E_PASSWORD 显式设置才放行——公开缺省口令与免改密管理员禁止进入试点/业务库
+    （评审 P0-2）。拒绝发生在开启数据库会话之前（同 wipe 防呆口径）。
+    """
+    db_name = _wipe_target_db()
+    if db_name in _E2E_DB_WHITELIST or db_name.endswith("_e2e"):
+        return False
+    if os.environ.get("PILOT_CONFIRM") != "1":
+        print(
+            "[e2e-seed] 拒绝：非 E2E 隔离库装配种子账号需要 PILOT_CONFIRM=1 与显式 "
+            "E2E_PASSWORD（公开缺省口令已废除，评审 P0-2）",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    if not os.environ.get("E2E_PASSWORD"):
+        print(
+            "[e2e-seed] 拒绝：非 E2E 隔离库必须显式设置 E2E_PASSWORD（缺省口令禁止进入"
+            "试点/业务库）",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    return True
+
+
 def main() -> None:
+    _read_password_stdin()
     wipe = os.environ.get("E2E_WIPE") == "1"
     if wipe:
         assert set(_WIPE_TABLES.replace(",", " ").split()) <= _ALLOWED_WIPE, "TRUNCATE 清单越界"
         _assert_wipe_isolated()  # 先验库后动手：隔离库名不对即中止，绝不 TRUNCATE 业务库
+    pilot_mode = _pilot_guard()  # 非隔离库 upsert 防呆（同样在触库之前生效）
     with SessionLocal() as session, session.begin():
         if wipe:
             session.execute(text(f"TRUNCATE {_WIPE_TABLES}"))
         _reset_lock_state(session)
         _retire_previous_docs(session)
-        _upsert_user(session, "e2e-admin", "admin", "all", must_change=False)
-        _upsert_user(session, "e2e-fresh", "admin", "all", must_change=True)
-        _upsert_user(session, "e2e-hr", "member", "hr", must_change=False)
-        _upsert_user(session, "e2e-svc", "member", "service", must_change=False)
-        _upsert_user(session, "e2e-lock", "member", "hr", must_change=False)
+        _upsert_user(
+            session,
+            "e2e-admin",
+            "admin",
+            "all",
+            must_change=pilot_mode,
+            preserve_credentials=pilot_mode,
+        )
+        _upsert_user(
+            session, "e2e-fresh", "admin", "all", must_change=True, preserve_credentials=pilot_mode
+        )
+        _upsert_user(
+            session,
+            "e2e-hr",
+            "member",
+            "hr",
+            must_change=pilot_mode,
+            preserve_credentials=pilot_mode,
+        )
+        _upsert_user(
+            session,
+            "e2e-svc",
+            "member",
+            "service",
+            must_change=pilot_mode,
+            preserve_credentials=pilot_mode,
+        )
+        _upsert_user(
+            session,
+            "e2e-lock",
+            "member",
+            "hr",
+            must_change=pilot_mode,
+            preserve_credentials=pilot_mode,
+        )
         session.flush()  # 取 e2e-admin id 供种子问答对 created_by
         _upsert_seed_qa(session)
-    print(f"[e2e-seed] ok（口令长度 {len(E2E_PASSWORD)}，4 账号 + 1 问答对就绪）")
+    print(f"[e2e-seed] ok（口令长度 {len(_seed_password())}，4 账号 + 1 问答对就绪）")
 
 
 def _write_upload_fixture() -> None:

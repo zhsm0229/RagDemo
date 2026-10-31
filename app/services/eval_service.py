@@ -181,15 +181,18 @@ def _resolve_depts(db: Session, dept_names: set[str]) -> dict[str, int]:
 
 
 def create_eval_run(db: Session, actor_user_id: int, name: str, perspective_dept_id: int) -> int:
-    """建 running 行（config=null，total/correct/accuracy 计 0）+ 审计 eval.run 并提交。
+    """建 running 行（config 预写视角键，total/correct/accuracy 计 0）+ 审计 eval.run 并提交。
 
     先 commit 再返回 id：跑分后台任务自管短会话，只能看到已提交行（202 异步语义，
     前端轮询 GET /{id}）；审计 detail 带视角部门 code（id 对人不读）。事务边界归
     本函数（services 层惯例）。
     """
+    perspective = db.scalar(select(Department.code).where(Department.id == perspective_dept_id))
     run = EvalRun(
         name=name,
-        config=None,
+        # perspective 预写进 config（mark_regression/vsPrevious 的取数键）：人工 run 与
+        # 自动 run 同口径享受环比与退化标记（2026-10-31 评审 P0-1② 收口）
+        config={"perspective": perspective} if perspective else None,
         status="running",
         total=0,
         correct=0,
@@ -199,7 +202,6 @@ def create_eval_run(db: Session, actor_user_id: int, name: str, perspective_dept
     )
     db.add(run)
     db.flush()  # 取自增 id 供审计 detail.runId
-    perspective = db.scalar(select(Department.code).where(Department.id == perspective_dept_id))
     record_audit(
         db,
         actor_user_id,

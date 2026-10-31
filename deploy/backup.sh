@@ -74,7 +74,7 @@ finalize() {
     fi
     mv -f "$part" "$final"
     sha256sum "$final" > "${final}.sha256"
-    log "产物就绪：$final（$(du -h "$final" | cut -f1)，sha256=$(cut -d' ' -f1 "${final}.sha256")）"
+    log "产物就绪：${final}（$(du -h "$final" | cut -f1)，sha256=$(cut -d' ' -f1 "${final}.sha256")）"
 }
 
 # 前置：备份目录就绪并收敛权限（chmod 失败不阻断——Windows Git Bash 下为近似 no-op，Linux 部署机生效）
@@ -135,3 +135,19 @@ else
     find "${BACKUP_DIR}" \( -name "*.gz" -o -name "*.gz.sha256" -o -name "*.part" \) -mtime +"${RETAIN_DAYS}" -delete
 fi
 log "全部完成：本轮备份 rag-${TS}.sql.gz$( [ -f "${BACKUP_DIR}/uploads-${TS}.tar.gz" ] && echo " + uploads-${TS}.tar.gz" )$( [ "$DRY_RUN" = "1" ] && echo "（干跑，未实际产出）" )"
+
+# 步骤 4/3：备份新鲜度探针（2026-10-31 工单 09，评审 P1-3）：写 last-backup.json 供
+# bootstrap 体检项 #10 与外部拨测消费——"备份系统自身可用性"从人肉巡检变为可探活。
+# 写失败不阻断备份成功本身（探针是运维信号非数据产物）。
+if [ "$DRY_RUN" != "1" ]; then
+    NOW_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    PROBE="${BACKUP_DIR}/last-backup.json"
+    if printf '{"lastSuccessAt":"%s","dbBackup":"rag-%s.sql.gz","uploadsBackup":"%s"}\n' \
+        "$NOW_ISO" "$TS" "$([ -f "${BACKUP_DIR}/uploads-${TS}.tar.gz" ] && echo "uploads-${TS}.tar.gz" || echo null)" \
+        > "$PROBE" 2>/dev/null; then
+        chmod 600 "$PROBE" || true
+        log "新鲜度探针已更新：${PROBE}（lastSuccessAt=${NOW_ISO}）"
+    else
+        log "警告：新鲜度探针写入失败（备份本体不受影响）"
+    fi
+fi

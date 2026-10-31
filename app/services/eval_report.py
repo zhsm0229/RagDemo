@@ -28,7 +28,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import Department, Document, EvalRun
+from app.db.models import Department, Document, EvalQuestion, EvalRun
 from app.services.eval_service import JUDGMENT_SCORES, REJECT_MARK, final_judgment
 
 # 四指标键与输出顺序（spec §4.4 冻结：Recall/Precision/Relevancy/Correctness）
@@ -91,9 +91,11 @@ def build_report(db: Session, run: EvalRun) -> dict:
     items = (run.detail or {}).get("items", [])
     codes = _dept_codes(db, {item["deptId"] for item in items})
     doc_types = _doc_types(db, _source_doc_ids(items))
+    tiers = _question_tiers(db, {item["questionId"] for item in items})
     overall = _Group()
     by_dept: dict[str, _Group] = {}
     by_qtype: dict[str, _Group] = {}
+    by_tier: dict[str, _Group] = {}
     overall_metrics: dict[str, _MetricStat] = {name: _MetricStat() for name in _FOUR_METRICS}
     dt_counts: dict[str, int] = {}
     dt_metrics: dict[str, dict[str, _MetricStat]] = {}
@@ -101,6 +103,7 @@ def build_report(db: Session, run: EvalRun) -> dict:
         overall.add(item)
         by_dept.setdefault(codes[item["deptId"]], _Group()).add(item)
         by_qtype.setdefault(item["qtype"], _Group()).add(item)
+        by_tier.setdefault(tiers[item["questionId"]], _Group()).add(item)
         values = _metric_values(item)
         for name, value in values.items():
             overall_metrics[name].add(value)
@@ -114,22 +117,93 @@ def build_report(db: Session, run: EvalRun) -> dict:
             stats = dt_metrics.setdefault(doc_type, {name: _MetricStat() for name in _FOUR_METRICS})
             for name, value in values.items():
                 stats[name].add(value)
+    totals_accuracy = float(overall.correct) / overall.total if overall.total else 0.0
     return {
         "config": run.config,
         "status": run.status,
         "totals": {
             "total": overall.total,
             "correct": float(overall.correct),
-            "accuracy": float(overall.correct) / overall.total if overall.total else 0.0,
+            "accuracy": totals_accuracy,
             "pendingCount": sum(1 for item in items if final_judgment(item) == "pending"),
         },
         "byDept": [by_dept[code].to_dto("deptCode", code) for code in sorted(by_dept)],
         "byQtype": [by_qtype[qtype].to_dto("qtype", qtype) for qtype in sorted(by_qtype)],
+        "byTier": [by_tier[tier].to_dto("tier", tier) for tier in sorted(by_tier)],
         "fourMetrics": {name: overall_metrics[name].to_dto() for name in _FOUR_METRICS},
         "byDocType": [
             _doc_type_dto(doc_type, dt_counts, dt_metrics) for doc_type in sorted(dt_counts)
         ],
+        "vsPrevious": _previous_comparison(db, run, totals_accuracy),
     }
+
+
+def _question_tiers(db: Session, question_ids: set[int]) -> dict[int, str]:
+    """questionId → tier（byTier 分组键，0014 列；旧明细缺题容忍——题被删时组键缺
+    省落 official，防御分支）。"""
+    if not question_ids:
+        return {}
+    questions = db.scalars(select(EvalQuestion).where(EvalQuestion.id.in_(question_ids))).all()
+    return {question.id: question.tier for question in questions}
+
+
+def _previous_comparison(db: Session, run: EvalRun, current_accuracy: float) -> dict | None:
+    """vsPrevious：同 config.perspective、done、id 更小的最近一条 run 的 accuracy 环比
+    （{previousRunId, previousAccuracy, delta}）；无前轮/旧 run 无 perspective → null。
+    候选全量拉取 Python 侧过滤（runs 表试点量级小，免 JSONB SQL 算子）。"""
+    perspective = (run.config or {}).get("perspective")
+    if perspective is None:
+        return None
+    stmt = (
+        select(EvalRun)
+        .where(EvalRun.status == "done", EvalRun.id < run.id)
+        .order_by(EvalRun.id.desc())
+    )
+    for candidate in db.scalars(stmt).all():
+        if (candidate.config or {}).get("perspective") == perspective:
+            previous_accuracy = float(candidate.accuracy)
+            return {
+                "previousRunId": candidate.id,
+                "previousAccuracy": previous_accuracy,
+                "delta": round(current_accuracy - previous_accuracy, 4),
+            }
+    return None
+
+
+def mark_regression(db: Session, run: EvalRun, *, threshold_pp: float) -> dict | None:
+    """退化判定（07 票）：同口径相邻轮 accuracy 降幅 ≤ -threshold_pp 时写
+    run.detail.regression = {previousRunId, previousAccuracy, delta} 并提交。
+
+    口径说明：对比用 run 级全量 accuracy（引擎恒全量跑分）；正式/扩充分层由报告
+    byTier 呈现——official-only 口径的退化对比列为后续演进项。无前轮/无 perspective
+    /降幅在阈值内 → None 且不写 detail。
+    """
+    perspective = (run.config or {}).get("perspective")
+    if perspective is None or run.status != "done":
+        return None
+    stmt = (
+        select(EvalRun)
+        .where(EvalRun.status == "done", EvalRun.id < run.id)
+        .order_by(EvalRun.id.desc())
+    )
+    for candidate in db.scalars(stmt).all():
+        if (candidate.config or {}).get("perspective") != perspective:
+            continue
+        delta = round(float(run.accuracy) - float(candidate.accuracy), 4)
+        delta_pp = delta * 100  # threshold_pp 单位为百分点（5.0=5pp），delta 为小数
+        if delta_pp > -threshold_pp:
+            return None
+        mark = {
+            "previousRunId": candidate.id,
+            "previousAccuracy": float(candidate.accuracy),
+            "delta": delta,
+        }
+        detail = dict(run.detail or {})
+        detail["regression"] = mark
+        run.detail = detail  # 重新赋值触发 JSONB 变更检测（勿原地 mutate）
+        db.commit()
+        return mark
+    return None
 
 
 def _metric_values(item: dict) -> dict[str, float | None]:

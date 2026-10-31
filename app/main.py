@@ -19,6 +19,9 @@ from fastapi.staticfiles import StaticFiles
 from app.api import (
     admin_audit,
     admin_eval,
+    admin_eval_auto,
+    admin_eval_questions,
+    admin_hardcase,
     admin_knowledge_gap,
     admin_overview,
     admin_qa_pairs,
@@ -49,7 +52,7 @@ from app.core.assembly import (
     load_prompt_pack,
 )
 from app.core.circuit_breaker import CircuitBreakerReranker, get_rerank_breaker
-from app.core.clock import SystemClock
+from app.core.clock import SystemClock, get_clock
 from app.core.config import Settings, get_settings
 from app.core.llm import (
     Embedder,
@@ -128,9 +131,7 @@ class ScriptedAgentChannel:
     def complete(
         self, messages: Any, tools: Any, max_tokens: int
     ) -> ChannelTurn:  # AgentModelChannel 协议面：tools 只透传不消费
-        tool_results = sum(
-            1 for m in messages if isinstance(m, dict) and m.get("role") == "tool"
-        )
+        tool_results = sum(1 for m in messages if isinstance(m, dict) and m.get("role") == "tool")
         return self._turns[min(tool_results, len(self._turns) - 1)]
 
 
@@ -203,11 +204,37 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     add_hit_flush_job(scheduler, chat_deps.hit_counter, settings.cache_ttl_s)
     app.state.chat_deps = chat_deps
     app.state.agent_deps = _build_agent_deps(settings, chat_deps)
+    _startup_catchup(settings)
     try:
         yield
     finally:
         if scheduler.running:
             scheduler.shutdown(wait=False)
+
+
+def _startup_catchup(settings: Settings) -> None:
+    """启动补偿（商用就绪工单 06，评审 P1-1）：停机跨过周日触发窗口后，重启即补跑
+    当周缺失的合成流水与三视角跑分各一轮。test_mode 跳过（演示模式零副作用）；总闸
+    关（缺省）零副作用在 catchup 任务体内判定；异常吞掉留日志——补偿失败不阻塞
+    服务启动（下轮 cron 兜底）。"""
+    if settings.test_mode:
+        return
+    try:
+        from app.db.base import SessionLocal
+        from app.services.eval_catchup import catchup_missed_weekly
+
+        with SessionLocal() as session:
+            summary = catchup_missed_weekly(
+                session,
+                get_clock(),
+                settings,
+                deps=_build_chat_deps(settings),
+                llm=build_llm(settings, 0.0),
+            )
+        if summary["synth"] or summary["eval"]:
+            logging.getLogger(__name__).info("启动补偿完成：%s", summary)
+    except Exception:
+        logging.getLogger(__name__).exception("启动补偿执行失败（下轮 cron 兜底）")
 
 
 def create_app() -> FastAPI:
@@ -232,6 +259,15 @@ def create_app() -> FastAPI:
     app.include_router(admin_qa_pairs.router, prefix="/api")
     app.include_router(admin_eval.router, prefix="/api")
     app.include_router(admin_eval.runs_router, prefix="/api")
+    app.include_router(
+        admin_eval_questions.router, prefix="/api"
+    )  # 题库列表/层级切换（评测集自动更新 02 票）
+    app.include_router(
+        admin_hardcase.router, prefix="/api"
+    )  # 难例池列表/忽略/手动合成（评测集自动更新 03 票）
+    app.include_router(
+        admin_eval_auto.router, prefix="/api"
+    )  # 评测自动配置读写（评测集自动更新 05 票）
     app.include_router(chat.router, prefix="/api")
     app.include_router(
         agent_runs.router, prefix="/api"

@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.errors import ERR_FORBIDDEN, ERR_PARAM_INVALID, ERR_UNAUTHENTICATED
-from app.db.models import Chunk, Conversation, Department, Document, Message, User
+from app.db.models import Chunk, Conversation, Department, Document, EvalRun, Message, User
 from tests.conftest import login_as
 
 _CHUNK_VEC = [0.0] * 1024  # 聚合不涉向量运算：零向量直插满足 NOT NULL（W3 既有手法）
@@ -532,3 +532,67 @@ def test_member_and_anonymous_are_rejected(client, session) -> None:
     for path in ("/api/admin/overview", "/api/admin/health"):
         resp = client.get(path)
         assert (resp.status_code, resp.json()["code"]) == (403, ERR_FORBIDDEN), path
+
+
+# ---------- ⑧ 健康卡评测质量项（评测集自动更新 08 票）：regression 标记 → warn ----------
+
+
+def _add_done_run(
+    session: Session,
+    name: str,
+    *,
+    perspective: str,
+    accuracy: str,
+    regression: dict | None = None,
+) -> int:
+    """直插 done 收口 run（triggered_by=None 系统来源，config 快照含 perspective）。"""
+    from app.db.models import EvalRun
+
+    run = EvalRun(
+        name=name,
+        status="done",
+        total=10,
+        correct=8,
+        accuracy=accuracy,
+        detail=(
+            {"items": [], "pendingCount": 0, "regression": regression}
+            if regression is not None
+            else {"items": [], "pendingCount": 0}
+        ),
+        triggered_by=None,
+        config={"perspective": perspective},
+        created_at=dt.datetime(2026, 10, 19, 5, 0, tzinfo=dt.UTC),
+    )
+    session.add(run)
+    session.flush()
+    return run.id
+
+
+def test_health_无自动跑分历史_无evalQuality键(client, session) -> None:
+    """无 done run：响应不含 evalQuality 键（前端整卡不显）。"""
+    _as_admin(client, session)
+    assert "evalQuality" not in _health_data(client)
+
+
+def test_health_带退化标记_warn摘要(client, session) -> None:
+    """最近 done run 带 detail.regression：evalQuality={status warn, runId, name,
+    previousAccuracy, delta}；更早的无标记 run 不影响取最近一条。"""
+    _as_admin(client, session)
+    old_id = _add_done_run(session, "[自动]2026-W42-service", perspective="service", accuracy="0.8")
+    reg_id = _add_done_run(
+        session,
+        "[自动]2026-W43-service",
+        perspective="service",
+        accuracy="0.7",
+        regression={"previousRunId": old_id, "previousAccuracy": 0.8, "delta": -0.1},
+    )
+
+    data = _health_data(client)
+    assert data["evalQuality"] == {
+        "status": "warn",
+        "runId": reg_id,
+        "name": "[自动]2026-W43-service",
+        "previousAccuracy": 0.8,
+        "delta": -0.1,
+    }
+    assert session.get(EvalRun, old_id) is not None  # 前轮无标记不参与

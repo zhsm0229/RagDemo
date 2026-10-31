@@ -207,40 +207,62 @@ def _stream_generate(
     deps: ChatDeps, plan: TurnPlan, assistant_msg_id: int, start: float
 ) -> Iterator[tuple]:
     """qa/rag 分支：逐段 token → 正常耗尽走 _finish_generated；UpstreamError 与意外
-    异常均 mark_interrupted 收尾后发 error 事件（都只置 is_active=false 不重复落库）。"""
+    异常均 mark_interrupted 收尾后发 error 事件（都只置 is_active=false 不重复落库）。
+
+    settled 标志（2026-10-31 工单 07，评审 P1-5）：GeneratorExit（客户端断连时
+    Starlette 向生成器注入）是 BaseException，不被下方两个 except 捕获——无收尾
+    时占位行 is_active=true 空正文永久残留（幽灵行）。任一收尾分支（interrupt/
+    finalize）完成后置 settled，GeneratorExit/finally 只对未 settled 的流兜底；
+    done 路径在 yield 之前置位（yield 点被 close 时 finalize 已提交，不得误伤）。
+    """
     pieces: list[str] = []
+    settled = False
     try:
-        # 取迭代器与迭代包进同一异常边界（Task 4 交接：生成器形态首次 next() 才抛）
-        for piece in deps.llm.chat_stream(plan.llm_messages, deps.settings.chat_max_tokens):
-            pieces.append(piece)
-            yield "token", {"messageId": assistant_msg_id, "content": piece}
-    except UpstreamError:
-        # 上游故障也要留观测痕（§16.4）：不上抛（响应头已发只能经 error 事件表达），
-        # warning + 堆栈定位断流根因，与意外异常的 logger.exception 区分严重级。
-        logger.warning(
-            "流式生成中断（上游故障）assistant_message_id=%s", assistant_msg_id, exc_info=True
-        )
-        interrupt_turn(assistant_msg_id)
-        yield "error", _error_payload(ERR_LLM_UNAVAILABLE, _MSG_LLM_UNAVAILABLE)
-        return
-    except Exception:
-        logger.exception("问答流式生成意外异常 assistant_message_id=%s", assistant_msg_id)
-        interrupt_turn(assistant_msg_id)
-        yield "error", _error_payload(ERR_INTERNAL, _MSG_INTERRUPTED)
-        return
-    content = "".join(pieces)
-    if not content.strip():
-        # 空正文防护（2026-10-01 事故）：推理模型把 max_tokens 全烧在 reasoning 上，
-        # 流"正常耗尽"但零正文——按上游失败收尾（中断标记 + error 可重试），
-        # 严禁把空串当正常回答落库/进缓存（拒答红线与缓存正确性双前提）。
-        logger.warning(
-            "LLM 流正常耗尽但零正文 assistant_message_id=%s（reasoning 耗尽预算？）",
-            assistant_msg_id,
-        )
-        interrupt_turn(assistant_msg_id)
-        yield "error", _error_payload(ERR_LLM_UNAVAILABLE, _MSG_LLM_UNAVAILABLE)
-        return
-    yield "done", _finish_generated(deps, plan, assistant_msg_id, content, start)
+        try:
+            # 取迭代器与迭代包进同一异常边界（Task 4 交接：生成器形态首次 next() 才抛）
+            for piece in deps.llm.chat_stream(plan.llm_messages, deps.settings.chat_max_tokens):
+                pieces.append(piece)
+                yield "token", {"messageId": assistant_msg_id, "content": piece}
+        except UpstreamError:
+            # 上游故障也要留观测痕（§16.4）：不上抛（响应头已发只能经 error 事件表达），
+            # warning + 堆栈定位断流根因，与意外异常的 logger.exception 区分严重级。
+            logger.warning(
+                "流式生成中断（上游故障）assistant_message_id=%s", assistant_msg_id, exc_info=True
+            )
+            interrupt_turn(assistant_msg_id)
+            settled = True
+            yield "error", _error_payload(ERR_LLM_UNAVAILABLE, _MSG_LLM_UNAVAILABLE)
+            return
+        except Exception:
+            logger.exception("问答流式生成意外异常 assistant_message_id=%s", assistant_msg_id)
+            interrupt_turn(assistant_msg_id)
+            settled = True
+            yield "error", _error_payload(ERR_INTERNAL, _MSG_INTERRUPTED)
+            return
+        content = "".join(pieces)
+        if not content.strip():
+            # 空正文防护（2026-10-01 事故）：推理模型把 max_tokens 全烧在 reasoning 上，
+            # 流"正常耗尽"但零正文——按上游失败收尾（中断标记 + error 可重试），
+            # 严禁把空串当正常回答落库/进缓存（拒答红线与缓存正确性双前提）。
+            logger.warning(
+                "LLM 流正常耗尽但零正文 assistant_message_id=%s（reasoning 耗尽预算？）",
+                assistant_msg_id,
+            )
+            interrupt_turn(assistant_msg_id)
+            settled = True
+            yield "error", _error_payload(ERR_LLM_UNAVAILABLE, _MSG_LLM_UNAVAILABLE)
+            return
+        done_payload = _finish_generated(deps, plan, assistant_msg_id, content, start)
+        settled = True  # finalize 已提交（在 yield 之前置位：防 yield done 点被 close 误伤）
+        yield "done", done_payload
+    except GeneratorExit:
+        if not settled:
+            logger.warning("客户端断开，占位行中断收尾 assistant_message_id=%s", assistant_msg_id)
+            interrupt_turn(assistant_msg_id)
+        raise
+    finally:
+        if not settled:  # 兜底其他 BaseException（如任务被取消）——语义同 GeneratorExit
+            interrupt_turn(assistant_msg_id)
 
 
 def event_stream(

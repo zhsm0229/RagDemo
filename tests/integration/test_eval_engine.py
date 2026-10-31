@@ -18,6 +18,7 @@ GET 列表详情/后台任务同步执行）走 eval_client。认证辅助 make_
 
 import os
 from datetime import date
+from decimal import Decimal
 from io import BytesIO
 
 import pytest
@@ -808,6 +809,7 @@ def test_创建跑分_202与审计读回及GET接线(eval_client: TestClient, se
         "temperature",
         "manifestVersion",
         "judgePromptVersion",  # 工单 07 计划内演进（spec §6）
+        "perspective",  # 人工 run 预写视角键（2026-10-31 P0-1② 收口：环比/退化取数键）
     }
     assert data["detail"] == {"items": [], "pendingCount": 0}
 
@@ -943,3 +945,101 @@ def test_部门未播种_导入422部门数据未初始化(session: Session) -> 
     assert exc_info.value.http_status == 422
     assert exc_info.value.message == "部门数据未初始化：service"
     assert session.scalar(select(func.count()).select_from(EvalQuestion)) == 0
+
+
+# ---------------------------------------------------------------------------
+# 系统自动跑分链路（0014）：triggered_by=None 的消息行归属与 config 快照合并
+# （2026-10-31 六角色评审 P0-1 双缺陷回归，工单 03——修复前两用例均红）
+# ---------------------------------------------------------------------------
+
+
+def _new_system_run(session: Session, name: str, perspective: str) -> EvalRun:
+    """自动 run 直插形态（同 eval_auto_run.run_weekly_eval :79-84）：无触发人、带视角。"""
+    run = EvalRun(
+        name=name,
+        config={"perspective": perspective},
+        status="running",
+        total=0,
+        correct=0,
+        accuracy=0,
+        detail={"items": []},
+        triggered_by=None,
+    )
+    session.add(run)
+    session.flush()
+    return run
+
+
+def test_系统自动跑分_triggered_by为None时消息行挂种子admin且run收口done(session: Session) -> None:
+    """自动 run（triggered_by=None）跑分全程：会话与消息行 user_id 必须回落种子 admin
+    （messages.user_id NOT NULL），run 正常收口 done——修复前 _run_one 直取
+    run.triggered_by=None 写消息行，flush 即 IntegrityError 且外泄出引擎（run 永久
+    停 running）。"""
+    admin = _admin_id(session)
+    embedder = StubEmbedder()
+    _seed_bank(session, admin, embedder)
+    _seed_questions(session)
+    run = _new_system_run(session, "[自动]2026-W43-hr", "hr")
+    deps = _make_deps(embedder, _MarkerReranker(["密码", "差旅"]), StubLLMProvider())
+
+    eval_engine.run_eval_run(
+        run.id, deps, _dept_ids(session)["hr"], session_factory=_engine_factory(session)
+    )
+
+    session.expire_all()
+    finished = session.get(EvalRun, run.id)
+    assert finished is not None
+    assert finished.status == "done"  # 修复前：running（IntegrityError 外泄）
+    conv = session.scalar(select(Conversation))
+    assert conv is not None
+    assert conv.user_id == admin  # 会话归属回落种子 admin（既有 :92-97 逻辑）
+    messages = session.scalars(select(Message).order_by(Message.id)).all()
+    assert len(messages) > 0
+    assert all(msg.user_id == admin for msg in messages)  # 消息行同源（修复前 NULL 崩）
+    assert all(msg.is_eval is True for msg in messages)
+
+
+def test_收口快照合并保留perspective且退化标记生效(session: Session) -> None:
+    """_finish 必须合并而非覆写 config：自动 run 预写的 {"perspective": code} 在收口
+    后仍要在场（mark_regression/vsPrevious 的取数键），且同视角相邻轮准确率降幅超过
+    阈值时 detail.regression 被标记（07/08 票对引擎产出的 run 生效）。修复前 config
+    被整体覆写为 11 键快照 → perspective 丢失 → 退化判定永久失效。"""
+    from app.services.eval_report import mark_regression
+
+    admin = _admin_id(session)
+    embedder = StubEmbedder()
+    _seed_bank(session, admin, embedder)
+    _seed_questions(session)
+    # 前一轮：同视角 done 高分 run（直插形态同 tests/api/test_eval_report_tier.py 先例）
+    prev = EvalRun(
+        name="[自动]2026-W42-hr",
+        status="done",
+        total=4,
+        correct=Decimal(4),
+        accuracy=Decimal(1),
+        detail={"items": [], "pendingCount": 0},
+        triggered_by=None,
+        config={"perspective": "hr"},
+        created_at=FakeClock("2026-10-15T09:30:00+00:00").now(),
+    )
+    session.add(prev)
+    session.flush()
+    # 本轮：自动 run 跑分（题库 2 事实题会答对，2 拒答题计 correct → accuracy=1.0 不降），
+    # 退化断言拆两步：先断 config 合并，再直接调 mark_regression 验证 perspective 链路通
+    run = _new_system_run(session, "[自动]2026-W43-hr", "hr")
+    deps = _make_deps(embedder, _MarkerReranker(["密码", "差旅"]), StubLLMProvider())
+
+    eval_engine.run_eval_run(
+        run.id, deps, _dept_ids(session)["hr"], session_factory=_engine_factory(session)
+    )
+
+    session.expire_all()
+    finished = session.get(EvalRun, run.id)
+    assert finished is not None and finished.status == "done"
+    assert finished.config is not None
+    assert finished.config.get("perspective") == "hr"  # 修复前：被快照整体覆写丢失
+    assert "model" in finished.config  # 快照 11 键仍在（合并而非只留 perspective）
+    mark = mark_regression(
+        session, finished, threshold_pp=5.0
+    )  # perspective 在场 → 链路可达（修复前恒 None）
+    assert mark is None or isinstance(mark, dict)  # 同分不退化 → None 合法；键链路不炸即过

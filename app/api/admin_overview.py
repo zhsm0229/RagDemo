@@ -23,6 +23,7 @@ from app.services.overview_views import (
     ZeroRecallDoc,
     get_health,
     get_overview,
+    latest_regression,
     list_zero_recall_chunks,
 )
 
@@ -86,19 +87,25 @@ def _expiring_payload(doc: ExpiringDoc) -> dict:
 @router.get("/health")
 def admin_health(user: AdminUser, db: DbSession) -> dict:
     """语料健康度（F-1009）：文档总数/就绪数/就绪率/待确认计数 + 零召回文档榜
-    （30 天 0 命中）+ 待过期清单（7 天内含已到期未下线）；时间基准取注入时钟。"""
+    （30 天 0 命中）+ 待过期清单（7 天内含已到期未下线）；时间基准取注入时钟。
+    评测集自动更新（08 票）：最近自动跑分带退化标记时增列 evalQuality（warn 摘要），
+    无历史则整键省略（前端不显）。"""
     report: HealthReport = get_health(db)
+    data: dict = {
+        "totalDocs": report.total_docs,
+        "readyCount": report.ready_count,
+        "readyRate": report.ready_rate,
+        "pendingConfirm": report.pending_confirm,
+        "zeroRecall": [_zero_recall_payload(doc) for doc in report.zero_recall],
+        "expiringSoon": [_expiring_payload(doc) for doc in report.expiring_soon],
+    }
+    quality = latest_regression(db)
+    if quality is not None:
+        data["evalQuality"] = {**quality, "status": "warn"}
     return {
         "code": 0,
         "message": "ok",
-        "data": {
-            "totalDocs": report.total_docs,
-            "readyCount": report.ready_count,
-            "readyRate": report.ready_rate,
-            "pendingConfirm": report.pending_confirm,
-            "zeroRecall": [_zero_recall_payload(doc) for doc in report.zero_recall],
-            "expiringSoon": [_expiring_payload(doc) for doc in report.expiring_soon],
-        },
+        "data": data,
     }
 
 

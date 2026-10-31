@@ -6,13 +6,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# 缺省冒烟账号与 app/db/e2e_seed.py 种子对齐（e2e-admin / 缺省口令 E2ePass#2026）；
+# 缺省冒烟账号与 app/db/e2e_seed.py 种子对齐（e2e-admin / 显式口令）；
 # 覆盖口令时经第 4 步 E2E_PASSWORD 透传给种子，保证登录与落库口令同源
 SMOKE_USER="${SMOKE_USER:-e2e-admin}"
-# 缺省口令仅限试点（pilot）装配链路：账号由本脚本种子、不出现在任何生产路径
-# （prod 发布走 deploy.sh，不经本脚本）。安全扫描会标记该字面量——已裁定为试点
-# 已知接受风险（2026-10-06 交叉评审），生产禁用本脚本即可消除；覆盖用 SMOKE_PASS。
-SMOKE_PASS="${SMOKE_PASS:-E2ePass#2026}"
+# 口令必填（2026-10-31 商用就绪工单 04 去演示化：公开缺省口令是交付级 P0 后门——
+# 旧缺省 E2ePass#2026 已移除；e2e_seed 对非测试库同时要求 PILOT_CONFIRM=1）。
+# 仅限试点（pilot）装配链路：账号由本脚本种子、prod 发布走 deploy.sh 不经本脚本。
+SMOKE_PASS="${SMOKE_PASS:?请显式设置 SMOKE_PASS（试点冒烟种子口令，勿用公开缺省值）}"
 
 log() { echo "[startup-check] $*"; }
 
@@ -75,9 +75,10 @@ if [ "$PROD_FLAG" = "1" ]; then
   log "PILOT_CONFIRM=1：已确认试点链路，继续执行（生产机请勿放行）。"
 fi
 # 冒烟前种子账号（全新机无账号登录必 401；e2e_seed 为幂等 upsert，重复装配安全）。
-# 种子只在试点装配链路执行：e2e 测试账号不进生产（prod 发布走 deploy.sh，不经本段）
-log "  种子冒烟账号（app.db.e2e_seed，幂等；口令对齐 SMOKE_PASS）"
-docker compose exec -T -e E2E_PASSWORD="$SMOKE_PASS" app python -m app.db.e2e_seed
+# 种子只在试点装配链路执行：e2e 测试账号不进生产（prod 发布走 deploy.sh，不经本段）。
+# PILOT_CONFIRM=1 与口令经 stdin 传递（工单 04：非隔离库种子防呆 + 口令不落命令行）
+log "  种子冒烟账号（app.db.e2e_seed，幂等；口令经 stdin 对齐 SMOKE_PASS）"
+printf '%s\n' "$SMOKE_PASS" | docker compose exec -T app python -m app.db.e2e_seed --password-stdin
 TOKEN_COOKIE=$(mktemp)
 curl -sf -c "$TOKEN_COOKIE" -X POST http://localhost:8000/api/auth/login \
   -H "Content-Type: application/json" \

@@ -129,6 +129,21 @@ else
   warn "gotenberg 镜像缺失：doc/ppt/xls 上传将被拒收（提示另存新格式）；docker pull gotenberg/gotenberg:8"
 fi
 
+# 10. 备份新鲜度（2026-10-31 工单 09，评审 P1-3）：last-backup.json 由 backup.sh 步骤
+# 4/3 维护；缺文件或超 25h（日备 + 1h 余量）即 WARN——备份漏跑从人肉巡检变体检项
+if [ -f "${BACKUP_DIR:-backups}/last-backup.json" ]; then
+  LAST_TS=$(grep -o '"lastSuccessAt":"[^"]*"' "${BACKUP_DIR:-backups}/last-backup.json" | cut -d'"' -f4)
+  LAST_EPOCH=$(python3 -c "from datetime import datetime, timezone; print(int(datetime.strptime('$LAST_TS','%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc).timestamp()))" 2>/dev/null || echo 0)
+  NOW_EPOCH=$(date +%s)
+  if [ "$LAST_EPOCH" -gt 0 ] && [ $(( (NOW_EPOCH - LAST_EPOCH) / 3600 )) -gt 25 ]; then
+    warn "备份新鲜度：lastSuccessAt=$LAST_TS 超过 25 小时——检查 backup.sh 定时任务是否漏跑"
+  else
+    pass "备份新鲜度正常（lastSuccessAt=$LAST_TS）"
+  fi
+else
+  warn "备份新鲜度：${BACKUP_DIR:-backups}/last-backup.json 不存在——尚未成功备份或探针未启用（backup.sh 步骤 4/3）"
+fi
+
 echo ""
 if [ "$FAILS" -gt 0 ]; then
   say "体检未通过：$FAILS 项 FAIL / $WARNS 项 WARN——按上面指引修复后重跑。"

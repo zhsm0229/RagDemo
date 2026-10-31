@@ -28,7 +28,7 @@ from app.core.assembly import build_llm
 from app.core.clock import get_clock
 from app.core.llm import LLMProvider, UpstreamError
 from app.db.base import SessionLocal
-from app.db.models import Conversation, Department, EvalQuestion, EvalRun, Message
+from app.db.models import Conversation, Department, EvalQuestion, EvalRun, Message, User
 from app.rag.prompt import REFUSAL_TEXT
 from app.services.chat import ChatDeps, TurnPlan, prepare_turn
 from app.services.chat_cache import ExactCache
@@ -89,8 +89,14 @@ def run_eval_run(
             all_dept_id = db.scalar(select(Department.id).where(Department.code == _ALL_DEPT_CODE))
             if all_dept_id is None:
                 raise RuntimeError("全员部门未播种，无法执行评测跑分")
+            owner_id = run.triggered_by
+            if owner_id is None:
+                # 系统自动跑分（0014）无触发人：会话归属挂种子 admin（审计同款先例）
+                owner_id = db.scalar(select(User.id).where(User.username == "admin"))
+                if owner_id is None:
+                    raise RuntimeError("系统跑分缺少会话归属用户（admin 未播种）")
             conversation = Conversation(
-                user_id=run.triggered_by,
+                user_id=owner_id,
                 dept_id=perspective_dept_id,
                 title=f"[评测]{run.name}",
             )
@@ -112,6 +118,15 @@ def run_eval_run(
             _mark_failed(db, run_id, exc)
             return
         _finish(db, run_id, snapshot, correct, len(questions), items)
+        # 07 票：收口后同口径环比退化判定（config.perspective 在册才对比；
+        # 阈值读 settings 实时值，写 detail.regression 供健康卡消费）
+        from app.services.eval_report import mark_regression
+
+        mark_regression(
+            db,
+            db.get(EvalRun, run_id),
+            threshold_pp=eval_deps.settings.eval_auto_regression_pp,
+        )
 
 
 def _run_questions(
@@ -194,7 +209,9 @@ def _run_one(
     judge_item_with_metrics 预填 autoJudgment + 落 metrics/judgeError（拒答类旁路、
     失败题恒 pending）。
     """
-    user_id, dept_id = run.triggered_by, conversation.dept_id  # 会话按视角部门创建，同源
+    # 消息行归属取会话 owner（引擎建会话时已对系统 run 做种子 admin 回落）：自动 run
+    # 的 run.triggered_by=None 直写会撞 messages.user_id NOT NULL（2026-10-31 评审 P0-1）
+    user_id, dept_id = conversation.user_id, conversation.dept_id
     item: dict = {
         "questionId": question.id,
         "deptId": question.dept_id,
@@ -295,6 +312,8 @@ def _finish(
     run.correct = correct
     run.accuracy = Decimal(correct) / Decimal(total) if total else Decimal(0)
     run.detail = {"items": items, "pendingCount": pending}
-    run.config = snapshot
+    # 合并而非覆写：预写键（自动 run 的 perspective、人工 run 的 perspective）是
+    # mark_regression/vsPrevious 的取数键，被快照整体覆写即永久失效（评审 P0-1②）
+    run.config = {**(run.config or {}), **snapshot}
     run.status = "done"
     db.commit()

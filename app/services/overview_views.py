@@ -29,7 +29,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.clock import get_clock
-from app.db.models import Chunk, Department, Document, Message
+from app.db.models import Chunk, Department, Document, EvalRun, Message
 
 _RATE_DIGITS = 4  # 比率统一 4 位小数（0-1 浮点，前端按百分比展示时自行换算）
 _ZERO_RECALL_DAYS = 30  # 零召回观察窗口 30 天，F-1009 口径（固定常量不入 config）
@@ -292,3 +292,28 @@ def get_health(db: Session) -> HealthReport:
         zero_recall=_zero_recall_docs(db, now),
         expiring_soon=_expiring_docs(db, now.date()),
     )
+
+
+_REGRESSION_SCAN_LIMIT: int = 50  # 退化标记扫描的 done run 窗口（试点量级，防全表）
+
+
+def latest_regression(db: Session) -> dict | None:
+    """最近一条带退化标记的 done run（08 票健康卡评测质量项）：id 降序扫近 50 条
+    done，detail.regression 在册即返回 {runId, name, previousAccuracy, delta}；
+    无 → None（调用侧整键省略，前端不显）。标记由引擎收口时写入（07 票）。"""
+    stmt = (
+        select(EvalRun)
+        .where(EvalRun.status == "done")
+        .order_by(EvalRun.id.desc())
+        .limit(_REGRESSION_SCAN_LIMIT)
+    )
+    for run in db.scalars(stmt).all():
+        regression = (run.detail or {}).get("regression")
+        if regression:
+            return {
+                "runId": run.id,
+                "name": run.name,
+                "previousAccuracy": float(regression.get("previousAccuracy", 0.0)),
+                "delta": float(regression.get("delta", 0.0)),
+            }
+    return None
