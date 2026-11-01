@@ -47,11 +47,11 @@ SSE 问答/生成链路的服务端流式调用不做进程内重试：**重试�
 四指标评测与文档自动分型已落地（specs/metrics-balance.md；工单台账 `.scratch/metrics-balance/progress.md`），以下挂部署/环境条件：
 ①**真实基线 run 未跑**——本地 ragdemo-app 为烘焙旧镜像且 dev 库停 alembic 0009，解阻三步（重建 app 镜像→`alembic upgrade head`→对已入库 77 题题库发"基线-四指标-v1"）；②**§17.3 双轮对比未跑**——top_n 按型档代码已落地（topNMode 快照辨识），两轮执行手册见 `.scratch/metrics-balance/compare-runbook.md`；③**阈值未冻结**——spec §7 初值（0.85/0.60/0.80/0.80）待真实分布校准，冻结由用户拍板；④**judge 一致率观察**——LLM judge（DeepSeek temperature=0）首跑后按人工抽检 20% 核一致率，judgeError 率过高需评审裁决是否放宽严格口径（工单 05 遗留）；⑤agent 检索仍纯向量序（触发线：GPU TEI 后恢复精排）。
 
-### 开放-11：code-review 遗留项（2026-11-01 两轴评审，v0.9.0...HEAD 22 提交）
-①**工单 14 中断重试额度未实施**（漏实施核对：`SSE 中断重试不重复计额度——mark_interrupted 轮次重试走同额度（DailyCounter 口径裁决+实现+测试）`）——需先做口径裁决（中断轮次配额回补 or 重试视作新问），再 TDD 实施；
-②**工单 18 失败原因触屏不可达**——文档列表失败标签仅 el-tooltip 悬停（DocumentsView.vue 失败分支），票面"点击展开替代路径"未落，前端小改；
-③**main.py（418 行）/scheduler.py（437 行）超 300 行红线**——本 diff 内加重未拆分，处置同 eval_synth 先例（门面+子模块拆分），留并行会话在途工单裁决；
-④**_startup_catchup memory 后端孤立 HitCounter**——补偿线程缺省自建 chat_deps，memory 下召回计数落孤立实例不 flush（pg 后端无此问题），试点规模影响有限，触发线（memory+高召回关注）后置。
+### 开放-11：code-review 遗留项（2026-11-01 两轴评审，v0.9.0...HEAD 22 提交；同日已全部立票）
+①**工单 14 中断重试额度未实施**——→ 已立票 **24**（口径已裁决：首 token 下发前中断回补该轮配额、已输出后中断照计）；
+②**工单 18 失败原因触屏不可达**——→ 已立票 **25**；
+③**main.py（418 行）/scheduler.py（437 行）超 300 行红线**——→ 已立票 **26/27**（eval_synth 先例拆分）；
+④**_startup_catchup memory 后端孤立 HitCounter**——→ 并入票 **26**（注入 lifespan deps 修复）。
 
 ## 二、登记裁决（待决策）
 
