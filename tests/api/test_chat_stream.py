@@ -769,7 +769,7 @@ def test_客户端断开时占位行被置inactive不留幽灵(chat_client, sess
     user = make_user(session, "cutchat", "right-one", "member")
     placeholder = _placeholder_pair(session, user)
 
-    gen = event_stream(app.state.chat_deps, _rag_plan(), placeholder.id, 0.0)
+    gen = event_stream(app.state.chat_deps, _rag_plan(), placeholder.id, 0.0, user.id)
     assert next(gen)[0] == "citations"
     second = next(gen)  # 推进到 token（挂起点进入 _stream_generate 内部）
     assert second[0] == "token"
@@ -790,7 +790,7 @@ def test_正常完成后close不误伤已落库回答(chat_client, session) -> N
     user = make_user(session, "cutchat2", "right-one", "member")
     placeholder = _placeholder_pair(session, user)
 
-    gen = event_stream(app.state.chat_deps, _rag_plan(), placeholder.id, 0.0)
+    gen = event_stream(app.state.chat_deps, _rag_plan(), placeholder.id, 0.0, user.id)
     assert next(gen)[0] == "citations"
     events: list[str] = []
     for name, _payload in gen:
@@ -805,3 +805,110 @@ def test_正常完成后close不误伤已落库回答(chat_client, session) -> N
     assert row is not None
     assert row.is_active is True
     assert row.content != ""  # finalize 正文完好
+
+
+# ---------- ⑨ 工单 24：中断轮次配额回补（首 token 前中断对用户零成本，2026-11-01 口径裁决） ----------
+
+
+def test_首token前断连配额回补(chat_client, session) -> None:  # type: ignore[no-untyped-def]
+    """客户端在 citations 后、任何 token 前关闭生成器：日配额回补——重试不双扣。"""
+    from app.services.chat_stream import event_stream
+
+    user = make_user(session, "cutquota", "right-one", "member")
+    placeholder = _placeholder_pair(session, user)
+    counter = app.state.chat_deps.counter
+
+    counter.try_consume(user.id, 200)  # 模拟 api 层开流前已扣（chat.py 开流前恰扣一次）
+    gen = event_stream(app.state.chat_deps, _rag_plan(), placeholder.id, 0.0, user.id)
+    assert next(gen)[0] == "citations"
+    gen.close()  # token 前断连：GeneratorExit 在 citations 挂起点注入
+    assert counter._usage.get(user.id, (None, 0))[1] == 0  # 回补后零占用
+
+
+def test_已交付token后断连配额照计(chat_client, session) -> None:  # type: ignore[no-untyped-def]
+    """token 已产出后断连：计数保留——回补判据=是否交付过非空白回答内容。"""
+    from app.services.chat_stream import event_stream
+
+    user = make_user(session, "cutquota2", "right-one", "member")
+    placeholder = _placeholder_pair(session, user)
+    counter = app.state.chat_deps.counter
+
+    counter.try_consume(user.id, 200)
+    gen = event_stream(app.state.chat_deps, _rag_plan(), placeholder.id, 0.0, user.id)
+    assert next(gen)[0] == "citations"
+    assert next(gen)[0] == "token"  # 首个 token 已产出（用户已获得内容）
+    gen.close()
+    assert counter._usage.get(user.id, (None, 0))[1] == 1  # 照计不回补
+
+
+def test_上游故障零交付时配额回补(chat_client, session) -> None:  # type: ignore[no-untyped-def]
+    """首个 token 产出前上游故障（error 5001 收尾）：用户未获得内容——回补。"""
+    from app.core.llm import UpstreamError
+    from app.services.chat_stream import event_stream
+
+    user = make_user(session, "upfail", "right-one", "member")
+    placeholder = _placeholder_pair(session, user)
+    counter = app.state.chat_deps.counter
+
+    class _FailFastLLM(StubLLMProvider):
+        """首个 next 即抛上游故障：零 token 交付。"""
+
+        def chat_stream(self, messages, max_tokens):
+            raise UpstreamError("stub upstream down")
+
+    original = app.state.chat_deps.llm
+    app.state.chat_deps.llm = _FailFastLLM()
+    try:
+        counter.try_consume(user.id, 200)
+        gen = event_stream(app.state.chat_deps, _rag_plan(), placeholder.id, 0.0, user.id)
+        assert [name for name, _ in gen] == ["citations", "error"]
+        assert counter._usage.get(user.id, (None, 0))[1] == 0
+    finally:
+        app.state.chat_deps.llm = original
+
+
+def test_空正文零交付时配额回补(chat_client, session) -> None:  # type: ignore[no-untyped-def]
+    """LLM 流正常耗尽但零正文（无任何 token 交付）：按未交付回补。"""
+    from app.services.chat_stream import event_stream
+
+    user = make_user(session, "nocontent", "right-one", "member")
+    placeholder = _placeholder_pair(session, user)
+    counter = app.state.chat_deps.counter
+
+    class _EmptyStreamLLM(StubLLMProvider):
+        """零产出替身：流"正常结束"但无任何 token（同空正文防护测试形态）。"""
+
+        def chat_stream(self, messages, max_tokens):
+            return iter(())
+
+    original = app.state.chat_deps.llm
+    app.state.chat_deps.llm = _EmptyStreamLLM()
+    try:
+        counter.try_consume(user.id, 200)
+        gen = event_stream(app.state.chat_deps, _rag_plan(), placeholder.id, 0.0, user.id)
+        assert [name for name, _ in gen] == ["citations", "error"]
+        assert counter._usage.get(user.id, (None, 0))[1] == 0
+    finally:
+        app.state.chat_deps.llm = original
+
+
+def test_prepare上游失败未开流配额回补(chat_client, session, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """prepare 阶段上游故障（未开流 500 收尾，chat.py interrupt 后上抛）：用户未获得
+    任何内容——日配额回补，重试不双扣（工单 24 口径的开流前分支）。"""
+    import app.api.chat as chat_api
+    from app.core.llm import UpstreamError
+
+    make_user(session, "prepfail", "right-one", "member")
+    assert login_as(chat_client, "prepfail", "right-one").status_code == 200
+    u = session.scalars(select(User).where(User.username == "prepfail")).one()
+
+    def _boom(*args, **kwargs):
+        raise UpstreamError("stub prepare down")
+
+    monkeypatch.setattr(chat_api, "prepare_turn", _boom)
+    resp = post_chat(chat_client, QUESTION)
+    assert resp.status_code == 500
+    assert app.state.chat_deps.counter._usage.get(u.id, (None, 0))[1] == 0  # 回补后零占用
+    conversation = _conversation_row(session)
+    (_, assistant_row) = _messages(session, conversation.id)
+    assert assistant_row.is_active is False  # prepare 失败占位行已中断标记（CHAT-12）

@@ -297,6 +297,47 @@ def test_try_consume_按user隔离(backend: str, make_component) -> None:
     assert counter.try_consume(2, limit=1) is True
 
 
+# ---------- DailyCounter release（工单 24：首 token 前中断配额回补，两后端同契约） ----------
+
+
+def test_release_回补一次消费后可再消费(backend: str, make_component, clock, pg) -> None:
+    counter = make_component("counter")
+    assert counter.try_consume(42, limit=3) is True
+    counter.release(42)
+    assert [counter.try_consume(42, limit=3) for _ in range(3)] == [True, True, True]
+    assert counter.try_consume(42, limit=3) is False
+    if backend == "pg":
+        assert _daily_n(pg, 42) == 3  # 1 - 1(回补) + 3 = 3：回补释放的额度被同日重吃
+
+
+def test_release_重复回补不越零下界(backend: str, make_component, clock, pg) -> None:
+    counter = make_component("counter")
+    assert counter.try_consume(42, limit=3) is True
+    counter.release(42)
+    counter.release(42)  # 已回补至 0，再次回补不造负账
+    assert [counter.try_consume(42, limit=3) for _ in range(3)] == [True, True, True]
+    assert counter.try_consume(42, limit=3) is False
+    if backend == "pg":
+        assert _daily_n(pg, 42) == 3
+
+
+def test_release_无消费记录时回补零写入(backend: str, make_component, clock, pg) -> None:
+    counter = make_component("counter")
+    counter.release(42)  # 无行 no-op：pg 不创建行，memory 不造键
+    assert counter.try_consume(42, limit=3) is True
+    if backend == "pg":
+        assert _daily_n(pg, 42) == 1
+
+
+def test_release_跨日不回补昨日账(backend: str, make_component, clock: FakeClock) -> None:
+    counter = make_component("counter")
+    assert counter.try_consume(42, limit=3) is True
+    clock.advance(days=1)  # 昨日行今日计数已重置——回补 no-op
+    counter.release(42)
+    assert [counter.try_consume(42, limit=3) for _ in range(3)] == [True, True, True]
+    assert counter.try_consume(42, limit=3) is False
+
+
 # ---------- HitCounter 协议面（flush 用例走 session 事务，种子随测试回滚） ----------
 
 

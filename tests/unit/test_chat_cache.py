@@ -229,6 +229,35 @@ class TestDailyCounter:
         assert counter.try_consume(1, limit=1) is False
         assert counter.try_consume(2, limit=1) is True
 
+    # ---------- 工单 24：release 回补（首 token 前中断配额零成本） ----------
+
+    def test_release_回补一次消费后同日可再消费(self) -> None:
+        """release 回补 1 次消费：回补后同日可再消费一次（重试不双扣）。"""
+        counter = DailyCounter(_clock())
+        assert counter.try_consume(7, limit=3) is True
+        counter.release(7)
+        assert [counter.try_consume(7, limit=3) for _ in range(3)] == [True, True, True]
+        assert counter.try_consume(7, limit=3) is False
+
+    def test_release_未消费时回补不越零下界(self) -> None:
+        """未消费直接 release（防御）：计数保持 0，后续消费不受影响。"""
+        counter = DailyCounter(_clock())
+        counter.release(7)
+        assert counter.try_consume(7, limit=3) is True
+        assert counter.try_consume(7, limit=3) is True
+        assert counter.try_consume(7, limit=3) is True
+        assert counter.try_consume(7, limit=3) is False
+
+    def test_release_跨日不回补昨日账(self) -> None:
+        """昨日消费今日 release：今日计数已重置为 0，回补 no-op（不造负账）。"""
+        clock = _clock()
+        counter = DailyCounter(clock)
+        assert counter.try_consume(7, limit=3) is True
+        clock.advance(days=1)
+        counter.release(7)
+        assert [counter.try_consume(7, limit=3) for _ in range(3)] == [True, True, True]
+        assert counter.try_consume(7, limit=3) is False
+
 
 class TestHitCounterAggregate:
     def test_add_merges_duplicate_ids_and_flush_single_statement(self) -> None:

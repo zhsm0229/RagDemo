@@ -13,7 +13,7 @@ r"""进程内状态外置 PG 实现（工单 19）：精确缓存 / 每日限额
 
 from datetime import timedelta
 
-from sqlalchemy import Integer, bindparam, case, delete, or_, select, text, update
+from sqlalchemy import Integer, bindparam, case, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -161,6 +161,26 @@ class PgDailyCounter:
             row = db.execute(stmt).first()
             db.commit()
             return row is not None
+
+    def release(self, user_id: int) -> None:
+        """回补 1 次消费（工单 24）：首 token 前中断的轮次对用户零成本，重试不双扣。
+        仅当日行可回补（WHERE day == 当日）——跨日行今日计数已重置，回补 no-op；
+        无行零写入（不造负账）；GREATEST(n-1, 0) 防重复回补越下界。与 try_consume
+        同键 (scope='daily', ckey=str(user_id))，READ COMMITTED 行锁原子。"""
+        now = self._clock.now()
+        stmt = (
+            update(StateCounter)
+            .where(
+                StateCounter.scope == "daily",
+                StateCounter.ckey == str(user_id),
+                StateCounter.day == now.date(),
+            )
+            .values(n=func.greatest(StateCounter.n - 1, 0), updated_at=now)
+            .returning(StateCounter.n)
+        )
+        with self._session_factory() as db:
+            db.execute(stmt)
+            db.commit()
 
 
 class PgHitCounter:

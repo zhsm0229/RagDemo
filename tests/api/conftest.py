@@ -93,11 +93,12 @@ def chat_client(session, fake_clock, test_mode, monkeypatch):
     build_llm 走 test_mode Stub（默认产出非 JSON，解析失败静默跳过，不落数据）。"""
     from app.api.deps import get_db
     from app.main import app
-    from app.services import chat_stream, memory_extract
+    from app.services import chat_stream_branches, memory_extract
     from app.services.auth import default_limiter
 
     factory = sessionmaker(bind=session.connection(), expire_on_commit=False)
-    monkeypatch.setattr(chat_stream, "SessionLocal", factory)
+    # 工单 24 拆分后生成器短会话工厂在 branches 模块（门面 chat_stream 不再持有）
+    monkeypatch.setattr(chat_stream_branches, "SessionLocal", factory)
     monkeypatch.setattr(memory_extract, "SessionLocal", factory)
     default_limiter.reset()
     app.dependency_overrides[get_db] = lambda: session

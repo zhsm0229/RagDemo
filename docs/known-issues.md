@@ -48,9 +48,9 @@ SSE 问答/生成链路的服务端流式调用不做进程内重试：**重试�
 ①**真实基线 run 未跑**——本地 ragdemo-app 为烘焙旧镜像且 dev 库停 alembic 0009，解阻三步（重建 app 镜像→`alembic upgrade head`→对已入库 77 题题库发"基线-四指标-v1"）；②**§17.3 双轮对比未跑**——top_n 按型档代码已落地（topNMode 快照辨识），两轮执行手册见 `.scratch/metrics-balance/compare-runbook.md`；③**阈值未冻结**——spec §7 初值（0.85/0.60/0.80/0.80）待真实分布校准，冻结由用户拍板；④**judge 一致率观察**——LLM judge（DeepSeek temperature=0）首跑后按人工抽检 20% 核一致率，judgeError 率过高需评审裁决是否放宽严格口径（工单 05 遗留）；⑤agent 检索仍纯向量序（触发线：GPU TEI 后恢复精排）。
 
 ### 开放-11：code-review 遗留项（2026-11-01 两轴评审，v0.9.0...HEAD 22 提交；同日已全部立票）
-①**工单 14 中断重试额度未实施**——→ 已立票 **24**（口径已裁决：首 token 下发前中断回补该轮配额、已输出后中断照计）；
+①**工单 14 中断重试额度未实施**——→ **已关闭（票 24 实施，2026-11-01）**：release 回补语义两后端落地，口径=首 token 前中断/零交付收尾回补、已输出照计；
 ②**工单 18 失败原因触屏不可达**——→ 已立票 **25**；
-③**main.py（418 行）/scheduler.py（437 行）超 300 行红线**——→ 已立票 **26/27**（eval_synth 先例拆分）；
+③**main.py（418 行）/scheduler.py（437 行）超 300 行红线**——→ 已立票 **26/27**（eval_synth 先例拆分）；**chat_cache/chat_stream 因工单 24 增量触线已同步拆分**（hit_counter.py/chat_stream_branches.py，门面 re-export 导入路径不变）；
 ④**_startup_catchup memory 后端孤立 HitCounter**——→ 并入票 **26**（注入 lifespan deps 修复）。
 
 ## 二、登记裁决（待决策）

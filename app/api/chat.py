@@ -172,6 +172,7 @@ def chat_stream(
         )
     except UpstreamError:
         interrupt_turn(assistant_msg_id)  # CHAT-12：事务①已提交，不留 is_active=true 幽灵占位
+        deps.counter.release(user.id)  # 工单 24：未交付任何内容即收尾，配额回补（重试不双扣）
         raise  # 开流前失败：交全局 500 兜底（话术脱敏不变），事务随依赖 teardown 回滚
     if plan.kind in ("qa", "rag", "refuse"):
         # 长期记忆抽取（F-210 §3.2；A7：refuse 轮用户问题同样可能携带画像信息，如
@@ -188,7 +189,7 @@ def chat_stream(
         )
     db.commit()  # 终结 history/prepare 的 autobegin 读事务：连接还池，流期间不占连接
     return StreamingResponse(
-        _format_stream(event_stream(deps, plan, assistant_msg_id, perf_counter())),
+        _format_stream(event_stream(deps, plan, assistant_msg_id, perf_counter(), user.id)),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache"},
     )
