@@ -382,6 +382,7 @@ python tests/fixtures/tools/make_sample_docx.py   # 写出 tests/fixtures/sample
 | MinerU 2.5.4 pipeline 模型族 | PDF 版面/表格/OCR（CPU ONNX） | mineru==2.5.4（ModelScope 源） | modelscope | 待首次拉起后登记 | — | — |
 | deepseek-flash（云） | 生成 | DeepSeek-V4.1-Flash | api.deepseek.com（云 API，无本地工件） | 不适用（云侧） | 2026-09-29 | — |
 | 内网 LLM（预案，企业内网 vLLM 档） | 生成（合规=禁出网时） | Qwen2.5-32B-Instruct AWQ（选型依据见 deploy-requirements §3.2b/决策 17） | 待定 | 待定 | — | — |
+| TEI 基镜像（arm64 服务器） | embedding/rerank 运行时 | ragdemo-tei-cpu-arm64:cpu-1.9.2（自构建 `docker/tei-arm64.Dockerfile`，TEI v1.9.2 源码原生构建，Cargo.lock 钉版） | 本地构建 | 不适用（本地构建，模型走卷挂载） | 2026-11-01 | 完整推理冒烟归部署机窗口 |
 
 本地/部署机模型目录：`./data/tei-models/`（docker/download_models.py 预热，hf-mirror +
 HF_HUB_DISABLE_XET=1）。升级操作：改 download_models.py 钉的 revision → 重建索引（红线③）→

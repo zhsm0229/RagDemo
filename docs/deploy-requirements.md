@@ -33,7 +33,7 @@ LLM：DeepSeek 云 API（`api.deepseek.com`，OpenAI 兼容）。**本地不部�
 | GPU | 无（可选） | 入门卡 4-8GB 显存（T4/4060 级）跑 GPU 版 TEI | 重排 <1s/问（CPU 的 1/30），规范 §1.5 的 10s SLA 前提即 GPU TEI |
 | 网络 | 外网可达 `api.deepseek.com`（云轨必需） | — | 出网范围见合规确认单 |
 | 系统 | Linux 原生（Ubuntu 22.04+）优于 Windows+WSL2 | — | WSL2 多一层内存/IO 开销 |
-| CPU 架构 | **linux/amd64（x86_64）** | — | 仅 amd64：TEI 官方镜像无 arm64 manifest，arm64 服务器（含国产化 ARM 平台）`docker compose pull` 会直接失败——需换 TEI 基镜像（临时方案见 deploy/mac-setup/README.md §7，正解=自构建 arm64 基镜像后钉版），见 2026-10-31 评审 P2 |
+| CPU 架构 | **linux/amd64（x86_64）；arm64 服务器用自构建基镜像** | — | amd64 用官方 `cpu-1.9.2`（digest 钉版）；arm64 服务器（含国产化 ARM）官方镜像无 manifest——用自构建 `docker/tei-arm64.Dockerfile`（TEI v1.9.2 源码原生构建，去 sccache/MKL，ort/candle 特性，产物 `ragdemo-tei-cpu-arm64:cpu-1.9.2` 456MB 已实证 arm64/linux；模型沿用卷挂载口径不烘镜像，完整推理冒烟随部署机窗口复测）。历史临时方案（mac-setup §7 amd64 模拟）保留备用 |
 
 **Mini 主机 24G 内存 + 1TB 磁盘：可正常运行**，内存磁盘均远超需求；唯一要认真选的是 **CPU 型号**（N100 类 4 核小主机重排延迟 30-90s；7840HS/i5-1240P 级 8 核 15-40s；要商用级 10s 内响应须加 GPU TEI）。
 
