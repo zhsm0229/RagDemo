@@ -1,2 +1,9 @@
 # 前端源码统一 LF（修 W4 autocrlf 临时解的根：跨机器 checkout/提交不再产生 CRLF 混入）
 frontend/** text eol=lf
+
+# 二进制文件禁文本转换（工单 33 截图基线：PNG 魔数含 0d0a，text eol=lf 会剥 CR 损坏图像）
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.woff2 binary
