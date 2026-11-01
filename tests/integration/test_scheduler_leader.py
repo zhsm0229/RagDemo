@@ -13,12 +13,12 @@ from sqlalchemy.pool import NullPool
 
 import app.services.scheduler_leader as scheduler_module
 from app.core.config import get_settings
-from app.services.scheduler_leader import _LEADER_KEY
 from app.services.scheduler import (
     build_scheduler,
     release_leader,
     try_acquire_leader,
 )
+from app.services.scheduler_leader import _LEADER_KEY
 
 
 def _settings():

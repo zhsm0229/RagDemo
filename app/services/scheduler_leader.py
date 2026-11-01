@@ -16,6 +16,8 @@ from app.core.config import Settings
 logger = logging.getLogger(__name__)
 
 _LEADER_KEY = "ragdemo:scheduler:leader"
+_leader_engine = None  # 持锁连接的独立 NullPool 引擎（进程级，try_acquire/release 维护）
+_leader_conn = None  # 持锁连接本体：锁随连接存活，显式 close 才释放
 
 
 def try_acquire_leader(settings: Settings) -> bool:
