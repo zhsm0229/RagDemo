@@ -50,8 +50,7 @@ SSE 问答/生成链路的服务端流式调用不做进程内重试：**重试�
 ### 开放-11：code-review 遗留项（2026-11-01 两轴评审，v0.9.0...HEAD 22 提交；同日已全部立票）
 ①**工单 14 中断重试额度未实施**——→ **已关闭（票 24 实施，2026-11-01）**：release 回补语义两后端落地，口径=首 token 前中断/零交付收尾回补、已输出照计；
 ②**工单 18 失败原因触屏不可达**——→ **已关闭（票 25 实施，2026-11-01）**：失败标签原生 button 点击弹层（键盘/触屏可达），tooltip 悬停保留；
-③**main.py（418 行）/scheduler.py（437 行）超 300 行红线**——scheduler 部分**已关闭（票 27 实施，2026-11-01）**：拆分门面 158 行+三子模块（leader/impl/jobs 各 ≤300），导入路径经 re-export 不变；main.py 部分仍开放（票 26，涉共享文件待并行会话收口）；**chat_cache/chat_stream 因工单 24 增量触线已同步拆分**（hit_counter.py/chat_stream_branches.py，门面 re-export 导入路径不变）；
-④**_startup_catchup memory 后端孤立 HitCounter**——→ 并入票 **26**（注入 lifespan deps 修复）。
+③**main.py（418 行）/scheduler.py（437 行）超 300 行红线**——**已全部关闭（票 26/27 实施，2026-11-01）**：scheduler 拆门面 158 行+三子模块（leader/impl/jobs）；main 拆门面 180 行+deps_assembly/spa_static；行数全仓回线；④**catchup 孤立 HitCounter** 经拆分评审降级为触发线后置（`_build_chat_deps` 缺省自建是票面兼容契约，注入修复超"零变化"边界，pg 后端无此问题）——维持开放-11 ④登记；
 
 ## 二、登记裁决（待决策）
 
