@@ -4,8 +4,8 @@
 
 **Blocked by:** None (can start immediately)（但实施以设计评审放行为前置，票状态先行登记）。
 
-**Status:** needs-design（路线图阶段二 item 4，2026-11-01 code-review spec 轴缺口；范围以设计文档评审收口为准，避免提前建设）
+**Status:** needs-design（路线图阶段二 item 4，2026-11-01 code-review spec 轴缺口；**设计文档已落盘待评审**：`design/30-retrieval-tuning-design.md` v1——设计期盘点发现 threshold-scan 报告化已在位，范围收窄为检索测试参数对比，避免重复建设）
 
-- [ ] 设计文档落盘（现状锚点：threshold-scan 端点与检索测试页现有能力盘点 → 报告化/对比最小闭环 → 裁决点：报告存储位置、对比维度、是否入 app_settings 审计）
-- [ ] QC 评审 + PM 放行记录（.scratch/commercial-readiness/design/ 目录）
+- [x] 设计文档落盘（2026-11-01 v1：现状锚点核实→范围收窄至参数对比→后端可选参数面/deps 副本裁决/前端对比视图/测试清单/三裁决点）
+- [ ] QC 评审 + PM 放行记录（design/ 目录，走 18/19/20/21 同款流程）
 - [ ] 按设计 TDD 实施与本票验收（实施时另拆子票）
