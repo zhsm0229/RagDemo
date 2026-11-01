@@ -46,3 +46,7 @@ deploy/.DS_Store
 
 # 拨测脚本容器重启计数状态（check-and-alert.sh 运行态）
 .alert-restart-*
+
+# OS 垃圾（Windows 缩略图缓存/macOS Finder 元数据）
+Thumbs.db
+.DS_Store
