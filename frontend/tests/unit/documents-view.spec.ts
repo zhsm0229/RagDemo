@@ -213,6 +213,36 @@ describe('列表加载与渲染', () => {
     expect(content).toContain('\n') // 双行：友好原因与技术详情分行展示
   })
 
+  it('失败原因点击展开（工单 25，触屏可达）：点失败标签打开弹层含原因+详情；非失败行无点击行为', async () => {
+    backend.docs = [
+      docItem({
+        title: 'H触屏',
+        status: 'failed',
+        parseError: '解析失败：文档疑似扫描件或空文档',
+        parseErrorDetail: '有效字符低于红线（min(100, 10%)）',
+      }),
+      docItem({ title: 'I就绪对照', status: 'ready' }),
+    ]
+    const wrapper = await mountDocuments()
+    const rows = wrapper.findAll('.el-table__row')
+
+    // 点击失败标签 → 弹层打开（append-to-body：内容挂 document.body；el-dialog 自定义
+    // class 落点随版本在 overlay/面板间漂移，按先例以内容文本定位弹层面板）
+    const failTag = rows[0]!.find('.fail-tag')
+    expect(failTag.exists()).toBe(true)
+    await failTag.trigger('click')
+    await flushPromises()
+    const dialog = Array.from(document.body.querySelectorAll('.el-dialog')).find((d) =>
+      d.textContent!.includes('失败详情'),
+    )!
+    expect(dialog).toBeDefined()
+    expect(dialog.textContent).toContain('解析失败：文档疑似扫描件或空文档')
+    expect(dialog.textContent).toContain('有效字符低于红线（min(100, 10%)）')
+
+    // 关闭后非失败行无失败标签可点（对照行无 .fail-tag）
+    expect(rows[1]!.find('.fail-tag').exists()).toBe(false)
+  })
+
   it('降级解析标注：degraded 行标题旁渲染灰色"降级解析" tag（字段就绪即生效）', async () => {
     backend.docs = [docItem({ degraded: true })]
     const wrapper = await mountDocuments()

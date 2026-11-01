@@ -78,6 +78,14 @@ const uploadVisible = ref(false)
 const zipVisible = ref(false)
 const previewVisible = ref(false)
 const previewDoc = ref<DocumentItem | null>(null)
+/** 失败原因详情弹层（工单 25）：触屏无悬停，点击失败标签展开（tooltip 悬停保留） */
+const failDetailVisible = ref(false)
+const failDetailDoc = ref<DocumentItem | null>(null)
+
+function openFailDetail(row: DocumentItem): void {
+  failDetailDoc.value = row
+  failDetailVisible.value = true
+}
 
 /** 草稿审核视图激活态：来源=草稿 且 审核状态=待审核 的快捷筛选（工具栏按钮高亮） */
 const isDraftReview = computed(
@@ -449,7 +457,11 @@ function onZipImported(): void {
             placement="top"
             popper-class="parse-err-tip"
           >
-            <el-tag type="danger">✖ 失败(悬停看原因)</el-tag>
+            <!-- 工单 25：原生 button 承载点击（ElTag click 经组件 emit 在 jsdom
+                 不可靠，且 button 天然键盘/触屏可达）——tooltip 悬停保留 -->
+            <button type="button" class="fail-tag" @click="openFailDetail(row)">
+              <el-tag type="danger">✖ 失败(悬停看原因)</el-tag>
+            </button>
           </el-tooltip>
           <el-tag v-else type="info">◔ 排队中</el-tag>
           <el-tag
@@ -604,6 +616,22 @@ function onZipImported(): void {
       :target="previewDoc"
       @close="previewVisible = false"
     />
+    <!-- 失败原因详情弹层（工单 25）：触屏点击路径，双行文案与 tooltip 逐字同源 -->
+    <el-dialog
+      v-model="failDetailVisible"
+      append-to-body
+      width="480px"
+      class="fail-detail-dialog"
+      :title="'失败详情' + (failDetailDoc?.title ? '：' + failDetailDoc.title : '')"
+    >
+      <p class="fail-line">{{ failDetailDoc?.parseError || '解析失败' }}</p>
+      <p v-if="failDetailDoc?.parseErrorDetail" class="fail-line fail-detail">
+        {{ failDetailDoc.parseErrorDetail }}
+      </p>
+      <template #footer>
+        <el-button type="primary" @click="failDetailVisible = false">知道了</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -643,6 +671,26 @@ function onZipImported(): void {
 :global(.parse-err-tip) {
   white-space: pre-line;
   max-width: 460px;
+}
+/* 失败原因点击弹层（工单 25）：button 复位默认样式只留 tag 观感 + dialog 挂 body 双行 */
+.fail-tag {
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+  line-height: 1;
+}
+:global(.fail-detail-dialog) {
+  --el-dialog-width: min(480px, 92vw);
+}
+:global(.fail-detail-dialog .fail-line) {
+  white-space: pre-line;
+  word-break: break-all;
+  margin: 0 0 8px;
+}
+:global(.fail-detail-dialog .fail-detail) {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
 }
 .gap-tag {
   margin-left: 4px;
