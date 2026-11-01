@@ -557,6 +557,10 @@ SELECT hashtext('ragdemo:scheduler:leader');           -- 与 pg_locks.objid 对
 - **健康检查口径**：scheduler 副本复用 app 同款 healthz（无状态，容器内网消费，不发布
   端口）；compose < v2.24 的部署机退化为独立 project 文件（见覆盖文件头部注释）。
 - **部署验证检查单（归部署机复测窗口，工单 13 检查单延续；R6 归属）**：
+  0. **一键验收脚本（工单 32，2026-11-01）**：`bash deploy/verify-deployment.sh`（子检查
+     `--only crossview|golden|backup|arm64`、`--dry-run` 干跑、结果 JSON 归档
+     `deploy/verify-results/`）——先跑脚本出报告再按 1-4 逐项人工核（脚本覆盖不了的
+     多副本拓扑观察项仍走 1-4）；
   1. scale 拓扑起双 app 副本 + scheduler 副本，scheduler 日志恰一份"调度启动"，两
      app 副本日志各一份"主锁被持有"；
   2. `workers=2` 下问答/agent 全链路回归（PG 态正确：state_counters 共享读回、缓存

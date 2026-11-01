@@ -1,0 +1,11 @@
+{
+  "timestamp": "20261101T033157Z",
+  "only": "golden",
+  "arch": "arm64",
+  "steps": [
+    {"name": "crossview", "status": "SKIP", "detail": "--only golden 未选中"},
+    {"name": "golden", "status": "PASS", "detail": "全部通过——13 passed in 23.25s"},
+    {"name": "backup", "status": "SKIP", "detail": "--only golden 未选中"},
+    {"name": "arm64", "status": "SKIP", "detail": "--only golden 未选中"}
+  ]
+}
