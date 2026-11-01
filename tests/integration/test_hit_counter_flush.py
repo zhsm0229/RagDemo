@@ -19,7 +19,7 @@ import pytest
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, sessionmaker
 
-import app.services.scheduler as scheduler_mod
+import app.services.scheduler_jobs as scheduler_mod
 from app.core.clock import FakeClock
 from app.core.config import Settings
 from app.db.models import Chunk, Document, User

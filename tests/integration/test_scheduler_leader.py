@@ -11,10 +11,10 @@ build_scheduler 抢锁失败不 start 且 is_leader=False、抢锁成功则启�
 from sqlalchemy import create_engine
 from sqlalchemy.pool import NullPool
 
-import app.services.scheduler as scheduler_module
+import app.services.scheduler_leader as scheduler_module
 from app.core.config import get_settings
+from app.services.scheduler_leader import _LEADER_KEY
 from app.services.scheduler import (
-    _LEADER_KEY,
     build_scheduler,
     release_leader,
     try_acquire_leader,
