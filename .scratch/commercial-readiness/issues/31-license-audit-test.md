@@ -4,8 +4,9 @@
 
 **Blocked by:** None (can start immediately)。
 
-**Status:** ready-for-agent
+**Status:** done（2026-11-01 实施：3 用例全绿 + 漂移检测有效性验证）
 
-- [ ] tests/unit/test_license_audit.py：运行时依赖组（`pip install .` 口径，排除 dev-only 如 fpdf2——勿将 LGPL dev 依赖误报为分发义务）逐包 metadata license 断言 == 登记清单；psycopg=LGPL-3.0-only、mineru 容器侧 AGPL（清单行存在性）等关键行钉死；测试内注明"对账对象=design/10 清单，法律结论以顾问意见为准"
-- [ ] nomineru 档断言：`docker compose -f prod -f nomineru config` 干跑（或等价静态断言）无 mineru 服务且 app MINERU_BASE_URL 为空——Docker 不可用环境 skip（CI/本机双形态）
-- [ ] 全量回归绿；法律意见/签批工单 10/11 本身保持外部窗口（不变更其验收路径）
+- [x] tests/unit/test_license_audit.py：① 运行时依赖逐包 metadata 实测 == 登记清单（20 包双向对账——集合不一致也红；psycopg=LGPL-3.0-only 关键行钉死，⚠️ 注释随行）；② fpdf2（LGPL dev 依赖）不入运行时分发面钉死；③ nomineru 档 compose 静态 YAML 断言（mineru 挂 full profile 缺省不起 + app MINERU_BASE_URL 强制置空——免 Docker 依赖，CI/本机双形态稳定）
+- [x] 漂移检测有效性验证：模拟 psycopg 期望漂移 → 精确检出 ("MIT","LGPL-3.0-only") 并指名更新动作
+- [x] 边界声明入 docstring：只守技术事实清单不漂、不构成法律意见，工单 10/11 外部验收路径不变
+- [x] 全量回归绿（守账 3 passed / 0.04s）；make lint 通过
