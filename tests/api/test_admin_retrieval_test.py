@@ -247,7 +247,7 @@ def test_命中结构_qa命中与阈值回显(rt_client, session):
     body = resp.json()
     assert body["code"] == 0 and body["message"] == "ok"
     data = body["data"]
-    assert set(data) == {"qa", "docs", "thresholds"}
+    assert set(data) == {"qa", "docs", "thresholds", "params", "degraded"}  # 工单 30 契约扩展
     settings = get_settings()
     assert data["thresholds"] == {"qa": settings.qa_threshold, "refuse": settings.refuse_threshold}
 
@@ -451,3 +451,171 @@ def test_部门编码枚举外_422(rt_client, session):
     resp = _post_test(rt_client, "任意问题", "finance")
     assert resp.status_code == 422
     assert resp.json()["code"] == ERR_PARAM_INVALID
+
+
+# ---------- ⑥ 工单 30：参数对比（可选参数面 / 回显 / 熔断降级标注） ----------
+
+
+def _post_test_params(rt_client, question: str, dept_code: str, **params):
+    """⑥ 统一入口扩展：新参数逐键透传（None 不传，等价缺省形态）。"""
+    payload = {"question": question, "deptCode": dept_code}
+    payload.update({k: v for k, v in params.items() if v is not None})
+    return rt_client.post("/api/admin/retrieval-test", json=payload)
+
+
+def test_参数对比_缺省None回显装配缺省且行为同现状(rt_client, session):
+    """⑥ 缺省（全 None 不传）：params 回显装配缺省读数、degraded=false，
+    qa/docs 与既有断言同形态——回归红线"缺省=现状逐字节一致"。"""
+    admin_login(rt_client, session)
+    embedder = StubEmbedder()
+    fx = _seed_hit_fixture(session, embedder)
+    _install_weighted_reranker(
+        rt_client,
+        session,
+        embedder,
+        fx["question"],
+        [fx["ids"]["service"], fx["ids"]["all"]],
+        {c.id: 4.0 for c, _, _ in fx["chunks"]},
+    )
+    resp = _post_test_params(rt_client, fx["question"], "service")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert set(data) == {"qa", "docs", "thresholds", "params", "degraded"}
+    settings = get_settings()
+    assert data["thresholds"] == {"qa": settings.qa_threshold, "refuse": settings.refuse_threshold}
+    assert data["params"] == {
+        "topK": settings.retriever_top_k,
+        "topN": settings.rerank_top_n,
+        "efSearch": settings.hnsw_ef_search,
+        "chunkDedupSim": settings.chunk_dedup_sim,
+    }
+    assert data["degraded"] is False
+
+
+def test_参数对比_qa阈值调档直答翻转(rt_client, session):
+    """⑥ qaThreshold 档位生效（R6；stub 指纹空间边界注记：同文余弦恰 1.0、变体余弦
+    ≈0——"命中/翻走"两端在 stub 下不可双测，联动行为语义由 refuse 档用例承载，本用例
+    钉档位传递与 qa/docs 互不短路）：档 0.99 时 qa 命中保持（1.0 ≥ 0.99）且 thresholds.qa
+    回显生效值，docs 检索路径照常。"""
+    admin_login(rt_client, session)
+    embedder = StubEmbedder()
+    fx = _seed_hit_fixture(session, embedder)
+    _install_weighted_reranker(
+        rt_client,
+        session,
+        embedder,
+        fx["question"],
+        [fx["ids"]["service"], fx["ids"]["all"]],
+        {c.id: 4.0 for c, _, _ in fx["chunks"]},
+    )
+    high = _post_test_params(rt_client, fx["question"], "service", qaThreshold=0.99)
+    data = high.json()["data"]
+    assert data["qa"] is not None  # 同文余弦 1.0 ≥ 0.99
+    assert data["qa"]["thresholdPassed"] is True
+    assert data["thresholds"]["qa"] == 0.99  # 回显生效值（装配值 0.85 被覆盖）
+    assert len(data["docs"]) == 2  # 互不短路：qa 命中不截断 docs 路径（①回归语义）
+
+
+def test_参数对比_refuse阈值调高拒答标记翻转(rt_client, session):
+    """⑥ refuseThreshold 0.99（高于全部 rerank 分）→ 命中块 thresholdPassed 全 false
+    （线上会拒答的形态）；低档 0.01 → 全 true。"""
+    admin_login(rt_client, session)
+    embedder = StubEmbedder()
+    fx = _seed_hit_fixture(session, embedder)
+    _install_weighted_reranker(
+        rt_client,
+        session,
+        embedder,
+        fx["question"],
+        [fx["ids"]["service"], fx["ids"]["all"]],
+        {c.id: 4.0 for c, _, _ in fx["chunks"]},
+    )
+    high = _post_test_params(rt_client, fx["question"], "service", refuseThreshold=0.99)
+    assert [d["thresholdPassed"] for d in high.json()["data"]["docs"]] == [False, False]
+    low = _post_test_params(rt_client, fx["question"], "service", refuseThreshold=0.01)
+    assert [d["thresholdPassed"] for d in low.json()["data"]["docs"]] == [True, True]
+    assert low.json()["data"]["thresholds"]["refuse"] == 0.01
+
+
+def test_参数对比_topK截断候选(rt_client, session):
+    """⑥ topK=1 → 召回候选截到 1，rerank/fold 后 docs 至多 1 块（候选数联动）；
+    不装权重 reranker（StubReranker weights 与召回数等长校验，截断档不适用对位注入）。"""
+    admin_login(rt_client, session)
+    embedder = StubEmbedder()
+    fx = _seed_hit_fixture(session, embedder)
+    resp = _post_test_params(rt_client, fx["question"], "service", topK=1)
+    assert len(resp.json()["data"]["docs"]) == 1
+    assert resp.json()["data"]["params"]["topK"] == 1
+
+
+def test_参数对比_topN边界与efSearch回显(rt_client, session):
+    """⑥ topN=1 → docs 至多 1 块（fold 上限联动）；efSearch 仅回显（Stub 向量空间
+    下 ef 行为差异属真 HNSW，回显断言+设计注记口径）。"""
+    admin_login(rt_client, session)
+    embedder = StubEmbedder()
+    fx = _seed_hit_fixture(session, embedder)
+    _install_weighted_reranker(
+        rt_client,
+        session,
+        embedder,
+        fx["question"],
+        [fx["ids"]["service"], fx["ids"]["all"]],
+        {c.id: 4.0 for c, _, _ in fx["chunks"]},
+    )
+    resp = _post_test_params(rt_client, fx["question"], "service", topN=1, efSearch=64)
+    data = resp.json()["data"]
+    assert len(data["docs"]) == 1
+    assert data["params"]["efSearch"] == 64
+    assert data["params"]["topN"] == 1
+
+
+def test_参数对比_越界字段级422(rt_client, session):
+    """⑥ 五参数越界 → 422/1003 字段级（model_copy 跳过校验，范围全在请求层 validators）。"""
+    admin_login(rt_client, session)
+    for payload in (
+        {"qaThreshold": 1.5},
+        {"qaThreshold": -0.1},
+        {"refuseThreshold": 2},
+        {"topK": 0},
+        {"topK": 51},
+        {"topN": 21},
+        {"efSearch": 0},
+        {"efSearch": 201},
+    ):
+        resp = rt_client.post(
+            "/api/admin/retrieval-test",
+            json={"question": "任意问题", "deptCode": "service", **payload},
+        )
+        assert resp.status_code == 422, payload
+        assert resp.json()["code"] == ERR_PARAM_INVALID
+
+
+def test_参数对比_熔断开路degraded标注(rt_client, session):
+    """⑥ 熔断 open 态：degraded=true、docs 仍出（向量序兜底）——对比结论不可信的
+    标注口径（R6）。"""
+    from app.core.circuit_breaker import CircuitBreaker, set_rerank_breaker
+    from app.core.clock import FakeClock
+
+    admin_login(rt_client, session)
+    embedder = StubEmbedder()
+    fx = _seed_hit_fixture(session, embedder)
+    _install_weighted_reranker(
+        rt_client,
+        session,
+        embedder,
+        fx["question"],
+        [fx["ids"]["service"], fx["ids"]["all"]],
+        {c.id: 4.0 for c, _, _ in fx["chunks"]},
+    )
+    breaker = CircuitBreaker(FakeClock())
+    for _ in range(3):
+        breaker.record_failure()  # 连续 3 次失败 → open（chat 链路同款阈值）
+    set_rerank_breaker(breaker)
+    try:
+        resp = _post_test_params(rt_client, fx["question"], "service")
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["degraded"] is True
+        assert len(data["docs"]) >= 1  # 向量序兜底照出
+    finally:
+        set_rerank_breaker(None)

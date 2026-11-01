@@ -838,6 +838,16 @@ export interface components {
              * @enum {string}
              */
             deptCode: "service" | "hr" | "all";
+            /** Qathreshold */
+            qaThreshold?: number;
+            /** Refusethreshold */
+            refuseThreshold?: number;
+            /** Topk */
+            topK?: number;
+            /** Topn */
+            topN?: number;
+            /** Efsearch */
+            efSearch?: number;
         };
         /**
          * ToggleStatusBody

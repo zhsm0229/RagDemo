@@ -78,6 +78,8 @@ const hitResult: RetrievalTestResult = {
     },
   ],
   thresholds: { qa: 0.85, refuse: 0.55 },
+  params: { topK: 20, topN: 5, efSearch: 40, chunkDedupSim: 0.98 },
+  degraded: false,
 }
 
 const backend = {
@@ -219,7 +221,7 @@ describe('命中结果渲染（两套分数分列，W3 红线）', () => {
   })
 
   it('qa=null 且 docs 非空：展示"无超阈值命中 → 走文档检索链路"，文档表照常渲染', async () => {
-    backend.result = { qa: null, docs: hitResult.docs, thresholds: hitResult.thresholds }
+    backend.result = { ...hitResult, qa: null }
     const wrapper = await mountView()
     await askAndRun(wrapper, '保修期多久')
     expect(wrapper.text()).toContain('无超阈值命中 → 走文档检索链路')
@@ -227,7 +229,7 @@ describe('命中结果渲染（两套分数分列，W3 红线）', () => {
   })
 
   it('全空结果（qa=null 且 docs=[]）：空态引导换问法/调部门范围（§8.5）', async () => {
-    backend.result = { qa: null, docs: [], thresholds: hitResult.thresholds }
+    backend.result = { ...hitResult, qa: null, docs: [] }
     const wrapper = await mountView()
     await askAndRun(wrapper, '完全不相关的问题')
     expect(wrapper.text()).toContain('未命中任何问答对或文档块')
@@ -366,5 +368,93 @@ describe('零召回块清单折叠区（W5 F-1011 块级下钻）', () => {
     ])
     expect(wrapper.text()).toContain('客服手册 2023 版')
     expect(wrapper.find('.err-inline').exists()).toBe(false)
+  })
+})
+
+// ---------- 工单 30：参数对比模式（缺省关=现状零变化；串行/逐档失败态/降级标注） ----------
+
+describe('参数对比模式（工单 30）', () => {
+  it('缺省关：不渲染档位输入行与对比按钮，单次视图零变化（回归红线）', async () => {
+    const wrapper = await mountView()
+    expect(wrapper.text()).not.toContain('档位 A')
+    expect(wrapper.findAll('button').some((b) => b.text().includes('对比测试'))).toBe(false)
+  })
+
+  it('开对比模式：渲染档位输入行与对比测试按钮；加/减档位在 2-3 间伸缩', async () => {
+    const wrapper = await mountView()
+    await wrapper.find('.compare-switch input').setValue(true)
+    expect(wrapper.text()).toContain('档位 A')
+    expect(wrapper.text()).toContain('档位 B')
+    const addBtn = wrapper.findAll('button').find((b) => b.text().includes('+ 加档位'))!
+    await addBtn.trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('档位 C')
+    const decBtn = wrapper.findAll('button').find((b) => b.text().includes('- 减档位'))!
+    await decBtn.trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('档位 C')
+  })
+
+  it('对比测试串行两档：请求序 A→B、逐档渲染结果卡（标题含档位参数读数）', async () => {
+    const wrapper = await mountView()
+    await wrapper.find('.compare-switch input').setValue(true)
+    await wrapper.find('input[placeholder^="输入测试问题"]').setValue('保修期多久')
+    const calls: string[] = []
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      const resp = await routeFetch(url, init)
+      if (url === '/api/admin/retrieval-test') calls.push(String(init?.body ?? ''))
+      return resp
+    })
+    await wrapper
+      .findAll('button')
+      .find((b) => b.text().includes('对比测试'))!
+      .trigger('click')
+    await flushPromises()
+    expect(calls).toHaveLength(2) // 串行两档两请求
+    const cards = wrapper.findAll('.result-card')
+    expect(cards).toHaveLength(2)
+    expect(cards[0]!.text()).toContain('档位 A（qa 0.85')
+    expect(cards[1]!.text()).toContain('档位 B（qa 0.85')
+  })
+
+  it('单档失败不阻塞他档：A 档 422 错误行、B 档结果卡照常渲染（R5 逐档失败态）', async () => {
+    const wrapper = await mountView()
+    await wrapper.find('.compare-switch input').setValue(true)
+    await wrapper.find('input[placeholder^="输入测试问题"]').setValue('保修期多久')
+    let firstCall = true
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/admin/retrieval-test' && firstCall) {
+        firstCall = false // 仅第一档 422，第二档走正常应答（R5 逐档失败态）
+        return makeResponse(422, { code: 1003, message: 'qa 阈值须在 0-1 之间', data: null })
+      }
+      return routeFetch(url, init)
+    })
+    await wrapper
+      .findAll('button')
+      .find((b) => b.text().includes('对比测试'))!
+      .trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('档位 A：qa 阈值须在 0-1 之间')
+    const cards = wrapper.findAll('.result-card')
+    expect(cards).toHaveLength(1) // B 档照常
+    expect(cards[0]!.text()).toContain('档位 B')
+  })
+
+  it('degraded 档渲染熔断警示条（对比结论不可信标注，R6）', async () => {
+    const wrapper = await mountView()
+    await wrapper.find('.compare-switch input').setValue(true)
+    await wrapper.find('input[placeholder^="输入测试问题"]').setValue('保修期多久')
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === '/api/admin/retrieval-test') {
+        return okEnvelope({ ...hitResult, degraded: true })
+      }
+      return routeFetch(url, init)
+    })
+    await wrapper
+      .findAll('button')
+      .find((b) => b.text().includes('对比测试'))!
+      .trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('对比结论不可信')
   })
 })

@@ -44,6 +44,10 @@ export interface RetrievalTestResult {
   docs: RetrievalTestDoc[]
   /** 当前生效阈值：qa=问答对阈值 / refuse=拒答阈值（config 缺省 0.85 / 0.55） */
   thresholds: { qa: number; refuse: number }
+  /** 本次实际生效参数（工单 30）：装配值或请求覆盖值；chunkDedupSim 只回显不开放 */
+  params: { topK: number; topN: number; efSearch: number; chunkDedupSim: number }
+  /** rerank 熔断 open/half_open=true——rerankScore 为余弦口径，对比结论不可信 */
+  degraded: boolean
 }
 
 export function runRetrievalTest(body: RetrievalTestRequest): Promise<RetrievalTestResult> {
